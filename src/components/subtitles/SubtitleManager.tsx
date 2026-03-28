@@ -1,40 +1,40 @@
 /**
  * @file SubtitleManager.tsx
- * @description UI panel for managing subtitles: generation status, list editing, and timeline linkage.
+ * @description UI panel for generating, editing, and reviewing subtitle segments.
  */
 
-import React from 'react'
-import type { SubtitleSegment } from '../../subtitles/types'
+import React, { useState } from 'react'
+import type {
+  SubtitleGenerationOptions,
+  SubtitleSegment,
+} from '../../subtitles/types'
 
-/**
- * @description Supported subtitle generation status values.
- */
 export type SubtitleStatus = 'idle' | 'processing' | 'success' | 'error'
 
-/**
- * @description Props for the SubtitleManager component.
- */
 interface SubtitleManagerProps {
-  /** Current list of subtitle segments. */
   segments: SubtitleSegment[]
-  /** Status of the (mocked) transcription task. */
   status: SubtitleStatus
-  /** Whether a video is currently loaded and ready. */
   hasVideo: boolean
-  /** Trigger mock subtitle generation for the current video. */
-  onGenerateMock: () => void
-  /** Update a single subtitle row. */
+  errorMessage?: string | null
+  canExport: boolean
+  onGenerateAuto: (options: SubtitleGenerationOptions) => void
+  onExportSrt: () => void
+  onExportVtt: () => void
   onUpdateSegment: (segment: SubtitleSegment) => void
-  /** Delete a subtitle row by its id. */
   onDeleteSegment: (id: string) => void
-  /** Seek the video and timeline to a target time in seconds. */
   onSeekTo: (timeInSeconds: number) => void
 }
 
-/**
- * @description Format seconds into a compact "MM:SS" string for display.
- * @param seconds - Time value in seconds.
- */
+const MODEL_OPTIONS = [
+  { value: 'tiny', label: 'tiny' },
+  { value: 'tiny.en', label: 'tiny.en' },
+  { value: 'base', label: 'base' },
+  { value: 'base.en', label: 'base.en' },
+  { value: 'small', label: 'small' },
+  { value: 'medium', label: 'medium' },
+  { value: 'large-v3', label: 'large-v3' },
+]
+
 function formatDisplayTime(seconds: number): string {
   if (Number.isNaN(seconds) || seconds < 0) return '00:00'
   const whole = Math.floor(seconds)
@@ -44,14 +44,10 @@ function formatDisplayTime(seconds: number): string {
   return `${pad(mm)}:${pad(ss)}`
 }
 
-/**
- * @description Determine UI label text based on status.
- * @param status - Current subtitle status.
- */
 function statusLabel(status: SubtitleStatus): string {
   switch (status) {
     case 'processing':
-      return 'Generating subtitles (mock)…'
+      return 'Generating subtitles...'
     case 'success':
       return 'Subtitles ready'
     case 'error':
@@ -61,10 +57,6 @@ function statusLabel(status: SubtitleStatus): string {
   }
 }
 
-/**
- * @description Determine badge color classes based on status and theme.
- * @param status - Current subtitle status.
- */
 function statusBadgeClass(status: SubtitleStatus): string {
   if (status === 'processing') {
     return 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200'
@@ -78,30 +70,34 @@ function statusBadgeClass(status: SubtitleStatus): string {
   return 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200'
 }
 
-/**
- * @description Subtitles management panel with generation button, status, and editable list.
- */
 export function SubtitleManager({
   segments,
   status,
   hasVideo,
-  onGenerateMock,
+  errorMessage,
+  canExport,
+  onGenerateAuto,
+  onExportSrt,
+  onExportVtt,
   onUpdateSegment,
   onDeleteSegment,
   onSeekTo,
 }: SubtitleManagerProps): JSX.Element {
+  const [model, setModel] = useState<string>('tiny.en')
+  const [language, setLanguage] = useState<string>('en')
   const disabledGenerate = !hasVideo || status === 'processing'
+  const disabledExport = !canExport || segments.length === 0
 
   return (
     <section className="mx-auto mt-2 flex w-full max-w-6xl flex-col rounded-xl border border-slate-200 bg-white p-4 text-xs text-slate-700 shadow-sm dark:border-slate-800 dark:bg-slate-950/80 dark:text-slate-200">
-      <header className="mb-3 flex flex-wrap items-center justify-between gap-2">
+      <header className="mb-3 flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-sm font-medium text-slate-900 dark:text-slate-100">
-            Subtitles (beta)
+            Auto subtitles
           </h2>
           <p className="text-[11px] text-slate-500 dark:text-slate-400">
-            Generate example subtitles for the current video, edit text, and
-            jump the playhead to any subtitle time.
+            Generate subtitle segments with a local Faster-Whisper service, then
+            edit text and jump the playhead to each cue.
           </p>
         </div>
 
@@ -115,25 +111,76 @@ export function SubtitleManager({
           </span>
           <button
             type="button"
-            onClick={onGenerateMock}
+            onClick={() => onGenerateAuto({ model, language })}
             disabled={disabledGenerate}
             className="rounded-md bg-sky-600 px-3 py-1 text-[11px] font-medium text-slate-50 shadow-sm transition-colors hover:bg-sky-500 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500 dark:disabled:bg-slate-900 dark:disabled:text-slate-500"
           >
-            Generate mock subtitles
+            Generate subtitles
+          </button>
+          <button
+            type="button"
+            onClick={onExportSrt}
+            disabled={disabledExport}
+            className="rounded-md border border-slate-300 bg-white px-3 py-1 text-[11px] font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 dark:disabled:border-slate-800 dark:disabled:bg-slate-900 dark:disabled:text-slate-500"
+          >
+            Export .srt
+          </button>
+          <button
+            type="button"
+            onClick={onExportVtt}
+            disabled={disabledExport}
+            className="rounded-md border border-slate-300 bg-white px-3 py-1 text-[11px] font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 dark:disabled:border-slate-800 dark:disabled:bg-slate-900 dark:disabled:text-slate-500"
+          >
+            Export .vtt
           </button>
         </div>
       </header>
 
+      <div className="mb-3 grid gap-3 rounded-lg border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-900/60 md:grid-cols-[minmax(0,180px)_minmax(0,140px)_1fr]">
+        <label className="flex flex-col gap-1">
+          <span className="text-[10px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">
+            Model
+          </span>
+          <select
+            value={model}
+            onChange={(event) => setModel(event.target.value)}
+            className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-[11px] text-slate-800 outline-none ring-offset-2 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/30 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+          >
+            {MODEL_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-[10px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">
+            Language
+          </span>
+          <input
+            value={language}
+            onChange={(event) => setLanguage(event.target.value.trim() || 'auto')}
+            placeholder="auto or en"
+            className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-[11px] text-slate-800 outline-none ring-offset-2 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/30 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+          />
+        </label>
+
+        <div className="text-[11px] leading-snug text-slate-500 dark:text-slate-400">
+          The editor sends your selected local video to a local subtitle API at
+          `http://localhost:8787`, which runs a Python `faster-whisper` worker
+          and returns subtitle segments as JSON.
+        </div>
+      </div>
+
       {!hasVideo ? (
         <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50/70 p-3 text-[11px] text-slate-500 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-400">
-          Upload a video above to enable automatic subtitles. This panel will
-          show a mocked transcription result for demo purposes only.
+          Upload a video above to enable subtitle generation.
         </div>
       ) : segments.length === 0 ? (
         <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50/70 p-3 text-[11px] text-slate-500 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-400">
-          No subtitles yet. Click{' '}
-          <span className="font-semibold">Generate mock subtitles</span> to
-          simulate a transcription service and populate this list.
+          No subtitles yet. Start the local Faster-Whisper API, then click
+          <span className="font-semibold"> Generate subtitles</span>.
         </div>
       ) : (
         <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
@@ -145,7 +192,7 @@ export function SubtitleManager({
               <div className="mb-1 flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2 text-[10px] text-slate-500 dark:text-slate-400">
                   <span className="rounded bg-slate-200 px-1.5 py-0.5 font-mono text-[10px] text-slate-800 dark:bg-slate-800 dark:text-slate-100">
-                    {formatDisplayTime(segment.start)} –{' '}
+                    {formatDisplayTime(segment.start)} -{' '}
                     {formatDisplayTime(segment.end)}
                   </span>
                   <span className="hidden text-[10px] text-slate-400 md:inline">
@@ -175,16 +222,24 @@ export function SubtitleManager({
                   onUpdateSegment({ ...segment, text: event.target.value })
                 }
                 className="h-14 w-full resize-none rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-800 outline-none ring-offset-2 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/30 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:focus:border-sky-500"
-                placeholder="Subtitle text…"
+                placeholder="Subtitle text..."
               />
             </article>
           ))}
         </div>
       )}
 
+      {errorMessage ? (
+        <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300">
+          {errorMessage}
+        </div>
+      ) : null}
+
       <footer className="mt-3 border-t border-slate-200 pt-2 text-[10px] leading-snug text-slate-500 dark:border-slate-800 dark:text-slate-400">
-        This is a frontend-only mock. connect this panel to transcription backend (e.g. Whisper or other ASR) and map the returned
-        segments to real subtitle tracks and timeline edits.(!!!)
+        Install Python requirements from `requirements-faster-whisper.txt`, run
+        `npm run subtitles:server`, and keep the API running while you generate
+        subtitles from the editor. After editing, click `Export .srt` or
+        `Export .vtt` to download the subtitle file.
       </footer>
     </section>
   )

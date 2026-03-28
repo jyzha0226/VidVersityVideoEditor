@@ -16,3 +16,13 @@ export interface SubtitleSegment {
   /** Human-readable subtitle text to display on screen. */
   text: string
 }
+
+/**
+ * @description User-controlled settings for automatic subtitle generation.
+ */
+export interface SubtitleGenerationOptions {
+  /** Faster-Whisper model size or variant. */
+  model: string
+  /** Optional spoken language hint (for example "en" or "auto"). */
+  language: string
+}
