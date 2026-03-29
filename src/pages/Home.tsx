@@ -1,483 +1,322 @@
-/**
- * @file Home.tsx
- * @description Main landing page showing a VidVersity-style editor layout:
- * top video preview, bottom-left editing tools, bottom-right AI suggestions panel,
- * and a subtitles management panel with mocked transcription and WebVTT injection.
- */
+import React, { useMemo, useRef, useState } from 'react'
+import {
+  Bot,
+  Folder,
+  LayoutGrid,
+  Scissors,
+  Search,
+  Settings,
+  Upload,
+} from 'lucide-react'
 
-import React, {
-  useEffect,
-  useImperativeHandle,
-  useRef,
-  useState,
-  forwardRef,
-} from 'react'
-import AISidebar from '../components/editor/AISidebar'
-import { TimelinePanel } from '../components/timeline/TimelinePanel'
-import { useTheme } from '../theme/ThemeProvider'
-import type { SubtitleSegment } from '../subtitles/types'
-import { SubtitleManager } from '../components/subtitles/SubtitleManager'
-
-/**
- * @description Public methods exposed by the video preview panel to control playback.
- */
-export interface VideoPreviewHandle {
-  /**
-   * @description Seek video to a specific time in seconds and pause.
-   */
-  seekTo: (timeInSeconds: number) => void
-  /**
-   * @description Get the current playback time in seconds.
-   */
-  getCurrentTime: () => number
+interface TrimmedClip {
+  id: string
+  start: number
+  end: number
 }
 
-/**
- * @description Props for the VideoPreviewPanel component.
- */
-interface VideoPreviewPanelProps {
-  /**
-   * @description Called when video metadata is loaded, provides total duration in seconds.
-   */
-  onLoadedMetadata: (durationInSeconds: number) => void
-  /**
-   * @description Called whenever current playback time changes.
-   */
-  onTimeUpdate: (timeInSeconds: number) => void
-  /**
-   * @description Subtitles to be rendered as a WebVTT track on the video element.
-   */
-  subtitles: SubtitleSegment[]
+function formatTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '00:00'
+  const total = Math.floor(seconds)
+  const mm = Math.floor(total / 60)
+  const ss = total % 60
+  return `${mm.toString().padStart(2, '0')}:${ss.toString().padStart(2, '0')}`
 }
 
-/**
- * @description Format a floating-point second value to a WebVTT-compatible timestamp.
- * @param seconds - Time in seconds.
- */
-function formatVttTime(seconds: number): string {
-  const totalMs = Math.max(0, Math.floor(seconds * 1000))
-  const hours = Math.floor(totalMs / 3_600_000)
-  const minutes = Math.floor((totalMs % 3_600_000) / 60_000)
-  const secs = Math.floor((totalMs % 60_000) / 1_000)
-  const ms = totalMs % 1_000
-  const pad = (n: number, size: number) => n.toString().padStart(size, '0')
-  return `${pad(hours, 2)}:${pad(minutes, 2)}:${pad(secs, 2)}.${pad(ms, 3)}`
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value))
 }
 
-/**
- * @description Build a minimal WebVTT file content from a list of subtitle segments.
- * @param segments - Subtitle segments to convert.
- */
-function buildVttFromSubtitles(segments: SubtitleSegment[]): string {
-  const header = 'WEBVTT\n\n'
-  const body = segments
-    .map((segment, index) => {
-      const start = formatVttTime(segment.start)
-      const end = formatVttTime(segment.end)
-      const text = segment.text && segment.text.trim().length > 0 ? segment.text : '...'
-      return `${index + 1}\n${start} --> ${end}\n${text}\n`
-    })
-    .join('\n')
-  return header + body
-}
-
-/**
- * @description Video preview panel with upload and basic playback controls.
- * Exposes an imperative handle so parent components can seek programmatically.
- * Also accepts subtitles and injects them as a WebVTT track into the video element.
- */
-const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>(
-  function VideoPreviewPanelInner(
-    { onLoadedMetadata, onTimeUpdate, subtitles }: VideoPreviewPanelProps,
-    ref,
-  ): JSX.Element {
-    const [videoUrl, setVideoUrl] = useState<string | null>(null)
-    const [isPlaying, setIsPlaying] = useState(false)
-    const fileInputRef = useRef<HTMLInputElement | null>(null)
-    const videoRef = useRef<HTMLVideoElement | null>(null)
-    const subtitleTrackUrlRef = useRef<string | null>(null)
-    const [hasActiveSubtitles, setHasActiveSubtitles] = useState(false)
-
-    /**
-     * @description Cleanup previously created object URLs to avoid memory leaks.
-     */
-    useEffect(() => {
-      return () => {
-        if (videoUrl) {
-          URL.revokeObjectURL(videoUrl)
-        }
-        if (subtitleTrackUrlRef.current) {
-          URL.revokeObjectURL(subtitleTrackUrlRef.current)
-          subtitleTrackUrlRef.current = null
-        }
-      }
-    }, [videoUrl])
-
-    /**
-     * @description Rebuild WebVTT subtitle track whenever subtitles change.
-     */
-    useEffect(() => {
-      if (!subtitles || subtitles.length === 0) {
-        if (subtitleTrackUrlRef.current) {
-          URL.revokeObjectURL(subtitleTrackUrlRef.current)
-          subtitleTrackUrlRef.current = null
-        }
-        setHasActiveSubtitles(false)
-        return
-      }
-
-      const vttText = buildVttFromSubtitles(subtitles)
-      const blob = new Blob([vttText], { type: 'text/vtt' })
-      const url = URL.createObjectURL(blob)
-
-      if (subtitleTrackUrlRef.current) {
-        URL.revokeObjectURL(subtitleTrackUrlRef.current)
-      }
-      subtitleTrackUrlRef.current = url
-      setHasActiveSubtitles(true)
-
-      return () => {
-        if (subtitleTrackUrlRef.current) {
-          URL.revokeObjectURL(subtitleTrackUrlRef.current)
-          subtitleTrackUrlRef.current = null
-        }
-      }
-    }, [subtitles])
-
-    /**
-     * @description Expose playhead control methods to parent component.
-     */
-    useImperativeHandle(
-      ref,
-      () => ({
-        seekTo: (timeInSeconds: number) => {
-          if (videoRef.current) {
-            const safeTime = Math.max(0, timeInSeconds)
-            videoRef.current.currentTime = safeTime
-            videoRef.current.pause()
-            setIsPlaying(false)
-          }
-        },
-        getCurrentTime: () => {
-          return videoRef.current?.currentTime ?? 0
-        },
-      }),
-      [],
-    )
-
-    /**
-     * @description Handle selection of a local video file.
-     * @param event - Change event from the hidden file input.
-     */
-    const handleFileChange = (
-      event: React.ChangeEvent<HTMLInputElement>,
-    ): void => {
-      const file = event.target.files?.[0]
-      if (!file) return
-
-      if (videoUrl) {
-        URL.revokeObjectURL(videoUrl)
-      }
-
-      const url = URL.createObjectURL(file)
-      setVideoUrl(url)
-      setIsPlaying(false)
-    }
-
-    /**
-     * @description Trigger the native file picker for video upload.
-     */
-    const handleUploadClick = (): void => {
-      fileInputRef.current?.click()
-    }
-
-    /**
-     * @description Start or resume playback of the loaded video; if none, open upload dialog.
-     */
-    const handlePrimaryAction = (): void => {
-      if (!videoUrl) {
-        handleUploadClick()
-        return
-      }
-
-      if (videoRef.current) {
-        void videoRef.current.play()
-        setIsPlaying(true)
-      }
-    }
-
-    /**
-     * @description Pause current video playback and reset to start.
-     */
-    const handleStop = (): void => {
-      if (videoRef.current) {
-        videoRef.current.pause()
-        videoRef.current.currentTime = 0
-        setIsPlaying(false)
-      }
-    }
-
-    return (
-      <section className="flex flex-col rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-950/80">
-        <header className="mb-3 flex items-center justify-between">
-          <div>
-            <h2 className="text-sm font-medium text-slate-900 dark:text-slate-100">
-              Preview
-            </h2>
-            <p className="text-[11px] text-slate-500 dark:text-slate-400">
-              Upload a video to start editing. Use the player controls to scrub
-              through. Subtitles (mock) will appear as closed captions.
-            </p>
-          </div>
-        </header>
-
-        <div className="relative mb-4 flex aspect-video w-full max-h-[360px] items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-slate-100 dark:border-slate-800 dark:bg-slate-900">
-          {videoUrl ? (
-            <video
-              ref={videoRef}
-              src={videoUrl}
-              className="h-full w-full bg-black object-contain"
-              onEnded={() => setIsPlaying(false)}
-              onLoadedMetadata={(event) => {
-                const duration = event.currentTarget.duration
-                if (!Number.isNaN(duration)) {
-                  onLoadedMetadata(duration)
-                }
-              }}
-              onTimeUpdate={(event) => {
-                const time = event.currentTarget.currentTime
-                onTimeUpdate(time)
-              }}
-              controls
-              playsInline
-            >
-              {hasActiveSubtitles && subtitleTrackUrlRef.current && (
-                <track
-                  key={subtitleTrackUrlRef.current}
-                  label="Subtitles"
-                  kind="subtitles"
-                  srcLang="en"
-                  src={subtitleTrackUrlRef.current}
-                  default
-                />
-              )}
-            </video>
-          ) : (
-            <>
-              <img
-                src="https://pub-cdn.sider.ai/u/U0JJH468K34/web-coder/69ad2baefd11fbc8fc925288/resource/a8c3bd15-4eff-4d77-8997-bd883021229b.jpg"
-                className="h-full w-full object-cover opacity-40"
-              />
-              <div className="absolute inset-0 bg-gradient-to-b from-slate-50/80 via-slate-50/60 to-slate-100 dark:from-slate-950/70 dark:via-slate-950/40 dark:to-slate-950/90" />
-              <div className="relative z-10 flex flex-col items-center gap-3 px-4 text-center">
-                <button
-                  type="button"
-                  onClick={handlePrimaryAction}
-                  className="inline-flex items-center gap-2 rounded-full bg-sky-600 px-4 py-2 text-sm font-medium text-slate-50 shadow-sm transition-colors hover:bg-sky-500"
-                >
-                  <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-slate-900/80 text-xs text-slate-50">
-                    Play
-                  </span>
-                  Upload &amp; play video
-                </button>
-                <p className="max-w-xs text-xs text-slate-700 dark:text-slate-200">
-                  Choose a local file (MP4, MOV, etc.). The video stays on your
-                  device and plays directly in your browser. Subtitles will be
-                  generated via a mocked transcription service.
-                </p>
-              </div>
-            </>
-          )}
-
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="video/*"
-            className="hidden"
-            onChange={handleFileChange}
-          />
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          <button
-            type="button"
-            onClick={handleStop}
-            disabled={!videoUrl || !isPlaying}
-            className="rounded-md bg-slate-100 px-3 py-1 text-slate-800 transition-colors hover:bg-slate-200 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700 dark:disabled:bg-slate-900 dark:disabled:text-slate-500"
-          >
-            Stop
-          </button>
-          <button
-            type="button"
-            onClick={handleUploadClick}
-            className="rounded-md bg-sky-600 px-3 py-1 text-slate-50 transition-colors hover:bg-sky-500"
-          >
-            Upload video
-          </button>
-          {videoUrl && (
-            <span className="ml-auto text-[11px] text-slate-500 dark:text-slate-400">
-              Tip: Use the player controls above to play and scrub. Subtitles
-              use the mocked segments below.
-            </span>
-          )}
-        </div>
-      </section>
-    )
-  },
-)
-
-/**
- * @description Home page container rendering the editor shell with a top preview and bottom split layout.
- * Wires the real video state into the timeline, AI sidebar, and the subtitles manager.
- */
 export default function HomePage(): JSX.Element {
-  const [videoDuration, setVideoDuration] = useState<number | null>(null)
+  const [videoUrl, setVideoUrl] = useState<string | null>(null)
+  const [videoDuration, setVideoDuration] = useState<number>(0)
   const [currentTime, setCurrentTime] = useState<number>(0)
-  const [subtitleSegments, setSubtitleSegments] = useState<SubtitleSegment[]>([])
-  const [subtitleStatus, setSubtitleStatus] = useState<
-    'idle' | 'processing' | 'success' | 'error'
-  >('idle')
+  const [trimStart, setTrimStart] = useState<number>(0)
+  const [trimEnd, setTrimEnd] = useState<number>(0)
+  const [trimmedClips, setTrimmedClips] = useState<TrimmedClip[]>([])
 
-  const videoPreviewRef = useRef<VideoPreviewHandle | null>(null)
+  const inputRef = useRef<HTMLInputElement | null>(null)
+  const videoRef = useRef<HTMLVideoElement | null>(null)
 
-  const { theme, toggleTheme } = useTheme()
+  const hasVideo = Boolean(videoUrl && videoDuration > 0)
 
-  /**
-   * @description Handle preview request from the AI sidebar by seeking the real video.
-   * @param timeInSeconds - Target time to preview in seconds.
-   */
-  const handlePreviewAt = (timeInSeconds: number): void => {
-    if (videoPreviewRef.current) {
-      videoPreviewRef.current.seekTo(timeInSeconds)
-      setCurrentTime(timeInSeconds)
+  const activeSelectionWidth = useMemo(() => {
+    if (!videoDuration || trimEnd <= trimStart) return 0
+    return ((trimEnd - trimStart) / videoDuration) * 100
+  }, [trimStart, trimEnd, videoDuration])
+
+  const activeSelectionLeft = useMemo(() => {
+    if (!videoDuration) return 0
+    return (trimStart / videoDuration) * 100
+  }, [trimStart, videoDuration])
+
+  const currentTimePercent = useMemo(() => {
+    if (!videoDuration) return 0
+    return (currentTime / videoDuration) * 100
+  }, [currentTime, videoDuration])
+
+  const handleUploadClick = (): void => {
+    inputRef.current?.click()
+  }
+
+  const handleUploadVideo = (event: React.ChangeEvent<HTMLInputElement>): void => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    if (videoUrl) {
+      URL.revokeObjectURL(videoUrl)
+    }
+
+    const objectUrl = URL.createObjectURL(file)
+    setVideoUrl(objectUrl)
+    setCurrentTime(0)
+    setTrimmedClips([])
+  }
+
+  const handleTrimAction = (): void => {
+    if (!hasVideo) return
+
+    const minClipLength = 0.1
+    const safeStart = clamp(trimStart, 0, Math.max(0, videoDuration - minClipLength))
+    const safeEnd = clamp(trimEnd, safeStart + minClipLength, videoDuration)
+
+    setTrimmedClips((prev) => [
+      ...prev,
+      {
+        id: `trim-${Date.now()}`,
+        start: safeStart,
+        end: safeEnd,
+      },
+    ])
+
+    if (videoRef.current) {
+      videoRef.current.currentTime = safeStart
+      void videoRef.current.play()
     }
   }
-
-  /**
-   * @description Handle seek requests from the timeline panel or subtitles panel.
-   * @param timeInSeconds - Target time to move the playhead to.
-   */
-  const handleTimelineSeek = (timeInSeconds: number): void => {
-    if (videoPreviewRef.current) {
-      videoPreviewRef.current.seekTo(timeInSeconds)
-    }
-    setCurrentTime(timeInSeconds)
-  }
-
-  /**
-   * @description Trigger a mocked transcription process to generate subtitle segments.
-   * Uses video duration to create evenly spaced example subtitles.
-   */
-  const handleGenerateMockSubtitles = (): void => {
-    if (!videoDuration || videoDuration <= 0) {
-      return
-    }
-    setSubtitleStatus('processing')
-
-    const total = Math.max(videoDuration, 10)
-    const roughCount = Math.floor(total / 20)
-    const segmentCount = Math.min(6, Math.max(3, roughCount))
-    const segmentLength = total / segmentCount
-
-    window.setTimeout(() => {
-      const generated: SubtitleSegment[] = []
-      for (let index = 0; index < segmentCount; index += 1) {
-        const start = index * segmentLength
-        const end =
-          index === segmentCount - 1 ? total : (index + 1) * segmentLength
-        generated.push({
-          id: `sub-${index}-${Date.now()}`,
-          start,
-          end,
-          text: `Sample subtitle segment ${index + 1}`,
-        })
-      }
-      setSubtitleSegments(generated)
-      setSubtitleStatus('success')
-    }, 1200)
-  }
-
-  /**
-   * @description Update text or timing of a single subtitle segment.
-   * @param updated - Updated subtitle object.
-   */
-  const handleUpdateSubtitle = (updated: SubtitleSegment): void => {
-    setSubtitleSegments((prev) =>
-      prev.map((segment) => (segment.id === updated.id ? updated : segment)),
-    )
-  }
-
-  /**
-   * @description Delete a subtitle segment from the list.
-   * @param id - Identifier of the subtitle to remove.
-   */
-  const handleDeleteSubtitle = (id: string): void => {
-    setSubtitleSegments((prev) => prev.filter((segment) => segment.id !== id))
-  }
-
-  const hasVideo = videoDuration != null && videoDuration > 0
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
-      <header className="border-b border-slate-200 bg-white/90 px-4 py-4 shadow-sm backdrop-blur md:px-6 dark:border-slate-900 dark:bg-slate-950/90">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4">
-          <div className="space-y-1">
-            <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-50">
-              VidVersity Editor
-            </h1>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              Test Page by swinburne student
-            </p>
-          </div>
-          <div className="flex items-center gap-3">
-            <span className="hidden rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-[11px] font-medium text-emerald-700 md:inline dark:text-emerald-300">
-              Main workspace
-            </span>
-            <button
-              type="button"
-              onClick={toggleTheme}
-              className="inline-flex items-center gap-1 rounded-full border border-slate-300 bg-slate-100 px-3 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-200 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-            >
-              <span className="h-2 w-2 rounded-full bg-slate-900 dark:bg-amber-300" />
-              {theme === 'dark' ? 'Dark mode' : 'Light mode'}
-            </button>
-          </div>
-        </div>
+    <div className="min-h-screen bg-[#f2f3f7] text-[#0f172a]">
+      <header className="flex h-10 items-center justify-between bg-[#d929a6] px-4 text-white shadow-sm">
+        <span className="text-lg font-semibold">Vidversity</span>
+        <span className="rounded-full bg-white/20 px-3 py-1 text-[10px] font-semibold tracking-wide">
+          GUIDED MODE
+        </span>
       </header>
 
-      <main className="px-4 py-6 md:px-6">
-        <div className="mx-auto flex max-w-6xl flex-col gap-6">
-          <VideoPreviewPanel
-            ref={videoPreviewRef}
-            onLoadedMetadata={(duration) => {
-              setVideoDuration(duration)
-            }}
-            onTimeUpdate={(time) => {
-              setCurrentTime(time)
-            }}
-            subtitles={subtitleSegments}
-          />
+      <div className="grid min-h-[calc(100vh-40px)] grid-cols-[150px_minmax(0,1fr)_280px]">
+        <aside className="border-r border-slate-200 bg-[#f5f6f9] p-3 text-xs text-slate-500">
+          <button className="mb-5 w-full rounded-md bg-[#1e5ddf] px-3 py-2 text-[13px] font-semibold text-white shadow">
+            Export Video
+          </button>
 
-          <div className="grid gap-6 md:grid-cols-[minmax(0,2.2fr)_minmax(260px,320px)]">
-            <TimelinePanel
-              duration={videoDuration}
-              currentTime={currentTime}
-              onSeek={handleTimelineSeek}
+          <nav className="space-y-1">
+            {[
+              ['Library', Folder],
+              ['Drafts', LayoutGrid],
+              ['Archive', Folder],
+              ['Editor', Scissors],
+            ].map(([label, Icon]) => (
+              <button
+                key={label}
+                className={`flex w-full items-center gap-2 rounded px-2 py-2 text-left ${
+                  label === 'Editor'
+                    ? 'bg-white font-semibold text-[#1e5ddf]'
+                    : 'hover:bg-white/60'
+                }`}
+              >
+                <Icon className="h-3.5 w-3.5" />
+                <span>{label}</span>
+              </button>
+            ))}
+          </nav>
+
+          <button className="mt-auto flex items-center gap-2 rounded px-2 py-2 text-left hover:bg-white/60">
+            <Settings className="h-3.5 w-3.5" />
+            Settings
+          </button>
+        </aside>
+
+        <main className="flex flex-col gap-3 p-4">
+          <section className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+            <div className="aspect-video w-full overflow-hidden rounded-md bg-black/90">
+              {videoUrl ? (
+                <video
+                  ref={videoRef}
+                  className="h-full w-full"
+                  src={videoUrl}
+                  controls
+                  onLoadedMetadata={(event) => {
+                    const duration = event.currentTarget.duration
+                    setVideoDuration(duration)
+                    setTrimStart(0)
+                    setTrimEnd(duration)
+                  }}
+                  onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
+                />
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleUploadClick}
+                  className="flex h-full w-full flex-col items-center justify-center gap-2 text-slate-200"
+                >
+                  <Upload className="h-8 w-8" />
+                  <span className="text-sm">Upload a video to start editing</span>
+                </button>
+              )}
+            </div>
+            <input
+              ref={inputRef}
+              type="file"
+              accept="video/*"
+              onChange={handleUploadVideo}
+              className="hidden"
             />
-            <AISidebar onPreviewAt={handlePreviewAt} />
+          </section>
+
+          <section className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+            <div className="mb-2 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleTrimAction}
+                aria-label="Trim selected range"
+                disabled={!hasVideo}
+                className="inline-flex items-center gap-2 rounded-md bg-[#1e5ddf] px-3 py-1.5 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+              >
+                <Scissors className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>Trim</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleUploadClick}
+                className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium"
+              >
+                Upload video
+              </button>
+              <span className="ml-auto text-[11px] text-slate-500">
+                Selection: {formatTime(trimStart)} - {formatTime(trimEnd)}
+              </span>
+            </div>
+
+            <div className="relative rounded-md border border-slate-200 bg-slate-50 p-4">
+              <div className="relative mb-3 h-8 rounded bg-slate-200">
+                {hasVideo && (
+                  <>
+                    <div
+                      className="absolute top-0 h-full rounded bg-[#1e5ddf]/30"
+                      style={{ left: `${activeSelectionLeft}%`, width: `${activeSelectionWidth}%` }}
+                    />
+                    <div
+                      className="absolute top-0 h-full w-[2px] bg-[#1e5ddf]"
+                      style={{ left: `${currentTimePercent}%` }}
+                    />
+                  </>
+                )}
+              </div>
+
+              <div className="relative h-10">
+                <input
+                  type="range"
+                  min={0}
+                  max={videoDuration || 1}
+                  step={0.1}
+                  value={trimStart}
+                  disabled={!hasVideo}
+                  onChange={(event) => {
+                    const next = Number(event.target.value)
+                    setTrimStart(clamp(next, 0, Math.max(0, trimEnd - 0.1)))
+                  }}
+                  className="absolute top-0 h-10 w-full cursor-pointer appearance-none bg-transparent"
+                />
+                <input
+                  type="range"
+                  min={0}
+                  max={videoDuration || 1}
+                  step={0.1}
+                  value={trimEnd}
+                  disabled={!hasVideo}
+                  onChange={(event) => {
+                    const next = Number(event.target.value)
+                    setTrimEnd(clamp(next, trimStart + 0.1, videoDuration || 1))
+                  }}
+                  className="absolute top-0 h-10 w-full cursor-pointer appearance-none bg-transparent"
+                />
+              </div>
+
+              <div className="mt-2 flex justify-between text-[10px] text-slate-500">
+                <span>00:00</span>
+                <span>{formatTime(videoDuration)}</span>
+              </div>
+            </div>
+
+            <div className="mt-4">
+              <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                Bottom timeline preview
+              </p>
+              <div className="relative h-16 overflow-hidden rounded-md border border-slate-200 bg-slate-100">
+                <div className="absolute left-0 top-0 h-full w-full border-b border-dashed border-slate-300" />
+
+                {trimmedClips.map((clip) => {
+                  const left = videoDuration ? (clip.start / videoDuration) * 100 : 0
+                  const width = videoDuration
+                    ? ((clip.end - clip.start) / videoDuration) * 100
+                    : 0
+
+                  return (
+                    <div
+                      key={clip.id}
+                      className="absolute top-4 h-8 rounded border border-[#1e5ddf] bg-[#1e5ddf]/20 px-2 text-[10px] font-semibold text-[#1748ad]"
+                      style={{ left: `${left}%`, width: `${Math.max(width, 2)}%` }}
+                    >
+                      {formatTime(clip.start)} - {formatTime(clip.end)}
+                    </div>
+                  )
+                })}
+
+                <div
+                  className="absolute top-0 h-full w-[2px] bg-[#1e5ddf]"
+                  style={{ left: `${currentTimePercent}%` }}
+                />
+              </div>
+            </div>
+          </section>
+        </main>
+
+        <aside className="border-l border-slate-200 bg-[#f5f6f9] p-3">
+          <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-slate-600">
+            <Bot className="h-4 w-4 text-[#1e5ddf]" />
+            AI ASSISTANT
           </div>
 
-          <SubtitleManager
-            segments={subtitleSegments}
-            status={subtitleStatus}
-            hasVideo={hasVideo}
-            onGenerateMock={handleGenerateMockSubtitles}
-            onUpdateSegment={handleUpdateSubtitle}
-            onDeleteSegment={handleDeleteSubtitle}
-            onSeekTo={handleTimelineSeek}
-          />
-        </div>
-      </main>
+          <div className="space-y-3 text-xs">
+            <div className="rounded-md bg-white p-3 shadow-sm">
+              <p className="mb-1 font-semibold text-[#1e5ddf]">Vid Bot</p>
+              <p className="text-slate-600">
+                How can I help compose your research video today?
+              </p>
+            </div>
+            <div className="rounded-md bg-[#e8edf6] p-3 text-slate-700 shadow-sm">
+              Trim out the first 10 seconds of the intro clip.
+            </div>
+            <div className="rounded-md bg-white p-3 shadow-sm">
+              <p className="mb-1 font-semibold text-[#1e5ddf]">Vid Bot</p>
+              <p className="text-slate-600">Processing trim command…</p>
+            </div>
+          </div>
+
+          <div className="mt-4 rounded-md border border-slate-200 bg-white p-2">
+            <input
+              type="text"
+              placeholder="Ask AI to edit..."
+              className="w-full rounded border border-slate-200 px-2 py-1 text-xs outline-none"
+            />
+            <button className="mt-2 inline-flex items-center gap-1 rounded bg-[#1e5ddf] px-2 py-1 text-[11px] font-medium text-white">
+              <Search className="h-3 w-3" />
+              Send
+            </button>
+          </div>
+        </aside>
+      </div>
     </div>
   )
 }
