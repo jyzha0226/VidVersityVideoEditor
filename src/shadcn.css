@@ -106,3 +106,34 @@ html > body * {
   scrollbar-width: thin;
   scrollbar-color: hsl(var(--border)) transparent;
 }
+
+.trim-range::-webkit-slider-runnable-track {
+  height: 4px;
+  background: transparent;
+}
+
+.trim-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  background: #1d4ed8;
+  border: 2px solid white;
+  margin-top: -5px;
+  box-shadow: 0 0 0 1px rgba(30, 41, 59, 0.25);
+}
+
+.trim-range::-moz-range-track {
+  height: 4px;
+  background: transparent;
+}
+
+.trim-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 2px solid white;
+  border-radius: 9999px;
+  background: #1d4ed8;
+  box-shadow: 0 0 0 1px rgba(30, 41, 59, 0.25);
+}

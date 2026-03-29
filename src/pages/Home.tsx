@@ -13,10 +13,11 @@ import React, {
   forwardRef,
 } from 'react'
 import AISidebar from '../components/editor/AISidebar'
-import { TimelinePanel } from '../components/timeline/TimelinePanel'
+import { TrimTimeline } from '../components/editor/TrimTimeline'
 import { useTheme } from '../theme/ThemeProvider'
 import type { SubtitleSegment } from '../subtitles/types'
 import { SubtitleManager } from '../components/subtitles/SubtitleManager'
+import type { TrimmedClip } from '../components/editor/TrimTimeline'
 
 /**
  * @description Public methods exposed by the video preview panel to control playback.
@@ -334,6 +335,9 @@ export default function HomePage(): JSX.Element {
   const [videoDuration, setVideoDuration] = useState<number | null>(null)
   const [currentTime, setCurrentTime] = useState<number>(0)
   const [subtitleSegments, setSubtitleSegments] = useState<SubtitleSegment[]>([])
+  const [trimStart, setTrimStart] = useState(0)
+  const [trimEnd, setTrimEnd] = useState(0)
+  const [trimmedClips, setTrimmedClips] = useState<TrimmedClip[]>([])
   const [subtitleStatus, setSubtitleStatus] = useState<
     'idle' | 'processing' | 'success' | 'error'
   >('idle')
@@ -362,6 +366,48 @@ export default function HomePage(): JSX.Element {
       videoPreviewRef.current.seekTo(timeInSeconds)
     }
     setCurrentTime(timeInSeconds)
+  }
+
+  /**
+   * @description Initialize trim handles when a new video is loaded.
+   */
+  useEffect(() => {
+    if (!videoDuration || videoDuration <= 0) return
+    setTrimStart(0)
+    setTrimEnd(videoDuration)
+    setTrimmedClips([])
+  }, [videoDuration])
+
+  /**
+   * @description Update left trim playhead while keeping a safe minimum span.
+   */
+  const handleChangeTrimStart = (timeInSeconds: number): void => {
+    const safe = Math.max(0, Math.min(timeInSeconds, Math.max(trimEnd - 0.1, 0)))
+    setTrimStart(safe)
+    handleTimelineSeek(safe)
+  }
+
+  /**
+   * @description Update right trim playhead while keeping a safe minimum span.
+   */
+  const handleChangeTrimEnd = (timeInSeconds: number): void => {
+    const cap = videoDuration ?? 0
+    const safe = Math.min(cap, Math.max(timeInSeconds, trimStart + 0.1))
+    setTrimEnd(safe)
+    handleTimelineSeek(safe)
+  }
+
+  /**
+   * @description Commit current trim range to the timeline preview list.
+   */
+  const handleTrim = (): void => {
+    if (!videoDuration || videoDuration <= 0) return
+    if (trimEnd - trimStart < 0.5) return
+    setTrimmedClips((prev) => [
+      ...prev,
+      { id: `trim-${Date.now()}`, start: trimStart, end: trimEnd },
+    ])
+    handleTimelineSeek(trimStart)
   }
 
   /**
@@ -459,10 +505,17 @@ export default function HomePage(): JSX.Element {
           />
 
           <div className="grid gap-6 md:grid-cols-[minmax(0,2.2fr)_minmax(260px,320px)]">
-            <TimelinePanel
+            <TrimTimeline
               duration={videoDuration}
               currentTime={currentTime}
+              hasVideo={hasVideo}
+              trimStart={trimStart}
+              trimEnd={trimEnd}
+              trimmedClips={trimmedClips}
               onSeek={handleTimelineSeek}
+              onChangeTrimStart={handleChangeTrimStart}
+              onChangeTrimEnd={handleChangeTrimEnd}
+              onTrim={handleTrim}
             />
             <AISidebar onPreviewAt={handlePreviewAt} />
           </div>
