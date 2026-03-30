@@ -21,6 +21,101 @@ const WORKER_PATH = fileURLToPath(
 const TEMP_DIR = join(tmpdir(), 'vidversity-faster-whisper')
 const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
 
+function padTime(value) {
+  return value.toString().padStart(2, '0')
+}
+
+function formatSecondsAsTime(seconds) {
+  const safeSeconds = Math.max(0, Math.floor(seconds))
+  const hours = Math.floor(safeSeconds / 3600)
+  const minutes = Math.floor((safeSeconds % 3600) / 60)
+  const remainingSeconds = safeSeconds % 60
+
+  if (hours > 0) {
+    return `${padTime(hours)}:${padTime(minutes)}:${padTime(remainingSeconds)}`
+  }
+
+  return `${padTime(minutes)}:${padTime(remainingSeconds)}`
+}
+
+function formatTimeRange(startSeconds, endSeconds) {
+  return `${formatSecondsAsTime(startSeconds)} - ${formatSecondsAsTime(endSeconds)}`
+}
+
+function buildDemoSuggestion({
+  id,
+  label,
+  description,
+  kind,
+  startSeconds,
+  endSeconds,
+}) {
+  return {
+    id,
+    label,
+    timeRange: formatTimeRange(startSeconds, endSeconds),
+    description,
+    kind,
+  }
+}
+
+function buildSceneChangeSuggestions(duration) {
+  const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 120
+  const firstStart = Math.min(12, Math.max(0, safeDuration * 0.1))
+  const secondStart = Math.min(safeDuration - 8, Math.max(24, safeDuration * 0.45))
+
+  return [
+    buildDemoSuggestion({
+      id: 'scene-1',
+      label: 'Scene change',
+      description: 'Scene change detected between introduction and the next visual section.',
+      kind: 'scene',
+      startSeconds: firstStart,
+      endSeconds: Math.min(safeDuration, firstStart + 6),
+    }),
+    buildDemoSuggestion({
+      id: 'scene-2',
+      label: 'Scene change',
+      description: 'Another noticeable visual transition that could be a clean cut point.',
+      kind: 'scene',
+      startSeconds: Math.max(0, secondStart),
+      endSeconds: Math.min(safeDuration, Math.max(0, secondStart) + 5),
+    }),
+  ]
+}
+
+function buildSilenceSuggestions(duration) {
+  const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 120
+  const start = Math.min(safeDuration - 6, Math.max(8, safeDuration * 0.33))
+
+  return [
+    buildDemoSuggestion({
+      id: 'silence-1',
+      label: 'Silence segment',
+      description: 'Long silence detected with little to no spoken content.',
+      kind: 'silence',
+      startSeconds: Math.max(0, start),
+      endSeconds: Math.min(safeDuration, Math.max(0, start) + 7),
+    }),
+  ]
+}
+
+function buildTranscriptSuggestions(duration) {
+  const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 120
+  const start = Math.min(safeDuration - 10, Math.max(20, safeDuration * 0.7))
+
+  return [
+    buildDemoSuggestion({
+      id: 'transcript-1',
+      label: 'Transcript-based',
+      description: 'Repeated transcript content detected that may be shortened.',
+      kind: 'transcript',
+      startSeconds: Math.max(0, start),
+      endSeconds: Math.min(safeDuration, Math.max(0, start) + 12),
+    }),
+  ]
+}
+
 function sendJson(response, statusCode, payload) {
   response.writeHead(statusCode, {
     'Access-Control-Allow-Origin': '*',
@@ -138,6 +233,36 @@ const server = createServer(async (request, response) => {
       health: '/api/health',
       generate: '/api/subtitles/generate',
       python: PYTHON_BIN,
+      sceneChanges: '/api/ai/scene-changes',
+      silenceSegments: '/api/ai/silence-segments',
+      transcriptSuggestions: '/api/ai/transcript-suggestions',
+    })
+    return
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/ai/scene-changes') {
+    const duration = Number(url.searchParams.get('duration') || 0)
+    sendJson(response, 200, {
+      suggestions: buildSceneChangeSuggestions(duration),
+    })
+    return
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/ai/silence-segments') {
+    const duration = Number(url.searchParams.get('duration') || 0)
+    sendJson(response, 200, {
+      suggestions: buildSilenceSuggestions(duration),
+    })
+    return
+  }
+
+  if (
+    request.method === 'GET' &&
+    url.pathname === '/api/ai/transcript-suggestions'
+  ) {
+    const duration = Number(url.searchParams.get('duration') || 0)
+    sendJson(response, 200, {
+      suggestions: buildTranscriptSuggestions(duration),
     })
     return
   }

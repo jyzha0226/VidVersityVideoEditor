@@ -390,7 +390,11 @@ export default function HomePage(): JSX.Element {
               currentTime={currentTime}
               onSeek={handleTimelineSeek}
             />
-            <AISidebar onPreviewAt={handlePreviewAt} />
+            <AISidebar
+              onPreviewAt={handlePreviewAt}
+              durationInSeconds={videoDuration}
+              hasVideo={hasVideo}
+            />
           </div>
 
           <SubtitleManager

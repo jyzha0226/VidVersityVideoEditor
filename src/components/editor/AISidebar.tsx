@@ -3,8 +3,13 @@
  * @description AI suggestions sidebar for the video editor, showing automatic cut ideas.
  */
 
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 import { Sparkles, Scissors, Wand2 } from 'lucide-react'
+import {
+  fetchAISuggestions,
+  type AISuggestion,
+  type AISuggestionKind,
+} from './api'
 
 /**
  * @description Props for the AISidebar component.
@@ -14,50 +19,9 @@ export interface AISidebarProps {
    * @description Callback to preview the video at a given time (in seconds).
    */
   onPreviewAt?: (timeInSeconds: number) => void
+  durationInSeconds?: number | null
+  hasVideo?: boolean
 }
-
-/**
- * @description Allowed kinds of AI suggestion.
- */
-type AISuggestionKind = 'scene' | 'silence' | 'transcript'
-
-/**
- * @description Single AI suggestion item definition.
- */
-interface AISuggestion {
-  id: string
-  label: string
-  timeRange: string
-  description: string
-  kind: AISuggestionKind
-}
-
-/**
- * @description Hard-coded suggestion items that mimic real AI output.
- */
-const SUGGESTIONS: AISuggestion[] = [
-  {
-    id: 'scene-1',
-    label: 'Scene change',
-    timeRange: '00:12 - 00:18',
-    description: 'Scene change detected between introduction and slides.',
-    kind: 'scene',
-  },
-  {
-    id: 'silence-1',
-    label: 'Silence segment',
-    timeRange: '04:05 - 04:20',
-    description: 'Long silence with no speech detected.',
-    kind: 'silence',
-  },
-  {
-    id: 'transcript-1',
-    label: 'Transcript-based',
-    timeRange: '15:00 - 15:30',
-    description: 'Repeated explanation that may be shortened.',
-    kind: 'transcript',
-  },
-]
 
 /**
  * @description Parse a "MM:SS" or "HH:MM:SS" time string into seconds.
@@ -88,9 +52,77 @@ function getRangeStartInSeconds(range: string): number {
 }
 
 /**
+ * @description Keep only the first suggestion of each kind so the sidebar stays concise.
+ */
+function getDisplaySuggestions(items: AISuggestion[]): AISuggestion[] {
+  const seenKinds = new Set<AISuggestionKind>()
+
+  return items.filter((item) => {
+    if (seenKinds.has(item.kind)) {
+      return false
+    }
+
+    seenKinds.add(item.kind)
+    return true
+  })
+}
+
+/**
  * @description Right-side AI suggestions sidebar for the video editor layout.
  */
-export function AISidebar({ onPreviewAt }: AISidebarProps) {
+export function AISidebar({
+  onPreviewAt,
+  durationInSeconds,
+  hasVideo = false,
+}: AISidebarProps) {
+  const [suggestions, setSuggestions] = useState<AISuggestion[]>([])
+  const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>(
+    'idle',
+  )
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const displaySuggestions = getDisplaySuggestions(suggestions)
+
+  useEffect(() => {
+    if (!hasVideo) {
+      setSuggestions([])
+      setStatus('idle')
+      setErrorMessage(null)
+      return
+    }
+
+    let isCancelled = false
+
+    async function loadSuggestions(): Promise<void> {
+      setStatus('loading')
+      setErrorMessage(null)
+
+      try {
+        const result = await fetchAISuggestions(durationInSeconds)
+        if (!isCancelled) {
+          setSuggestions(result)
+          setStatus('success')
+        }
+      } catch (error) {
+        if (!isCancelled) {
+          setSuggestions([])
+          setStatus('error')
+          setErrorMessage(
+            error instanceof Error
+              ? error.message
+              : 'Could not load AI suggestions.',
+          )
+        }
+      }
+    }
+
+    void loadSuggestions()
+
+    return () => {
+      // Ignore late async results once the selected video changes.
+      isCancelled = true
+    }
+  }, [durationInSeconds, hasVideo])
+
   return (
     <aside className="flex h-full flex-col rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-xs text-slate-200">
       <header className="mb-2 flex items-center justify-between gap-2">
@@ -103,7 +135,7 @@ export function AISidebar({ onPreviewAt }: AISidebarProps) {
               AI Suggestions
             </span>
             <span className="text-[10px] text-slate-400">
-              Connect your AI services to populate this panel.
+              Scene, silence, and transcript suggestions from the local API.
             </span>
           </div>
         </div>
@@ -116,7 +148,31 @@ export function AISidebar({ onPreviewAt }: AISidebarProps) {
       <div className="mb-2 border-t border-slate-800/80" />
 
       <section className="space-y-2 overflow-y-auto pb-1">
-        {SUGGESTIONS.map((item) => {
+        {!hasVideo ? (
+          <div className="rounded-lg border border-dashed border-slate-800 bg-slate-950/50 p-3 text-[11px] text-slate-400">
+            Upload a video to request AI suggestions from the local backend.
+          </div>
+        ) : null}
+
+        {hasVideo && status === 'loading' ? (
+          <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-3 text-[11px] text-slate-400">
+            Loading AI suggestions...
+          </div>
+        ) : null}
+
+        {hasVideo && status === 'error' ? (
+          <div className="rounded-lg border border-rose-900/60 bg-rose-950/20 p-3 text-[11px] text-rose-200">
+            {errorMessage || 'Could not load AI suggestions.'}
+          </div>
+        ) : null}
+
+        {hasVideo && status === 'success' && displaySuggestions.length === 0 ? (
+          <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-3 text-[11px] text-slate-400">
+            No AI suggestions were returned for this media yet.
+          </div>
+        ) : null}
+
+        {displaySuggestions.map((item) => {
           const startSeconds = getRangeStartInSeconds(item.timeRange)
 
           return (
@@ -177,9 +233,9 @@ export function AISidebar({ onPreviewAt }: AISidebarProps) {
       </section>
 
       <footer className="mt-2 border-t border-slate-800/80 pt-2 text-[10px] leading-snug text-slate-500">
-        Editors can preview and apply automated cuts, silence removals, and
-        transcript-based edits. Connect this to your backend to run your own AI
-        pipelines.
+        Editors can preview automated cuts, silence removals, and transcript
+        suggestions here. Replace the local mock endpoints with your own AI
+        pipeline when you are ready.
       </footer>
     </aside>
   )
