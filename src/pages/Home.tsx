@@ -23,6 +23,7 @@ function formatTime(seconds: number): string {
 export default function HomePage(): JSX.Element {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const trimSliderRef = useRef<HTMLDivElement | null>(null)
 
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [videoDuration, setVideoDuration] = useState(0)
@@ -35,6 +36,7 @@ export default function HomePage(): JSX.Element {
   const [editorMode, setEditorMode] = useState<'trim' | 'split' | 'merge'>('trim')
   const [mergeSelection, setMergeSelection] = useState<number[]>([])
   const [mergeWarning, setMergeWarning] = useState<string | null>(null)
+  const [draggingTrimHandle, setDraggingTrimHandle] = useState<'left' | 'right' | null>(null)
 
   const { theme, toggleTheme } = useTheme()
 
@@ -314,9 +316,12 @@ export default function HomePage(): JSX.Element {
                     </>
                   )}
                 </div>
-                <div className="mt-3 space-y-4">
-                  <div className="space-y-1.5">
-                    <label className="block text-xs text-slate-600 dark:text-slate-300">Left playhead ({formatTime(trimStart)})</label>
+                <div className="mt-3 space-y-2">
+                  <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-300">
+                    <span>Left playhead ({formatTime(trimStart)})</span>
+                    <span>Right playhead ({formatTime(trimEnd)})</span>
+                  </div>
+                  <div className="relative h-8">
                     <input
                       type="range"
                       min={0}
@@ -328,11 +333,8 @@ export default function HomePage(): JSX.Element {
                         const value = Number(event.target.value)
                         setTrimStart(Math.min(value, trimEnd - 0.1))
                       }}
-                      className="w-full appearance-auto"
+                      className="absolute left-0 top-0 h-8 w-full"
                     />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="block text-xs text-slate-600 dark:text-slate-300">Right playhead ({formatTime(trimEnd)})</label>
                     <input
                       type="range"
                       min={0}
@@ -344,7 +346,7 @@ export default function HomePage(): JSX.Element {
                         const value = Number(event.target.value)
                         setTrimEnd(Math.max(value, trimStart + 0.1))
                       }}
-                      className="w-full appearance-auto"
+                      className="absolute left-0 top-0 h-8 w-full"
                     />
                   </div>
                 </div>
