@@ -61,16 +61,6 @@ export default function HomePage(): JSX.Element {
     video.currentTime = orderedSegments[0].start
   }
 
-  const getOrderedSegments = (clip: TrimClip): ClipSegment[] =>
-    [...clip.segments].sort((a, b) => a.start - b.start)
-
-  const resetClipPlayback = (video: HTMLVideoElement, clip: TrimClip): void => {
-    const orderedSegments = getOrderedSegments(clip)
-    if (!orderedSegments.length) return
-    video.pause()
-    video.currentTime = orderedSegments[0].start
-  }
-
   const handleUpload = (event: React.ChangeEvent<HTMLInputElement>): void => {
     const file = event.target.files?.[0]
     if (!file) return
