@@ -30,6 +30,7 @@ export default function HomePage(): JSX.Element {
   const [editorMode, setEditorMode] = useState<'trim' | 'split' | 'merge'>('trim')
   const [mergeSelection, setMergeSelection] = useState<number[]>([])
   const [mergeWarning, setMergeWarning] = useState<string | null>(null)
+  const [isDraggingTrimHandle, setIsDraggingTrimHandle] = useState(false)
 
   const { theme, toggleTheme } = useTheme()
 
@@ -82,7 +83,8 @@ export default function HomePage(): JSX.Element {
   const seekToClip = (clip: TrimClip): void => {
     setActiveClipId(clip.id)
     if (videoRef.current) {
-      videoRef.current.currentTime = clip.segments[0].start
+      const orderedSegments = [...clip.segments].sort((a, b) => a.start - b.start)
+      videoRef.current.currentTime = orderedSegments[0].start
       void videoRef.current.play()
     }
   }
@@ -203,11 +205,32 @@ export default function HomePage(): JSX.Element {
                       const orderedSegments = [...activeClip.segments].sort(
                         (a, b) => a.start - b.start,
                       )
+                      const firstSegment = orderedSegments[0]
+                      const lastSegment = orderedSegments[orderedSegments.length - 1]
+
+                      if (!firstSegment || !lastSegment) return
+
+                      if (now < firstSegment.start) {
+                        event.currentTarget.currentTime = firstSegment.start
+                        return
+                      }
+
+                      if (now >= lastSegment.end) {
+                        event.currentTarget.pause()
+                        event.currentTarget.currentTime = firstSegment.start
+                        return
+                      }
+
                       const currentIndex = orderedSegments.findIndex(
                         (segment) => now >= segment.start && now <= segment.end + 0.02,
                       )
 
                       if (currentIndex === -1) {
+                        const nextSegment = orderedSegments.find((segment) => now < segment.start)
+                        if (nextSegment) {
+                          event.currentTarget.currentTime = nextSegment.start
+                          void event.currentTarget.play()
+                        }
                         return
                       }
 
@@ -219,7 +242,7 @@ export default function HomePage(): JSX.Element {
                           void event.currentTarget.play()
                         } else {
                           event.currentTarget.pause()
-                          event.currentTarget.currentTime = orderedSegments[0].start
+                          event.currentTarget.currentTime = firstSegment.start
                         }
                       }
                     }
@@ -278,14 +301,25 @@ export default function HomePage(): JSX.Element {
                         }}
                       />
                       <div className="pointer-events-none absolute left-0 top-0 h-full w-full">
-                        <div className="absolute top-0 h-full w-[2px] bg-blue-900" style={{ left: `${(trimStart / videoDuration) * 100}%` }} />
-                        <div className="absolute top-0 h-full w-[2px] bg-blue-900" style={{ left: `${(trimEnd / videoDuration) * 100}%` }} />
+                        <div
+                          className="absolute top-0 h-full w-[2px] bg-blue-900"
+                          style={{ left: `${(trimStart / videoDuration) * 100}%` }}
+                        />
+                        <div
+                          className="absolute top-0 h-full w-[2px] bg-blue-900"
+                          style={{ left: `${(trimEnd / videoDuration) * 100}%` }}
+                        />
+                        <div
+                          className="absolute top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-blue-900 bg-white shadow"
+                          style={{ left: `${(trimStart / videoDuration) * 100}%` }}
+                        />
+                        <div
+                          className="absolute top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-blue-900 bg-white shadow"
+                          style={{ left: `${(trimEnd / videoDuration) * 100}%` }}
+                        />
                       </div>
                     </>
                   )}
-                </div>
-                <div className="mt-3 space-y-2">
-                  <label className="block text-xs text-slate-600 dark:text-slate-300">Left playhead ({formatTime(trimStart)})</label>
                   <input
                     type="range"
                     min={0}
@@ -293,13 +327,16 @@ export default function HomePage(): JSX.Element {
                     step={0.1}
                     value={trimStart}
                     disabled={!videoDuration}
+                    onPointerDown={() => setIsDraggingTrimHandle(true)}
+                    onPointerUp={() => setIsDraggingTrimHandle(false)}
+                    onBlur={() => setIsDraggingTrimHandle(false)}
                     onChange={(event) => {
                       const value = Number(event.target.value)
                       setTrimStart(Math.min(value, trimEnd - 0.1))
                     }}
-                    className="w-full"
+                    className="absolute inset-0 z-10 h-full w-full cursor-ew-resize appearance-none bg-transparent opacity-0"
+                    aria-label="Left trim playhead"
                   />
-                  <label className="block text-xs text-slate-600 dark:text-slate-300">Right playhead ({formatTime(trimEnd)})</label>
                   <input
                     type="range"
                     min={0}
@@ -307,12 +344,21 @@ export default function HomePage(): JSX.Element {
                     step={0.1}
                     value={trimEnd}
                     disabled={!videoDuration}
+                    onPointerDown={() => setIsDraggingTrimHandle(true)}
+                    onPointerUp={() => setIsDraggingTrimHandle(false)}
+                    onBlur={() => setIsDraggingTrimHandle(false)}
                     onChange={(event) => {
                       const value = Number(event.target.value)
                       setTrimEnd(Math.max(value, trimStart + 0.1))
                     }}
-                    className="w-full"
+                    className="absolute inset-0 z-20 h-full w-full cursor-ew-resize appearance-none bg-transparent opacity-0"
+                    aria-label="Right trim playhead"
                   />
+                </div>
+                <div className="mt-3 flex items-center justify-between text-xs text-slate-600 dark:text-slate-300">
+                  <span>Left playhead: {formatTime(trimStart)}</span>
+                  <span>{isDraggingTrimHandle ? 'Dragging selection handle…' : 'Drag either handle to trim selection'}</span>
+                  <span>Right playhead: {formatTime(trimEnd)}</span>
                 </div>
                 <div className="mt-4 flex items-center justify-between rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-900">
                   <div className="text-xs font-medium text-slate-600 dark:text-slate-300">
