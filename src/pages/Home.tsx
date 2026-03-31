@@ -48,6 +48,18 @@ export default function HomePage(): JSX.Element {
     () => trimmedClips.find((clip) => clip.id === activeClipId) ?? null,
     [trimmedClips, activeClipId],
   )
+  const trimStartPercent = videoDuration > 0 ? (trimStart / videoDuration) * 100 : 0
+  const trimEndPercent = videoDuration > 0 ? (trimEnd / videoDuration) * 100 : 0
+
+  const getOrderedSegments = (clip: TrimClip): ClipSegment[] =>
+    [...clip.segments].sort((a, b) => a.start - b.start)
+
+  const resetClipPlayback = (video: HTMLVideoElement, clip: TrimClip): void => {
+    const orderedSegments = getOrderedSegments(clip)
+    if (!orderedSegments.length) return
+    video.pause()
+    video.currentTime = orderedSegments[0].start
+  }
 
   const getOrderedSegments = (clip: TrimClip): ClipSegment[] =>
     [...clip.segments].sort((a, b) => a.start - b.start)
@@ -301,13 +313,13 @@ export default function HomePage(): JSX.Element {
                       <div
                         className="absolute top-0 h-full rounded-lg bg-blue-500/70"
                         style={{
-                          left: `${(trimStart / videoDuration) * 100}%`,
-                          width: `${((trimEnd - trimStart) / videoDuration) * 100}%`,
+                          left: `${trimStartPercent}%`,
+                          width: `${Math.max(0, trimEndPercent - trimStartPercent)}%`,
                         }}
                       />
                       <div className="pointer-events-none absolute left-0 top-0 h-full w-full">
-                        <div className="absolute top-0 h-full w-[2px] bg-blue-900" style={{ left: `${(trimStart / videoDuration) * 100}%` }} />
-                        <div className="absolute top-0 h-full w-[2px] bg-blue-900" style={{ left: `${(trimEnd / videoDuration) * 100}%` }} />
+                        <div className="absolute top-0 h-full w-[2px] bg-blue-900" style={{ left: `${trimStartPercent}%` }} />
+                        <div className="absolute top-0 h-full w-[2px] bg-blue-900" style={{ left: `${trimEndPercent}%` }} />
                       </div>
                     </>
                   )}
