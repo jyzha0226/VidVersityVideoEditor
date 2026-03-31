@@ -61,6 +61,16 @@ export default function HomePage(): JSX.Element {
     video.currentTime = orderedSegments[0].start
   }
 
+  const getOrderedSegments = (clip: TrimClip): ClipSegment[] =>
+    [...clip.segments].sort((a, b) => a.start - b.start)
+
+  const resetClipPlayback = (video: HTMLVideoElement, clip: TrimClip): void => {
+    const orderedSegments = getOrderedSegments(clip)
+    if (!orderedSegments.length) return
+    video.pause()
+    video.currentTime = orderedSegments[0].start
+  }
+
   const handleUpload = (event: React.ChangeEvent<HTMLInputElement>): void => {
     const file = event.target.files?.[0]
     if (!file) return
@@ -332,7 +342,6 @@ export default function HomePage(): JSX.Element {
                         setTrimStart(Math.min(value, trimEnd - 0.1))
                       }}
                       className="absolute left-0 top-0 h-8 w-full"
-                      style={{ clipPath: `inset(0 ${Math.max(0, 100 - trimEndPercent)}% 0 0)` }}
                     />
                     <input
                       type="range"
@@ -346,7 +355,6 @@ export default function HomePage(): JSX.Element {
                         setTrimEnd(Math.max(value, trimStart + 0.1))
                       }}
                       className="absolute left-0 top-0 h-8 w-full"
-                      style={{ clipPath: `inset(0 0 0 ${Math.min(100, trimStartPercent)}%)` }}
                     />
                   </div>
                 </div>
