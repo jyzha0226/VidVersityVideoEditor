@@ -8,11 +8,6 @@ interface TrimClip {
   type: 'trim' | 'split' | 'merge'
 }
 
-interface ClipSegment {
-  start: number
-  end: number
-}
-
 function formatTime(seconds: number): string {
   const safe = Math.max(0, Math.floor(seconds))
   const mins = Math.floor(safe / 60)
@@ -23,7 +18,6 @@ function formatTime(seconds: number): string {
 export default function HomePage(): JSX.Element {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
-  const trimSliderRef = useRef<HTMLDivElement | null>(null)
 
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [videoDuration, setVideoDuration] = useState(0)
@@ -36,7 +30,6 @@ export default function HomePage(): JSX.Element {
   const [editorMode, setEditorMode] = useState<'trim' | 'split' | 'merge'>('trim')
   const [mergeSelection, setMergeSelection] = useState<number[]>([])
   const [mergeWarning, setMergeWarning] = useState<string | null>(null)
-  const [draggingTrimHandle, setDraggingTrimHandle] = useState<'left' | 'right' | null>(null)
 
   const { theme, toggleTheme } = useTheme()
 
@@ -50,18 +43,6 @@ export default function HomePage(): JSX.Element {
     () => trimmedClips.find((clip) => clip.id === activeClipId) ?? null,
     [trimmedClips, activeClipId],
   )
-  const trimStartPercent = videoDuration > 0 ? (trimStart / videoDuration) * 100 : 0
-  const trimEndPercent = videoDuration > 0 ? (trimEnd / videoDuration) * 100 : 0
-
-  const getOrderedSegments = (clip: TrimClip): ClipSegment[] =>
-    [...clip.segments].sort((a, b) => a.start - b.start)
-
-  const resetClipPlayback = (video: HTMLVideoElement, clip: TrimClip): void => {
-    const orderedSegments = getOrderedSegments(clip)
-    if (!orderedSegments.length) return
-    video.pause()
-    video.currentTime = orderedSegments[0].start
-  }
 
   const handleUpload = (event: React.ChangeEvent<HTMLInputElement>): void => {
     const file = event.target.files?.[0]
@@ -101,9 +82,7 @@ export default function HomePage(): JSX.Element {
   const seekToClip = (clip: TrimClip): void => {
     setActiveClipId(clip.id)
     if (videoRef.current) {
-      const orderedSegments = getOrderedSegments(clip)
-      if (!orderedSegments.length) return
-      videoRef.current.currentTime = orderedSegments[0].start
+      videoRef.current.currentTime = clip.segments[0].start
       void videoRef.current.play()
     }
   }
@@ -166,9 +145,7 @@ export default function HomePage(): JSX.Element {
     setActiveClipId(mergedClip.id)
 
     if (videoRef.current) {
-      const orderedSegments = getOrderedSegments(mergedClip)
-      if (!orderedSegments.length) return
-      videoRef.current.currentTime = orderedSegments[0].start
+      videoRef.current.currentTime = mergedClip.segments[0].start
       void videoRef.current.play()
     }
   }
@@ -220,40 +197,31 @@ export default function HomePage(): JSX.Element {
                     setSplitPoint(duration / 2)
                   }}
                   onTimeUpdate={(event) => {
-                    const video = event.currentTarget
-                    const now = video.currentTime
+                    const now = event.currentTarget.currentTime
                     setCurrentTime(now)
                     if (activeClip) {
-                      const orderedSegments = getOrderedSegments(activeClip)
-                      if (!orderedSegments.length) return
-
-                      const epsilon = 0.03
-                      const activeIndex = orderedSegments.findIndex(
-                        (segment) => now >= segment.start - epsilon && now <= segment.end + epsilon,
+                      const orderedSegments = [...activeClip.segments].sort(
+                        (a, b) => a.start - b.start,
+                      )
+                      const currentIndex = orderedSegments.findIndex(
+                        (segment) => now >= segment.start && now <= segment.end + 0.02,
                       )
 
-                      if (activeIndex >= 0) {
-                        const activeSegment = orderedSegments[activeIndex]
-                        if (now >= activeSegment.end - epsilon) {
-                          const nextSegment = orderedSegments[activeIndex + 1]
-                          if (nextSegment) {
-                            video.currentTime = nextSegment.start
-                            void video.play()
-                          } else {
-                            resetClipPlayback(video, activeClip)
-                          }
+                      if (currentIndex === -1) {
+                        return
+                      }
+
+                      const currentSegment = orderedSegments[currentIndex]
+                      if (now >= currentSegment.end) {
+                        const nextSegment = orderedSegments[currentIndex + 1]
+                        if (nextSegment) {
+                          event.currentTarget.currentTime = nextSegment.start
+                          void event.currentTarget.play()
+                        } else {
+                          event.currentTarget.pause()
+                          event.currentTarget.currentTime = orderedSegments[0].start
                         }
-                        return
                       }
-
-                      const nextSegment = orderedSegments.find((segment) => now < segment.start - epsilon)
-                      if (nextSegment) {
-                        video.currentTime = nextSegment.start
-                        void video.play()
-                        return
-                      }
-
-                      resetClipPlayback(video, activeClip)
                     }
                   }}
                 />
@@ -305,50 +273,46 @@ export default function HomePage(): JSX.Element {
                       <div
                         className="absolute top-0 h-full rounded-lg bg-blue-500/70"
                         style={{
-                          left: `${trimStartPercent}%`,
-                          width: `${Math.max(0, trimEndPercent - trimStartPercent)}%`,
+                          left: `${(trimStart / videoDuration) * 100}%`,
+                          width: `${((trimEnd - trimStart) / videoDuration) * 100}%`,
                         }}
                       />
                       <div className="pointer-events-none absolute left-0 top-0 h-full w-full">
-                        <div className="absolute top-0 h-full w-[2px] bg-blue-900" style={{ left: `${trimStartPercent}%` }} />
-                        <div className="absolute top-0 h-full w-[2px] bg-blue-900" style={{ left: `${trimEndPercent}%` }} />
+                        <div className="absolute top-0 h-full w-[2px] bg-blue-900" style={{ left: `${(trimStart / videoDuration) * 100}%` }} />
+                        <div className="absolute top-0 h-full w-[2px] bg-blue-900" style={{ left: `${(trimEnd / videoDuration) * 100}%` }} />
                       </div>
                     </>
                   )}
                 </div>
                 <div className="mt-3 space-y-2">
-                  <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-300">
-                    <span>Left playhead ({formatTime(trimStart)})</span>
-                    <span>Right playhead ({formatTime(trimEnd)})</span>
-                  </div>
-                  <div className="relative h-8">
-                    <input
-                      type="range"
-                      min={0}
-                      max={videoDuration || 0}
-                      step={0.1}
-                      value={trimStart}
-                      disabled={!videoDuration}
-                      onChange={(event) => {
-                        const value = Number(event.target.value)
-                        setTrimStart(Math.min(value, trimEnd - 0.1))
-                      }}
-                      className="absolute left-0 top-0 h-8 w-full"
-                    />
-                    <input
-                      type="range"
-                      min={0}
-                      max={videoDuration || 0}
-                      step={0.1}
-                      value={trimEnd}
-                      disabled={!videoDuration}
-                      onChange={(event) => {
-                        const value = Number(event.target.value)
-                        setTrimEnd(Math.max(value, trimStart + 0.1))
-                      }}
-                      className="absolute left-0 top-0 h-8 w-full"
-                    />
-                  </div>
+                  <label className="block text-xs text-slate-600 dark:text-slate-300">Left playhead ({formatTime(trimStart)})</label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={videoDuration || 0}
+                    step={0.1}
+                    value={trimStart}
+                    disabled={!videoDuration}
+                    onChange={(event) => {
+                      const value = Number(event.target.value)
+                      setTrimStart(Math.min(value, trimEnd - 0.1))
+                    }}
+                    className="w-full"
+                  />
+                  <label className="block text-xs text-slate-600 dark:text-slate-300">Right playhead ({formatTime(trimEnd)})</label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={videoDuration || 0}
+                    step={0.1}
+                    value={trimEnd}
+                    disabled={!videoDuration}
+                    onChange={(event) => {
+                      const value = Number(event.target.value)
+                      setTrimEnd(Math.max(value, trimStart + 0.1))
+                    }}
+                    className="w-full"
+                  />
                 </div>
                 <div className="mt-4 flex items-center justify-between rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-900">
                   <div className="text-xs font-medium text-slate-600 dark:text-slate-300">
