@@ -23,6 +23,7 @@ function formatTime(seconds: number): string {
 export default function HomePage(): JSX.Element {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const trimSliderRef = useRef<HTMLDivElement | null>(null)
 
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [videoDuration, setVideoDuration] = useState(0)
@@ -35,6 +36,7 @@ export default function HomePage(): JSX.Element {
   const [editorMode, setEditorMode] = useState<'trim' | 'split' | 'merge'>('trim')
   const [mergeSelection, setMergeSelection] = useState<number[]>([])
   const [mergeWarning, setMergeWarning] = useState<string | null>(null)
+  const [draggingTrimHandle, setDraggingTrimHandle] = useState<'left' | 'right' | null>(null)
 
   const { theme, toggleTheme } = useTheme()
 
