@@ -8,6 +8,11 @@ interface TrimClip {
   type: 'trim' | 'split' | 'merge'
 }
 
+interface ClipSegment {
+  start: number
+  end: number
+}
+
 function formatTime(seconds: number): string {
   const safe = Math.max(0, Math.floor(seconds))
   const mins = Math.floor(safe / 60)
@@ -18,6 +23,7 @@ function formatTime(seconds: number): string {
 export default function HomePage(): JSX.Element {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const trimSliderRef = useRef<HTMLDivElement | null>(null)
 
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [videoDuration, setVideoDuration] = useState(0)
@@ -30,6 +36,7 @@ export default function HomePage(): JSX.Element {
   const [editorMode, setEditorMode] = useState<'trim' | 'split' | 'merge'>('trim')
   const [mergeSelection, setMergeSelection] = useState<number[]>([])
   const [mergeWarning, setMergeWarning] = useState<string | null>(null)
+  const [draggingTrimHandle, setDraggingTrimHandle] = useState<'left' | 'right' | null>(null)
 
   const { theme, toggleTheme } = useTheme()
 
@@ -43,6 +50,51 @@ export default function HomePage(): JSX.Element {
     () => trimmedClips.find((clip) => clip.id === activeClipId) ?? null,
     [trimmedClips, activeClipId],
   )
+  const trimStartPercent = videoDuration > 0 ? (trimStart / videoDuration) * 100 : 0
+  const trimEndPercent = videoDuration > 0 ? (trimEnd / videoDuration) * 100 : 0
+
+  const getOrderedSegments = (clip: TrimClip): ClipSegment[] =>
+    [...clip.segments].sort((a, b) => a.start - b.start)
+
+  const resetClipPlayback = (video: HTMLVideoElement, clip: TrimClip): void => {
+    const orderedSegments = getOrderedSegments(clip)
+    if (!orderedSegments.length) return
+    video.pause()
+    video.currentTime = orderedSegments[0].start
+  }
+
+  const updateTrimHandlePosition = (clientX: number, handle: 'left' | 'right'): void => {
+    if (!trimSliderRef.current || !videoDuration) return
+    const rect = trimSliderRef.current.getBoundingClientRect()
+    const percent = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width))
+    const rawValue = percent * videoDuration
+
+    if (handle === 'left') {
+      setTrimStart(Math.min(rawValue, trimEnd - 0.1))
+      return
+    }
+    setTrimEnd(Math.max(rawValue, trimStart + 0.1))
+  }
+
+  useEffect(() => {
+    if (!draggingTrimHandle) return
+
+    const onPointerMove = (event: PointerEvent): void => {
+      updateTrimHandlePosition(event.clientX, draggingTrimHandle)
+    }
+
+    const onPointerUp = (): void => {
+      setDraggingTrimHandle(null)
+    }
+
+    window.addEventListener('pointermove', onPointerMove)
+    window.addEventListener('pointerup', onPointerUp)
+
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', onPointerUp)
+    }
+  }, [draggingTrimHandle, trimStart, trimEnd, videoDuration])
 
   const handleUpload = (event: React.ChangeEvent<HTMLInputElement>): void => {
     const file = event.target.files?.[0]
@@ -82,7 +134,9 @@ export default function HomePage(): JSX.Element {
   const seekToClip = (clip: TrimClip): void => {
     setActiveClipId(clip.id)
     if (videoRef.current) {
-      videoRef.current.currentTime = clip.segments[0].start
+      const orderedSegments = getOrderedSegments(clip)
+      if (!orderedSegments.length) return
+      videoRef.current.currentTime = orderedSegments[0].start
       void videoRef.current.play()
     }
   }
@@ -145,7 +199,9 @@ export default function HomePage(): JSX.Element {
     setActiveClipId(mergedClip.id)
 
     if (videoRef.current) {
-      videoRef.current.currentTime = mergedClip.segments[0].start
+      const orderedSegments = getOrderedSegments(mergedClip)
+      if (!orderedSegments.length) return
+      videoRef.current.currentTime = orderedSegments[0].start
       void videoRef.current.play()
     }
   }
@@ -197,31 +253,40 @@ export default function HomePage(): JSX.Element {
                     setSplitPoint(duration / 2)
                   }}
                   onTimeUpdate={(event) => {
-                    const now = event.currentTarget.currentTime
+                    const video = event.currentTarget
+                    const now = video.currentTime
                     setCurrentTime(now)
                     if (activeClip) {
-                      const orderedSegments = [...activeClip.segments].sort(
-                        (a, b) => a.start - b.start,
-                      )
-                      const currentIndex = orderedSegments.findIndex(
-                        (segment) => now >= segment.start && now <= segment.end + 0.02,
+                      const orderedSegments = getOrderedSegments(activeClip)
+                      if (!orderedSegments.length) return
+
+                      const epsilon = 0.03
+                      const activeIndex = orderedSegments.findIndex(
+                        (segment) => now >= segment.start - epsilon && now <= segment.end + epsilon,
                       )
 
-                      if (currentIndex === -1) {
+                      if (activeIndex >= 0) {
+                        const activeSegment = orderedSegments[activeIndex]
+                        if (now >= activeSegment.end - epsilon) {
+                          const nextSegment = orderedSegments[activeIndex + 1]
+                          if (nextSegment) {
+                            video.currentTime = nextSegment.start
+                            void video.play()
+                          } else {
+                            resetClipPlayback(video, activeClip)
+                          }
+                        }
                         return
                       }
 
-                      const currentSegment = orderedSegments[currentIndex]
-                      if (now >= currentSegment.end) {
-                        const nextSegment = orderedSegments[currentIndex + 1]
-                        if (nextSegment) {
-                          event.currentTarget.currentTime = nextSegment.start
-                          void event.currentTarget.play()
-                        } else {
-                          event.currentTarget.pause()
-                          event.currentTarget.currentTime = orderedSegments[0].start
-                        }
+                      const nextSegment = orderedSegments.find((segment) => now < segment.start - epsilon)
+                      if (nextSegment) {
+                        video.currentTime = nextSegment.start
+                        void video.play()
+                        return
                       }
+
+                      resetClipPlayback(video, activeClip)
                     }
                   }}
                 />
@@ -273,46 +338,67 @@ export default function HomePage(): JSX.Element {
                       <div
                         className="absolute top-0 h-full rounded-lg bg-blue-500/70"
                         style={{
-                          left: `${(trimStart / videoDuration) * 100}%`,
-                          width: `${((trimEnd - trimStart) / videoDuration) * 100}%`,
+                          left: `${trimStartPercent}%`,
+                          width: `${Math.max(0, trimEndPercent - trimStartPercent)}%`,
                         }}
                       />
                       <div className="pointer-events-none absolute left-0 top-0 h-full w-full">
-                        <div className="absolute top-0 h-full w-[2px] bg-blue-900" style={{ left: `${(trimStart / videoDuration) * 100}%` }} />
-                        <div className="absolute top-0 h-full w-[2px] bg-blue-900" style={{ left: `${(trimEnd / videoDuration) * 100}%` }} />
+                        <div className="absolute top-0 h-full w-[2px] bg-blue-900" style={{ left: `${trimStartPercent}%` }} />
+                        <div className="absolute top-0 h-full w-[2px] bg-blue-900" style={{ left: `${trimEndPercent}%` }} />
                       </div>
                     </>
                   )}
                 </div>
                 <div className="mt-3 space-y-2">
-                  <label className="block text-xs text-slate-600 dark:text-slate-300">Left playhead ({formatTime(trimStart)})</label>
-                  <input
-                    type="range"
-                    min={0}
-                    max={videoDuration || 0}
-                    step={0.1}
-                    value={trimStart}
-                    disabled={!videoDuration}
-                    onChange={(event) => {
-                      const value = Number(event.target.value)
-                      setTrimStart(Math.min(value, trimEnd - 0.1))
+                  <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-300">
+                    <span>Left playhead ({formatTime(trimStart)})</span>
+                    <span>Right playhead ({formatTime(trimEnd)})</span>
+                  </div>
+                  <div
+                    ref={trimSliderRef}
+                    className="relative h-8 rounded-md bg-slate-200 dark:bg-slate-800"
+                    onPointerDown={(event) => {
+                      if (!videoDuration) return
+                      const rect = event.currentTarget.getBoundingClientRect()
+                      const clickPercent = ((event.clientX - rect.left) / rect.width) * 100
+                      const distanceToLeft = Math.abs(clickPercent - trimStartPercent)
+                      const distanceToRight = Math.abs(clickPercent - trimEndPercent)
+                      const closestHandle = distanceToLeft <= distanceToRight ? 'left' : 'right'
+                      setDraggingTrimHandle(closestHandle)
+                      updateTrimHandlePosition(event.clientX, closestHandle)
                     }}
-                    className="w-full"
-                  />
-                  <label className="block text-xs text-slate-600 dark:text-slate-300">Right playhead ({formatTime(trimEnd)})</label>
-                  <input
-                    type="range"
-                    min={0}
-                    max={videoDuration || 0}
-                    step={0.1}
-                    value={trimEnd}
-                    disabled={!videoDuration}
-                    onChange={(event) => {
-                      const value = Number(event.target.value)
-                      setTrimEnd(Math.max(value, trimStart + 0.1))
-                    }}
-                    className="w-full"
-                  />
+                  >
+                    <div className="absolute top-1/2 h-1 -translate-y-1/2 rounded bg-slate-400/70" style={{ left: 0, right: 0 }} />
+                    <div
+                      className="absolute top-1/2 h-1 -translate-y-1/2 rounded bg-blue-600"
+                      style={{
+                        left: `${trimStartPercent}%`,
+                        width: `${Math.max(0, trimEndPercent - trimStartPercent)}%`,
+                      }}
+                    />
+                    <button
+                      type="button"
+                      disabled={!videoDuration}
+                      onPointerDown={(event) => {
+                        event.stopPropagation()
+                        setDraggingTrimHandle('left')
+                      }}
+                      className="absolute top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white bg-blue-700 shadow disabled:cursor-not-allowed"
+                      style={{ left: `${trimStartPercent}%` }}
+                      aria-label="Move left trim handle"
+                    />
+                    <button
+                      type="button"
+                      disabled={!videoDuration}
+                      onPointerDown={(event) => {
+                        event.stopPropagation()
+                        setDraggingTrimHandle('right')
+                      }}
+                      className="absolute top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white bg-blue-700 shadow disabled:cursor-not-allowed"
+                      style={{ left: `${trimEndPercent}%` }}
+                      aria-label="Move right trim handle"
+                    />
+                  </div>
                 </div>
                 <div className="mt-4 flex items-center justify-between rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-900">
                   <div className="text-xs font-medium text-slate-600 dark:text-slate-300">
