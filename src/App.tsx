@@ -5,6 +5,8 @@
 
 import React from 'react'
 import { RouterProvider, createHashRouter } from 'react-router'
+import ArchivePage from './pages/Archive'
+import DraftsPage from './pages/Drafts'
 import HomePage from './pages/Home'
 import { ThemeProvider } from './theme/ThemeProvider'
 
@@ -15,6 +17,14 @@ const router = createHashRouter([
   {
     path: '/',
     element: <HomePage />,
+  },
+  {
+    path: '/drafts',
+    element: <DraftsPage />,
+  },
+  {
+    path: '/archive',
+    element: <ArchivePage />,
   },
 ])
 
