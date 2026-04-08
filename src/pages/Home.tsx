@@ -41,7 +41,11 @@ import {
   downloadSubtitleFile,
   buildVttFromSubtitles,
 } from '../subtitles/export'
-import { generateSubtitlesFromVideo } from '../subtitles/api'
+import {
+  type AudioActivityDetectionResult,
+  detectSilenceFromVideo,
+  generateSubtitlesFromVideo,
+} from '../subtitles/api'
 import { importSubtitlesFromFile } from '../subtitles/import'
 import type { SubtitleSegment } from '../subtitles/types'
 
@@ -97,8 +101,10 @@ interface AIDraftMessage {
 }
 
 type SubtitleStatus = 'idle' | 'processing' | 'success' | 'error'
+type SilenceStatus = 'idle' | 'processing' | 'success' | 'error'
 type SubtitleTimingField = 'start' | 'end'
 type SubtitleEntryStatus = 'idle' | 'uploading' | 'generating' | 'success'
+type RightPanelView = 'ai' | 'silence' | 'subtitles' | 'scenes'
 
 interface ToolbarButtonProps {
   label: string
@@ -109,6 +115,7 @@ interface ToolbarButtonProps {
   icon: React.ComponentType<{ className?: string }>
   disabled?: boolean
   danger?: boolean
+  tone?: 'editor' | 'workspace' | 'global'
 }
 
 const AI_SUGGESTIONS: AISuggestion[] = [
@@ -229,28 +236,30 @@ function ToolbarButton({
   icon: Icon,
   disabled = false,
   danger = false,
+  tone = 'editor',
 }: ToolbarButtonProps): JSX.Element {
-  const baseTextColor = danger
+  const styles = danger
     ? isDark
-      ? 'text-[#ff8f9a]'
-      : 'text-[#a23535]'
-    : isDark
-      ? 'text-[#c6d3eb]'
-      : 'text-[#515f74]'
-  const hoverStyles = danger
-    ? isDark
-      ? 'hover:bg-[#2a1820]'
-      : 'hover:bg-[#fff1f1]'
-    : isDark
-      ? 'hover:bg-[#182238] hover:text-[#8bb8ff]'
-      : 'hover:bg-[#eef3ff] hover:text-[#003fb1]'
+      ? 'text-[#ff8f9a] hover:bg-[#2a1820]'
+      : 'text-[#a23535] hover:bg-[#fff1f1]'
+    : tone === 'workspace'
+      ? isDark
+        ? 'text-[#ff7ac8] hover:bg-[#2a1730] hover:text-[#ffb3de]'
+        : 'text-[#c2187a] hover:bg-[#fff0f8] hover:text-[#a20f66]'
+      : tone === 'global'
+        ? isDark
+          ? 'text-[#d6deec] hover:bg-[#22314a] hover:text-[#f2f6ff]'
+          : 'text-[#5b687c] hover:bg-[#f2f4f6] hover:text-[#37465d]'
+        : isDark
+          ? 'text-[#8bb8ff] hover:bg-[#182238] hover:text-[#cfe3ff]'
+          : 'text-[#003fb1] hover:bg-[#eef3ff] hover:text-[#00308a]'
 
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`group relative flex flex-col items-center gap-0.5 rounded-lg px-2.5 py-1.5 transition disabled:cursor-not-allowed disabled:opacity-40 ${baseTextColor} ${hoverStyles}`}
+      className={`group relative flex flex-col items-center gap-0.5 rounded-lg px-2.5 py-1.5 transition disabled:cursor-not-allowed disabled:opacity-40 ${styles}`}
     >
       <Icon className="h-3.5 w-3.5" />
       <span className="text-[8px] font-bold uppercase tracking-[0.18em]">
@@ -258,7 +267,7 @@ function ToolbarButton({
       </span>
       {guidedMode && (
         <div
-          className={`pointer-events-none absolute -top-[86px] left-1/2 z-20 hidden w-44 -translate-x-1/2 rounded-2xl border p-3 text-left shadow-xl group-hover:block ${
+          className={`pointer-events-none absolute -top-[102px] left-1/2 z-20 hidden w-44 -translate-x-1/2 rounded-2xl border p-3 text-left shadow-xl group-hover:block ${
             isDark
               ? 'border-[#31415a] bg-[#111827]'
               : 'border-[#d4dcff] bg-white'
@@ -608,6 +617,27 @@ function makeMockSubtitles(duration: number): SubtitleSegment[] {
   })
 }
 
+function createSpeechSegmentsFromDetection(
+  speechSegments: Array<{ start: number; end: number }>,
+  duration: number,
+): ClipSegment[] {
+  const normalized =
+    speechSegments.length > 0
+      ? speechSegments
+      : [{ start: 0, end: Math.max(1, duration || 1) }]
+
+  return normalized.map((segment, index) => ({
+    id: index + 1,
+    label: `Speech clip ${index + 1}`,
+    start: segment.start,
+    end: segment.end,
+  }))
+}
+
+function createSilenceSegmentKey(start: number, end: number, index: number): string {
+  return `${index}:${start.toFixed(3)}:${end.toFixed(3)}`
+}
+
 export default function HomePage(): JSX.Element {
   const { theme, toggleTheme } = useTheme()
   const isDark = theme === 'dark'
@@ -633,13 +663,23 @@ export default function HomePage(): JSX.Element {
   const [subtitleSegments, setSubtitleSegments] = useState<SubtitleSegment[]>([])
   const [subtitleStatus, setSubtitleStatus] = useState<SubtitleStatus>('idle')
   const [subtitleError, setSubtitleError] = useState<string | null>(null)
-  const [isSubtitlesModalOpen, setIsSubtitlesModalOpen] = useState(false)
-  const [isSubtitleEntryModalOpen, setIsSubtitleEntryModalOpen] = useState(false)
+  const [silenceStatus, setSilenceStatus] = useState<SilenceStatus>('idle')
+  const [silenceError, setSilenceError] = useState<string | null>(null)
+  const [silenceSegments, setSilenceSegments] = useState<
+    AudioActivityDetectionResult['silenceSegments']
+  >([])
+  const [selectedSilenceSegmentKeys, setSelectedSilenceSegmentKeys] = useState<string[]>(
+    [],
+  )
+  const [stagedSilenceSegmentKeys, setStagedSilenceSegmentKeys] = useState<string[]>([])
+  const [silenceNotice, setSilenceNotice] = useState<string | null>(null)
+  const [rightPanelView, setRightPanelView] = useState<RightPanelView>('ai')
   const [subtitleEntryStatus, setSubtitleEntryStatus] =
     useState<SubtitleEntryStatus>('idle')
   const [subtitleTimingDrafts, setSubtitleTimingDrafts] = useState<
     Record<string, string>
   >({})
+  const [sceneStatus, setSceneStatus] = useState<'idle' | 'pending'>('idle')
   const [segments, setSegments] = useState<ClipSegment[]>(createInitialSegments(180))
   const [selectedId, setSelectedId] = useState<number>(2)
   const [timelineThumbnails, setTimelineThumbnails] = useState<TimelineThumbnail[]>([])
@@ -658,6 +698,12 @@ export default function HomePage(): JSX.Element {
     setSegments(createInitialSegments(videoDuration))
     setSelectedId(2)
     setHistory([])
+    setSilenceStatus('idle')
+    setSilenceError(null)
+    setSilenceSegments([])
+    setSelectedSilenceSegmentKeys([])
+    setStagedSilenceSegmentKeys([])
+    setSilenceNotice(null)
   }, [videoDuration])
 
   useEffect(() => {
@@ -666,37 +712,13 @@ export default function HomePage(): JSX.Element {
     }
 
     setSelectedVideoFile(null)
+    setSilenceSegments([])
+    setSelectedSilenceSegmentKeys([])
+    setStagedSilenceSegmentKeys([])
+    setSilenceStatus('idle')
+    setSilenceError(null)
+    setSilenceNotice(null)
   }, [preloadedVideoUrl])
-
-  useEffect(() => {
-    if (!isSubtitlesModalOpen) return
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setIsSubtitlesModalOpen(false)
-      }
-    }
-
-    window.addEventListener('keydown', handleKeyDown)
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown)
-    }
-  }, [isSubtitlesModalOpen])
-
-  useEffect(() => {
-    if (!isSubtitleEntryModalOpen) return
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && subtitleEntryStatus === 'idle') {
-        setIsSubtitleEntryModalOpen(false)
-      }
-    }
-
-    window.addEventListener('keydown', handleKeyDown)
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown)
-    }
-  }, [isSubtitleEntryModalOpen, subtitleEntryStatus])
 
   useEffect(() => {
     let cancelled = false
@@ -742,6 +764,18 @@ export default function HomePage(): JSX.Element {
       : segments.length > 0
         ? segments[segments.length - 1].end
         : 180
+
+  const silenceReviewItems = silenceSegments.map((segment, index) => ({
+    ...segment,
+    key: createSilenceSegmentKey(segment.start, segment.end, index),
+    index,
+  }))
+  const selectedSilenceCount = silenceReviewItems.filter((segment) =>
+    selectedSilenceSegmentKeys.includes(segment.key),
+  ).length
+  const stagedSilenceCount = silenceReviewItems.filter((segment) =>
+    stagedSilenceSegmentKeys.includes(segment.key),
+  ).length
 
   const captureEditorState = (): EditorHistoryEntry => ({
     segments: segments.map((segment) => ({ ...segment })),
@@ -811,6 +845,8 @@ export default function HomePage(): JSX.Element {
       setSubtitleSegments(generated)
       setSubtitleTimingDrafts({})
       setSubtitleStatus('success')
+      setRightPanelView('subtitles')
+      setIsRightPanelCollapsed(false)
       return true
     } catch (error) {
       setSubtitleStatus('error')
@@ -821,6 +857,102 @@ export default function HomePage(): JSX.Element {
       )
       return false
     }
+  }
+
+  const handleRemoveSilence = async () => {
+    setRightPanelView('silence')
+    setIsRightPanelCollapsed(false)
+
+    if (!selectedVideoFile) {
+      setSilenceStatus('error')
+      setSilenceError(
+        'Upload a local video file before running silence detection.',
+      )
+      return
+    }
+
+    setSilenceStatus('processing')
+    setSilenceError(null)
+    setSilenceNotice(null)
+
+    try {
+      const detection = await detectSilenceFromVideo(selectedVideoFile, {
+        noiseThresholdDb: -35,
+        minSilenceDuration: 0.6,
+        minSegmentDuration: 0.25,
+      })
+      const nextSilenceSegments = detection.silenceSegments
+      setSilenceSegments(nextSilenceSegments)
+      setSelectedSilenceSegmentKeys(
+        nextSilenceSegments.map((segment, index) =>
+          createSilenceSegmentKey(segment.start, segment.end, index),
+        ),
+      )
+      setStagedSilenceSegmentKeys([])
+      setSilenceStatus('success')
+      setSilenceNotice(
+        nextSilenceSegments.length > 0
+          ? 'Review the detected silence ranges, then stage the ones you want the backend editor to remove later.'
+          : 'No long silence ranges were detected in this pass.',
+      )
+    } catch (error) {
+      setSilenceStatus('error')
+      setSilenceError(
+        error instanceof Error
+          ? error.message
+          : 'Silence detection failed unexpectedly.',
+      )
+    }
+  }
+
+  const handleOpenAIPanel = () => {
+    setRightPanelView('ai')
+    setIsRightPanelCollapsed(false)
+  }
+
+  const handleOpenSubtitlesPanel = () => {
+    setRightPanelView('subtitles')
+    setIsRightPanelCollapsed(false)
+    setSubtitleError(null)
+  }
+
+  const handleOpenScenesPanel = () => {
+    setRightPanelView('scenes')
+    setIsRightPanelCollapsed(false)
+    setSceneStatus('pending')
+  }
+
+  const handleToggleSilenceSelection = (key: string) => {
+    setSelectedSilenceSegmentKeys((prev) =>
+      prev.includes(key) ? prev.filter((item) => item !== key) : [...prev, key],
+    )
+  }
+
+  const handleSelectAllSilences = () => {
+    setSelectedSilenceSegmentKeys(silenceReviewItems.map((segment) => segment.key))
+    setSilenceError(null)
+  }
+
+  const handleClearSelectedSilences = () => {
+    setSelectedSilenceSegmentKeys([])
+    setSilenceError(null)
+  }
+
+  const handleApplySelectedSilences = () => {
+    if (selectedSilenceSegmentKeys.length === 0) {
+      setSilenceError(
+        'Select at least one silence range to stage it for backend removal.',
+      )
+      return
+    }
+
+    setSilenceError(null)
+    setStagedSilenceSegmentKeys([...selectedSilenceSegmentKeys])
+    setSilenceNotice(
+      `${selectedSilenceSegmentKeys.length} silence range${
+        selectedSilenceSegmentKeys.length === 1 ? '' : 's'
+      } staged for future backend removal. This does not edit playback or media yet.`,
+    )
   }
 
   const handleSplitAtPlayhead = () => {
@@ -1042,46 +1174,23 @@ export default function HomePage(): JSX.Element {
     downloadSubtitleFile(subtitleSegments, baseName, format)
   }
 
-  const handleSubtitleToolbarAction = () => {
-    if (subtitleSegments.length > 0) {
-      setIsSubtitlesModalOpen(true)
-      return
-    }
-
-    setSubtitleEntryStatus('idle')
-    setSubtitleError(null)
-    setIsSubtitleEntryModalOpen(true)
-  }
-
-  const handleReplaceSubtitles = () => {
-    setIsSubtitlesModalOpen(false)
-    setSubtitleEntryStatus('idle')
-    setSubtitleError(null)
-    setIsSubtitleEntryModalOpen(true)
-  }
-
   const handleRemoveSubtitles = () => {
     pushHistory()
     setSubtitleSegments([])
     setSubtitleStatus('idle')
     setSubtitleError(null)
     setSubtitleTimingDrafts({})
-    setIsSubtitlesModalOpen(false)
+    setSubtitleEntryStatus('idle')
   }
 
-  const closeSubtitleEntryModalAfterSuccess = () => {
-    window.setTimeout(() => {
-      setIsSubtitleEntryModalOpen(false)
-      setSubtitleEntryStatus('idle')
-    }, 700)
-  }
-
-  const handleGenerateSubtitlesFromEntryModal = async () => {
+  const handleGenerateSubtitlesFromPanel = async () => {
     setSubtitleEntryStatus('generating')
     const didSucceed = await handleGenerateSubtitles()
     if (didSucceed) {
       setSubtitleEntryStatus('success')
-      closeSubtitleEntryModalAfterSuccess()
+      window.setTimeout(() => {
+        setSubtitleEntryStatus('idle')
+      }, 700)
     } else {
       setSubtitleEntryStatus('idle')
     }
@@ -1108,7 +1217,11 @@ export default function HomePage(): JSX.Element {
       setSubtitleStatus('success')
       setSubtitleTimingDrafts({})
       setSubtitleEntryStatus('success')
-      closeSubtitleEntryModalAfterSuccess()
+      setRightPanelView('subtitles')
+      setIsRightPanelCollapsed(false)
+      window.setTimeout(() => {
+        setSubtitleEntryStatus('idle')
+      }, 700)
     } catch (error) {
       setSubtitleStatus('error')
       setSubtitleEntryStatus('idle')
@@ -1337,6 +1450,18 @@ export default function HomePage(): JSX.Element {
                 </div>
                 <div className="flex items-center justify-between text-[12px]">
                   <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
+                    Silence cleanup
+                  </span>
+                  <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
+                    {silenceStatus === 'processing'
+                      ? 'Analyzing'
+                      : silenceStatus === 'success'
+                        ? `${selectedSilenceCount}/${silenceSegments.length} selected`
+                        : 'Ready'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-[12px]">
+                  <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
                     Guided mode
                   </span>
                   <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
@@ -1405,6 +1530,13 @@ export default function HomePage(): JSX.Element {
                   setSubtitleSegments([])
                   setSubtitleStatus('idle')
                   setSubtitleError(null)
+                  setSilenceStatus('idle')
+                  setSilenceError(null)
+                  setSilenceSegments([])
+                  setSelectedSilenceSegmentKeys([])
+                  setStagedSilenceSegmentKeys([])
+                  setSilenceNotice(null)
+                  setRightPanelView('ai')
                 }}
               />
 
@@ -1519,79 +1651,96 @@ export default function HomePage(): JSX.Element {
 
                     <div className="flex flex-wrap items-center justify-center gap-1.5">
                       <ToolbarButton
-                        label="Undo"
-                        tooltip="Reverts the last timeline or subtitle change."
-                        guidedMode={guidedMode}
-                        isDark={isDark}
-                        onClick={handleUndo}
-                        icon={RotateCcw}
-                        disabled={history.length === 0}
-                      />
-                      <ToolbarButton
                         label="Trim"
-                        tooltip="Trims the intro clip forward to the next clean start."
+                        tooltip="Trim the selected clip to the current playhead."
                         guidedMode={guidedMode}
                         isDark={isDark}
                         onClick={handleTrimIntro}
                         icon={Scissors}
+                        tone="editor"
                       />
                       <ToolbarButton
                         label="Split"
-                        tooltip="Splits the selected clip at the current playhead."
+                        tooltip="Split the selected clip at the playhead."
                         guidedMode={guidedMode}
                         isDark={isDark}
                         onClick={handleSplitAtPlayhead}
                         icon={Split}
-                      />
-                      <ToolbarButton
-                        label="Detect scenes"
-                        tooltip="Jumps to a mocked scene-change suggestion in the video."
-                        guidedMode={guidedMode}
-                        isDark={isDark}
-                        onClick={() => handlePreviewSuggestion('scene-1')}
-                        icon={Clapperboard}
-                      />
-                      <ToolbarButton
-                        label="Remove silence"
-                        tooltip="Jumps to a mocked silence section for quick cleanup."
-                        guidedMode={guidedMode}
-                        isDark={isDark}
-                        onClick={() => handlePreviewSuggestion('silence-1')}
-                        icon={Mic}
-                      />
-                      <ToolbarButton
-                        label={
-                          subtitleSegments.length > 0 ? 'Edit subtitles' : 'Add subtitles'
-                        }
-                        tooltip={
-                          subtitleSegments.length > 0
-                            ? 'Opens the subtitle editor overlay so you can revise lines and export files.'
-                            : 'Generates subtitle cues from the uploaded local video using the local Faster-Whisper service.'
-                        }
-                        guidedMode={guidedMode}
-                        isDark={isDark}
-                        onClick={handleSubtitleToolbarAction}
-                        icon={Subtitles}
-                        disabled={subtitleStatus === 'processing'}
+                        tone="editor"
                       />
                       <ToolbarButton
                         label="Merge"
-                        tooltip="Combines the selected clip with the next clip in the timeline."
+                        tooltip="Merge the selected clips into a single clip."
                         guidedMode={guidedMode}
                         isDark={isDark}
                         onClick={handleMergeWithNext}
                         icon={Clapperboard}
                         disabled={!canMergeWithNext}
+                        tone="editor"
                       />
                       <ToolbarButton
                         label="Delete"
-                        tooltip="Removes the currently selected clip from the timeline."
+                        tooltip="Delete the selected clip from the timeline."
                         guidedMode={guidedMode}
                         isDark={isDark}
                         onClick={handleDeleteSelectedClip}
                         icon={Trash2}
                         disabled={!selectedSegment}
                         danger
+                      />
+                      <div className="mx-1 h-8 w-px rounded-full bg-[#d9dde5] dark:bg-[#31415a]" />
+                      <ToolbarButton
+                        label="Subtitles"
+                        tooltip={
+                          subtitleSegments.length > 0
+                            ? 'Open subtitles to review and edit your captions.'
+                            : 'Open subtitles to generate or add captions.'
+                        }
+                        guidedMode={guidedMode}
+                        isDark={isDark}
+                        onClick={handleOpenSubtitlesPanel}
+                        icon={Subtitles}
+                        disabled={subtitleStatus === 'processing'}
+                        tone="workspace"
+                      />
+                      <ToolbarButton
+                        label="Silencer"
+                        tooltip="Find silent parts you may want to remove."
+                        guidedMode={guidedMode}
+                        isDark={isDark}
+                        onClick={handleRemoveSilence}
+                        icon={Mic}
+                        disabled={silenceStatus === 'processing'}
+                        tone="workspace"
+                      />
+                      <ToolbarButton
+                        label="Scenes"
+                        tooltip="Review scene changes and split points."
+                        guidedMode={guidedMode}
+                        isDark={isDark}
+                        onClick={handleOpenScenesPanel}
+                        icon={Clapperboard}
+                        tone="workspace"
+                      />
+                      <ToolbarButton
+                        label="AI"
+                        tooltip="Open AI tools for editing help."
+                        guidedMode={guidedMode}
+                        isDark={isDark}
+                        onClick={handleOpenAIPanel}
+                        icon={Sparkles}
+                        tone="workspace"
+                      />
+                      <div className="mx-1 h-8 w-px rounded-full bg-[#d9dde5] dark:bg-[#31415a]" />
+                      <ToolbarButton
+                        label="Undo"
+                        tooltip="Undo your last change."
+                        guidedMode={guidedMode}
+                        isDark={isDark}
+                        onClick={handleUndo}
+                        icon={RotateCcw}
+                        disabled={history.length === 0}
+                        tone="global"
                       />
                     </div>
                   </div>
@@ -1607,6 +1756,20 @@ export default function HomePage(): JSX.Element {
                       }`}
                     >
                       {subtitleError}
+                    </div>
+                  </div>
+                ) : null}
+
+                {silenceError ? (
+                  <div className="mx-auto w-full max-w-[1040px] px-4 pb-4">
+                    <div
+                      className={`rounded-[20px] border px-4 py-3 text-[12px] leading-5 ${
+                        isDark
+                          ? 'border-[#6f3a45] bg-[#24141a] text-[#ffb8c0]'
+                          : 'border-[#f0b8b8] bg-[#fff3f4] text-[#a23535]'
+                      }`}
+                    >
+                      {silenceError}
                     </div>
                   </div>
                 ) : null}
@@ -1740,13 +1903,27 @@ export default function HomePage(): JSX.Element {
           <div className="mb-3 flex items-center justify-between gap-2">
             {!isRightPanelCollapsed ? (
               <div className="flex items-center gap-2">
-                <Sparkles className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
+                {rightPanelView === 'silence' ? (
+                  <Mic className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
+                ) : rightPanelView === 'scenes' ? (
+                  <Clapperboard className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
+                ) : rightPanelView === 'subtitles' ? (
+                  <Subtitles className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
+                ) : (
+                  <Sparkles className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
+                )}
                 <h2
-                  className={`font-['Manrope'] text-xs font-extrabold uppercase tracking-[0.25em] ${
+                  className={`text-[12px] font-bold uppercase tracking-[0.18em] ${
                     isDark ? 'text-[#c6d3eb]' : 'text-[#515f74]'
                   }`}
                 >
-                  AI Workspace
+                  {rightPanelView === 'silence'
+                    ? 'Silence Review'
+                    : rightPanelView === 'scenes'
+                      ? 'Scene Review'
+                    : rightPanelView === 'subtitles'
+                      ? 'Subtitles'
+                      : 'AI Workspace'}
                 </h2>
               </div>
             ) : (
@@ -1781,11 +1958,24 @@ export default function HomePage(): JSX.Element {
                     isDark ? 'text-[#8fa2c2]' : 'text-[#737686]'
                   }`}
                 >
-                  AI Workspace
+                  {rightPanelView === 'silence'
+                    ? 'Silence Review'
+                    : rightPanelView === 'scenes'
+                      ? 'Scene Review'
+                    : rightPanelView === 'subtitles'
+                      ? 'Subtitles'
+                      : 'AI Workspace'}
                 </span>
               </div>
               <div className="space-y-2">
-                {['Chapters', 'Trim', 'Captions'].map((item) => (
+                {(rightPanelView === 'silence'
+                  ? ['Silence', 'Review', 'Timeline']
+                  : rightPanelView === 'scenes'
+                    ? ['Scenes', 'Review', 'Split']
+                  : rightPanelView === 'subtitles'
+                    ? ['Subtitles', 'Review', 'Export']
+                  : ['Chapters', 'Trim', 'Captions']
+                ).map((item) => (
                   <div
                     key={item}
                     className={`rounded-full px-2 py-1 text-[9px] font-bold uppercase tracking-[0.14em] ${
@@ -1807,461 +1997,616 @@ export default function HomePage(): JSX.Element {
                   : 'border-[#d9dde5] bg-[linear-gradient(180deg,#ffffff_0%,#f7f9fb_100%)]'
               }`}
             >
-              <div className="mb-4 flex items-center gap-3">
-                <div
-                  className={`flex h-11 w-11 items-center justify-center rounded-2xl ${
-                    isDark
-                      ? 'bg-[#1b3566] text-[#9ec5ff]'
-                      : 'bg-[#eef3ff] text-[#003fb1]'
-                  }`}
-                >
-                  <Send className="h-5 w-5" />
-                </div>
-              </div>
-
-              <div className="mb-4 flex flex-wrap gap-2">
-                {AI_QUICK_ACTIONS.map((item) => (
-                  <button
-                    key={item}
-                    type="button"
-                    onClick={() => setAiPromptDraft(item)}
-                    className={`rounded-full border px-3 py-2 text-left text-[12px] transition ${
+                {rightPanelView === 'silence' ? (
+                  <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                  <div
+                    className={`mb-4 rounded-2xl border p-2 ${
                       isDark
-                        ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb] hover:border-[#4b6388] hover:bg-[#131f33]'
-                        : 'border-[#d9dde5] bg-white text-[#515f74] hover:border-[#7aa4ff] hover:bg-[#f6f9ff]'
+                        ? 'border-[#243149] bg-[#111827]'
+                        : 'border-[#e3e7ee] bg-[#fbfcfd]'
                     }`}
                   >
-                    {item}
-                  </button>
-                ))}
-              </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void handleRemoveSilence()
+                        }}
+                        disabled={silenceStatus === 'processing'}
+                        className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Detect Again
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSelectAllSilences}
+                        disabled={silenceReviewItems.length === 0}
+                        className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Select All
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleClearSelectedSilences}
+                        disabled={selectedSilenceSegmentKeys.length === 0}
+                        className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Clear
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleApplySelectedSilences}
+                        disabled={selectedSilenceSegmentKeys.length === 0}
+                        className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Apply
+                      </button>
+                    </div>
+                  </div>
 
-              <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                <div className="flex-1 space-y-3 overflow-y-auto pr-1">
-                  {aiMessages.map((message) => (
+                  {silenceError ? (
                     <div
-                      key={message.id}
-                      className={`max-w-[92%] rounded-2xl px-3 py-2 text-[12px] leading-5 ${
-                        message.role === 'user'
-                          ? isDark
-                            ? 'ml-auto bg-[#1b3566] text-[#edf2ff]'
-                            : 'ml-auto bg-[#eef3ff] text-[#003fb1]'
-                          : isDark
-                            ? 'bg-[#111827] text-[#c6d3eb]'
-                            : 'bg-white text-[#515f74]'
+                      className={`mb-4 rounded-2xl border px-4 py-3 text-[12px] leading-5 ${
+                        isDark
+                          ? 'border-[#6f3a45] bg-[#24141a] text-[#ffb8c0]'
+                          : 'border-[#f0b8b8] bg-[#fff3f4] text-[#a23535]'
                       }`}
                     >
-                      {message.text}
+                      {silenceError}
                     </div>
-                  ))}
-                </div>
+                  ) : null}
 
-                <div
-                  className={`mt-4 flex items-end gap-2 rounded-2xl border px-3 py-3 ${
-                    isDark
-                      ? 'border-[#31415a] bg-[#111827]'
-                      : 'border-[#d9dde5] bg-white'
-                  }`}
-                >
-                  <textarea
-                    value={aiPromptDraft}
-                    onChange={(event) => setAiPromptDraft(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' && !event.shiftKey) {
-                        event.preventDefault()
-                        handleSendAIPrompt()
-                      }
-                    }}
-                    placeholder="Ask AI to edit..."
-                    className={`min-h-[72px] flex-1 resize-none bg-transparent text-[12px] leading-5 outline-none ${
-                      isDark
-                        ? 'text-[#edf2ff] placeholder:text-[#71839d]'
-                        : 'text-[#191c1e] placeholder:text-[#9aa3b2]'
-                    }`}
-                  />
-                  <button
-                    type="button"
-                    onClick={handleSendAIPrompt}
-                    disabled={aiPromptDraft.trim().length === 0}
-                    className={`flex h-11 w-11 items-center justify-center rounded-2xl transition disabled:cursor-not-allowed disabled:opacity-40 ${
-                      isDark
-                        ? 'bg-[#1b3566] text-[#edf2ff] hover:bg-[#234178]'
-                        : 'bg-[#003fb1] text-white hover:bg-[#1a56db]'
-                    }`}
-                    title="Send AI prompt"
-                  >
-                    <Send className="h-4 w-4" />
-                  </button>
+                  <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                    {silenceStatus === 'processing' ? (
+                      <div
+                        className={`rounded-2xl border px-5 py-5 text-[12px] leading-6 ${
+                          isDark
+                            ? 'border-[#243149] bg-[#111827] text-[#9fb0ca]'
+                            : 'border-[#e3e7ee] bg-[#fbfcfd] text-[#57657a]'
+                        }`}
+                      >
+                        Analyzing the uploaded video for long silence ranges...
+                      </div>
+                    ) : silenceSegments.length === 0 ? (
+                      <div
+                        className={`rounded-2xl border border-dashed px-5 py-5 text-[12px] leading-6 ${
+                          isDark
+                            ? 'border-[#31415a] bg-[#111827] text-[#8fa2c2]'
+                            : 'border-[#c3c5d7] bg-[#fbfcfd] text-[#737686]'
+                        }`}
+                      >
+                        No silence ranges to review yet. Upload a local video and
+                        run Remove silence to populate this panel.
+                      </div>
+                    ) : (
+                      <div className="space-y-3 overflow-y-auto pr-1">
+                        <div
+                          className={`rounded-2xl border px-4 py-3 text-[12px] leading-5 ${
+                            isDark
+                              ? 'border-[#243149] bg-[#111827] text-[#9fb0ca]'
+                              : 'border-[#e3e7ee] bg-[#fbfcfd] text-[#57657a]'
+                          }`}
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span>
+                              {selectedSilenceCount} of {silenceReviewItems.length} selected
+                            </span>
+                            <span>
+                              {stagedSilenceCount > 0
+                                ? `${stagedSilenceCount} staged for future removal`
+                                : 'Analysis only, not applied yet'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {silenceReviewItems.map((segment) => {
+                          const isSelected = selectedSilenceSegmentKeys.includes(segment.key)
+                          const isStaged = stagedSilenceSegmentKeys.includes(segment.key)
+
+                          return (
+                          <div
+                            key={segment.key}
+                            className={`rounded-2xl border p-4 shadow-sm transition ${
+                              isSelected
+                                ? isDark
+                                  ? 'border-[#4b6388] bg-[#131f33]'
+                                  : 'border-[#7aa4ff] bg-[#f6f9ff]'
+                                : isDark
+                                  ? 'border-[#31415a] bg-[#111827]'
+                                  : 'border-[#d9dde5] bg-[#fbfcfd]'
+                            }`}
+                          >
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div className="min-w-0 flex-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span
+                                    className={`rounded-full px-2.5 py-1 text-[10px] font-mono ${
+                                      isDark
+                                        ? 'bg-[#1e293b] text-[#c6d3eb]'
+                                        : 'bg-[#f2f4f6] text-[#515f74]'
+                                    }`}
+                                  >
+                                    {formatEditableTimestamp(segment.start)} -{' '}
+                                    {formatEditableTimestamp(segment.end)}
+                                  </span>
+                                  <span
+                                    className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.14em] ${
+                                      isDark
+                                        ? 'bg-[#24141a] text-[#ffb8c0]'
+                                        : 'bg-[#fff3f4] text-[#a23535]'
+                                    }`}
+                                  >
+                                    Silence {segment.index + 1}
+                                  </span>
+                                  {isStaged ? (
+                                    <span
+                                      className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.14em] ${
+                                        isDark
+                                          ? 'bg-[#1b3566] text-[#9ec5ff]'
+                                          : 'bg-[#eef3ff] text-[#003fb1]'
+                                      }`}
+                                    >
+                                      Staged
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <p
+                                  className={`mt-2 text-[12px] leading-5 ${
+                                    isDark ? 'text-[#c6d3eb]' : 'text-[#515f74]'
+                                  }`}
+                                >
+                                  Duration: {(segment.end - segment.start).toFixed(1)}s
+                                  {' · '}
+                                  {isSelected
+                                    ? 'Selected for future removal'
+                                    : 'Excluded from the staged set'}
+                                </p>
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleSilenceSelection(segment.key)}
+                                  className={`rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] ${
+                                    isSelected
+                                      ? isDark
+                                        ? 'border-[#4b6388] bg-[#182238] text-[#9ec5ff]'
+                                        : 'border-[#7aa4ff] bg-[#eef3ff] text-[#003fb1]'
+                                      : isDark
+                                        ? 'border-[#31415a] text-[#c6d3eb]'
+                                        : 'border-[#d9dde5] text-[#515f74]'
+                                  }`}
+                                >
+                                  {isSelected ? 'Selected' : 'Select'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleSeek(segment.start)}
+                                  className="rounded-full bg-[#003fb1] px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-white"
+                                >
+                                  Go to
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
+              ) : rightPanelView === 'scenes' ? (
+                <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                  <div
+                    className={`mb-4 rounded-2xl border p-2 ${
+                      isDark
+                        ? 'border-[#243149] bg-[#111827]'
+                        : 'border-[#e3e7ee] bg-[#fbfcfd]'
+                    }`}
+                  >
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={handleOpenScenesPanel}
+                        className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition"
+                      >
+                        Detect Scenes
+                      </button>
+                      <button
+                        type="button"
+                        disabled
+                        className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Add Scene
+                      </button>
+                      <button
+                        type="button"
+                        disabled
+                        className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Edit Scenes
+                      </button>
+                      <button
+                        type="button"
+                        disabled
+                        className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Implement
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                    <div
+                      className={`mb-4 rounded-2xl border px-4 py-3 text-[12px] leading-5 ${
+                        isDark
+                          ? 'border-[#243149] bg-[#111827] text-[#9fb0ca]'
+                          : 'border-[#e3e7ee] bg-[#fbfcfd] text-[#57657a]'
+                      }`}
+                    >
+                      {sceneStatus === 'pending'
+                        ? 'Scene review UI is ready. Once backend detection is implemented, detected scene timestamps will appear here for review, editing, and split actions.'
+                        : 'Open Detect scenes to start reviewing scene boundaries.'}
+                    </div>
+
+                    <div
+                      className={`rounded-2xl border border-dashed px-5 py-5 text-[12px] leading-6 ${
+                        isDark
+                          ? 'border-[#31415a] bg-[#111827] text-[#8fa2c2]'
+                          : 'border-[#c3c5d7] bg-[#fbfcfd] text-[#737686]'
+                      }`}
+                    >
+                      <p>
+                        No scene timestamps are available yet.
+                      </p>
+                      <p className="mt-3">
+                        This panel will eventually show:
+                      </p>
+                      <div className="mt-3 space-y-3">
+                        {[
+                          'Detected scene time ranges with Go to controls',
+                          'Editable scene labels and boundary timestamps',
+                          'An Implement action to split the video by scene boundaries',
+                        ].map((item) => (
+                          <div
+                            key={item}
+                            className={`rounded-2xl border px-4 py-3 ${
+                              isDark
+                                ? 'border-[#243149] bg-[#0f172a]'
+                                : 'border-[#e3e7ee] bg-white'
+                            }`}
+                          >
+                            {item}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : rightPanelView === 'subtitles' ? (
+                <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                  <div
+                    className={`mb-4 rounded-2xl border p-2 ${
+                      isDark
+                        ? 'border-[#243149] bg-[#111827]'
+                        : 'border-[#e3e7ee] bg-[#fbfcfd]'
+                    }`}
+                  >
+                    {subtitleSegments.length === 0 ? (
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={handleSubtitleUploadClick}
+                          disabled={subtitleEntryStatus !== 'idle'}
+                          className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          Add Subtitles
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void handleGenerateSubtitlesFromPanel()
+                          }}
+                          disabled={subtitleEntryStatus !== 'idle'}
+                          className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          Generate
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={handleSubtitleUploadClick}
+                          className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition"
+                        >
+                          Replace
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleRemoveSubtitles}
+                          className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition"
+                        >
+                          Remove
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleExportSubtitle('srt')}
+                          disabled={subtitleSegments.length === 0}
+                          className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          Export SRT
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleExportSubtitle('vtt')}
+                          disabled={subtitleSegments.length === 0}
+                          className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          Export VTT
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                    {subtitleError ? (
+                      <div
+                        className={`mb-4 rounded-2xl border px-4 py-3 text-[12px] leading-5 ${
+                          isDark
+                            ? 'border-[#6f3a45] bg-[#24141a] text-[#ffb8c0]'
+                            : 'border-[#f0b8b8] bg-[#fff3f4] text-[#a23535]'
+                        }`}
+                      >
+                        {subtitleError}
+                      </div>
+                    ) : null}
+
+                    {subtitleSegments.length === 0 ? (
+                      <>
+                        <div
+                          className={`mb-4 rounded-2xl border px-4 py-3 text-[12px] leading-5 ${
+                            isDark
+                              ? 'border-[#243149] bg-[#111827] text-[#9fb0ca]'
+                              : 'border-[#e3e7ee] bg-[#fbfcfd] text-[#57657a]'
+                          }`}
+                        >
+                          {subtitleEntryStatus === 'uploading'
+                            ? 'Uploading subtitles into the current edit...'
+                            : subtitleEntryStatus === 'generating'
+                              ? 'Generating subtitles from the uploaded video...'
+                              : subtitleEntryStatus === 'success'
+                                ? 'Subtitles are ready.'
+                                : 'Choose Generate to create subtitles from the current video, or Add Subtitles to import an .srt or .vtt file.'}
+                        </div>
+                        <div
+                          className={`rounded-2xl border border-dashed px-5 py-5 text-[12px] leading-6 ${
+                            isDark
+                              ? 'border-[#31415a] bg-[#111827] text-[#8fa2c2]'
+                              : 'border-[#c3c5d7] bg-[#fbfcfd] text-[#737686]'
+                          }`}
+                        >
+                          No subtitles are available yet. Use this panel to generate a new subtitle pass or add an existing subtitle file without leaving the editor.
+                        </div>
+                      </>
+                    ) : (
+                      <div className="space-y-3 overflow-y-auto pr-1">
+                        {subtitleSegments.map((segment) => (
+                          <div
+                            key={segment.id}
+                            className={`rounded-2xl border p-4 shadow-sm ${
+                              isDark
+                                ? 'border-[#31415a] bg-[#111827]'
+                                : 'border-[#d9dde5] bg-[#fbfcfd]'
+                            }`}
+                          >
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div className="flex flex-wrap items-center gap-3">
+                                <span
+                                  className={`rounded-full px-2.5 py-1 text-[10px] font-mono ${
+                                    isDark
+                                      ? 'bg-[#1e293b] text-[#c6d3eb]'
+                                      : 'bg-[#f2f4f6] text-[#515f74]'
+                                  }`}
+                                >
+                                  {formatClock(segment.start)} - {formatClock(segment.end)}
+                                </span>
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <label className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-slate-500 dark:text-[#8fa2c2]">
+                                    <span>Start</span>
+                                    <input
+                                      type="text"
+                                      inputMode="decimal"
+                                      value={getSubtitleTimingDraft(segment, 'start')}
+                                      onChange={(event) =>
+                                        handleSubtitleTimingDraftChange(
+                                          segment.id,
+                                          'start',
+                                          event.target.value,
+                                        )
+                                      }
+                                      onBlur={() =>
+                                        handleSubtitleTimingDraftCommit(segment, 'start')
+                                      }
+                                      onKeyDown={(event) => {
+                                        if (event.key === 'Enter') {
+                                          event.currentTarget.blur()
+                                        }
+                                      }}
+                                      className={`w-20 rounded-full border px-2 py-1 text-[11px] font-medium outline-none transition ${
+                                        isDark
+                                          ? 'border-[#31415a] bg-[#0f172a] text-[#edf2ff] focus:border-[#60a5fa]'
+                                          : 'border-[#d9dde5] bg-white text-[#191c1e] focus:border-[#1a56db]'
+                                      }`}
+                                    />
+                                  </label>
+                                  <label className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-slate-500 dark:text-[#8fa2c2]">
+                                    <span>End</span>
+                                    <input
+                                      type="text"
+                                      inputMode="decimal"
+                                      value={getSubtitleTimingDraft(segment, 'end')}
+                                      onChange={(event) =>
+                                        handleSubtitleTimingDraftChange(
+                                          segment.id,
+                                          'end',
+                                          event.target.value,
+                                        )
+                                      }
+                                      onBlur={() =>
+                                        handleSubtitleTimingDraftCommit(segment, 'end')
+                                      }
+                                      onKeyDown={(event) => {
+                                        if (event.key === 'Enter') {
+                                          event.currentTarget.blur()
+                                        }
+                                      }}
+                                      className={`w-20 rounded-full border px-2 py-1 text-[11px] font-medium outline-none transition ${
+                                        isDark
+                                          ? 'border-[#31415a] bg-[#0f172a] text-[#edf2ff] focus:border-[#60a5fa]'
+                                          : 'border-[#d9dde5] bg-white text-[#191c1e] focus:border-[#1a56db]'
+                                      }`}
+                                    />
+                                  </label>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => handleSeek(segment.start)}
+                                  className="rounded-full bg-[#003fb1] px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-white"
+                                >
+                                  Go to
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteSubtitle(segment.id)}
+                                  className={`rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] ${
+                                    isDark
+                                      ? 'border-[#6f3a45] text-[#ff8f9a]'
+                                      : 'border-[#f0b8b8] text-[#a23535]'
+                                  }`}
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </div>
+                            <textarea
+                              value={segment.text}
+                              onChange={(event) =>
+                                handleUpdateSubtitle({
+                                  ...segment,
+                                  text: event.target.value,
+                                })
+                              }
+                              className={`mt-3 min-h-[88px] w-full resize-none rounded-2xl border px-3 py-3 text-[12px] leading-5 outline-none transition ${
+                                isDark
+                                  ? 'border-[#31415a] bg-[#0f172a] text-[#edf2ff] focus:border-[#60a5fa] focus:bg-[#111827]'
+                                  : 'border-[#d9dde5] bg-white text-[#191c1e] focus:border-[#1a56db] focus:bg-white'
+                              }`}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="mb-4 flex items-center gap-3">
+                    <div
+                      className={`flex h-11 w-11 items-center justify-center rounded-2xl ${
+                        isDark
+                          ? 'bg-[#1b3566] text-[#9ec5ff]'
+                          : 'bg-[#eef3ff] text-[#003fb1]'
+                      }`}
+                    >
+                      <Send className="h-5 w-5" />
+                    </div>
+                  </div>
+
+                  <div className="mb-4 flex flex-wrap gap-2">
+                    {AI_QUICK_ACTIONS.map((item) => (
+                      <button
+                        key={item}
+                        type="button"
+                        onClick={() => setAiPromptDraft(item)}
+                        className={`rounded-full border px-3 py-2 text-left text-[12px] transition ${
+                          isDark
+                            ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb] hover:border-[#4b6388] hover:bg-[#131f33]'
+                            : 'border-[#d9dde5] bg-white text-[#515f74] hover:border-[#7aa4ff] hover:bg-[#f6f9ff]'
+                        }`}
+                      >
+                        {item}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                    <div className="flex-1 space-y-3 overflow-y-auto pr-1">
+                      {aiMessages.map((message) => (
+                        <div
+                          key={message.id}
+                          className={`max-w-[92%] rounded-2xl px-3 py-2 text-[12px] leading-5 ${
+                            message.role === 'user'
+                              ? isDark
+                                ? 'ml-auto bg-[#1b3566] text-[#edf2ff]'
+                                : 'ml-auto bg-[#eef3ff] text-[#003fb1]'
+                              : isDark
+                                ? 'bg-[#111827] text-[#c6d3eb]'
+                                : 'bg-white text-[#515f74]'
+                          }`}
+                        >
+                          {message.text}
+                        </div>
+                      ))}
+                    </div>
+
+                    <div
+                      className={`mt-4 flex items-end gap-2 rounded-2xl border px-3 py-3 ${
+                        isDark
+                          ? 'border-[#31415a] bg-[#111827]'
+                          : 'border-[#d9dde5] bg-white'
+                      }`}
+                    >
+                      <textarea
+                        value={aiPromptDraft}
+                        onChange={(event) => setAiPromptDraft(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' && !event.shiftKey) {
+                            event.preventDefault()
+                            handleSendAIPrompt()
+                          }
+                        }}
+                        placeholder="Ask AI to edit..."
+                        className={`min-h-[72px] flex-1 resize-none bg-transparent text-[12px] leading-5 outline-none ${
+                          isDark
+                            ? 'text-[#edf2ff] placeholder:text-[#71839d]'
+                            : 'text-[#191c1e] placeholder:text-[#9aa3b2]'
+                        }`}
+                      />
+                      <button
+                        type="button"
+                        onClick={handleSendAIPrompt}
+                        disabled={aiPromptDraft.trim().length === 0}
+                        className={`flex h-11 w-11 items-center justify-center rounded-2xl transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                          isDark
+                            ? 'bg-[#1b3566] text-[#edf2ff] hover:bg-[#234178]'
+                            : 'bg-[#003fb1] text-white hover:bg-[#1a56db]'
+                        }`}
+                        title="Send AI prompt"
+                      >
+                        <Send className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           )}
         </aside>
       </div>
 
-      {isSubtitleEntryModalOpen ? (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-950/45 px-4 py-6 backdrop-blur-sm">
-          <div
-            className={`w-full max-w-xl rounded-[28px] border px-6 py-6 shadow-[0_30px_120px_rgba(15,23,42,0.28)] ${
-              isDark
-                ? 'border-[#31415a] bg-[#0f172a]'
-                : 'border-[#d9dde5] bg-white'
-            }`}
-          >
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h2
-                  className={`font-['Manrope'] text-lg font-extrabold tracking-[-0.03em] ${
-                    isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'
-                  }`}
-                >
-                  Add Subtitles
-                </h2>
-                <p
-                  className={`mt-1 text-[12px] leading-5 ${
-                    isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'
-                  }`}
-                >
-                  Start with an existing subtitle file or generate a fresh pass
-                  from the current video.
-                </p>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setIsSubtitleEntryModalOpen(false)}
-                disabled={subtitleEntryStatus !== 'idle'}
-                className={`rounded-full px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-40 ${
-                  isDark
-                    ? 'bg-[#182238] text-[#c6d3eb] hover:bg-[#22314a]'
-                    : 'bg-[#eef3ff] text-[#003fb1] hover:bg-[#dfe8ff]'
-                }`}
-              >
-                Close
-              </button>
-            </div>
-
-            <div className="mt-5 grid gap-3 md:grid-cols-2">
-              <button
-                type="button"
-                onClick={handleSubtitleUploadClick}
-                disabled={subtitleEntryStatus !== 'idle'}
-                className={`rounded-[22px] border px-5 py-5 text-left transition disabled:cursor-not-allowed disabled:opacity-40 ${
-                  isDark
-                    ? 'border-[#31415a] bg-[#111827] hover:border-[#4b6388] hover:bg-[#131f33]'
-                    : 'border-[#d9dde5] bg-[#fbfcfd] hover:border-[#7aa4ff] hover:bg-[#f6f9ff]'
-                }`}
-              >
-                <div
-                  className={`text-[11px] font-bold uppercase tracking-[0.18em] ${
-                    isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
-                  }`}
-                >
-                  Upload Subtitles
-                </div>
-                <p
-                  className={`mt-2 text-[12px] leading-5 ${
-                    isDark ? 'text-[#c6d3eb]' : 'text-[#515f74]'
-                  }`}
-                >
-                  Import an `.srt` or `.vtt` file and attach those cues to the
-                  current edit.
-                </p>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  void handleGenerateSubtitlesFromEntryModal()
-                }}
-                disabled={subtitleEntryStatus !== 'idle'}
-                className={`rounded-[22px] border px-5 py-5 text-left transition disabled:cursor-not-allowed disabled:opacity-40 ${
-                  isDark
-                    ? 'border-[#31415a] bg-[#111827] hover:border-[#4b6388] hover:bg-[#131f33]'
-                    : 'border-[#d9dde5] bg-[#fbfcfd] hover:border-[#7aa4ff] hover:bg-[#f6f9ff]'
-                }`}
-              >
-                <div
-                  className={`text-[11px] font-bold uppercase tracking-[0.18em] ${
-                    isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
-                  }`}
-                >
-                  Generate Subtitles
-                </div>
-                <p
-                  className={`mt-2 text-[12px] leading-5 ${
-                    isDark ? 'text-[#c6d3eb]' : 'text-[#515f74]'
-                  }`}
-                >
-                  Send the uploaded local video to the subtitle service and
-                  create a fresh editable subtitle pass.
-                </p>
-              </button>
-            </div>
-
-            <div
-              className={`mt-4 rounded-2xl border px-4 py-3 text-[12px] leading-5 ${
-                isDark
-                  ? 'border-[#243149] bg-[#111827] text-[#9fb0ca]'
-                  : 'border-[#e3e7ee] bg-[#fbfcfd] text-[#57657a]'
-              }`}
-            >
-              {subtitleEntryStatus === 'uploading'
-                ? 'Uploading subtitles...'
-                : subtitleEntryStatus === 'generating'
-                  ? 'Generating subtitles...'
-                  : subtitleEntryStatus === 'success'
-                    ? 'Subtitles are ready. Closing this window...'
-                    : 'Choose upload to import a subtitle file, or generate to create subtitles from the current video.'}
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {isSubtitlesModalOpen ? (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-950/55 px-4 py-6 backdrop-blur-sm">
-          <div
-            className={`flex h-full max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-[28px] border shadow-[0_30px_120px_rgba(15,23,42,0.35)] ${
-              isDark
-                ? 'border-[#31415a] bg-[#0f172a]'
-                : 'border-[#d9dde5] bg-white'
-            }`}
-          >
-            <header
-              className={`flex items-start justify-between gap-4 border-b px-6 py-5 ${
-                isDark ? 'border-[#243149]' : 'border-[#e3e7ee]'
-              }`}
-            >
-              <div>
-                <h2
-                  className={`font-['Manrope'] text-lg font-extrabold tracking-[-0.03em] ${
-                    isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'
-                  }`}
-                >
-                  Edit Subtitles
-                </h2>
-                <p
-                  className={`mt-1 text-[12px] leading-5 ${
-                    isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'
-                  }`}
-                >
-                  Review, rewrite, jump to cues, and export subtitle files
-                  without leaving the editor.
-                </p>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleReplaceSubtitles}
-                  className={`rounded-full border px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.16em] transition ${
-                    isDark
-                      ? 'border-[#31415a] text-[#c6d3eb] hover:bg-[#182238]'
-                      : 'border-[#d9dde5] text-[#515f74] hover:bg-[#f7f9fb]'
-                  }`}
-                >
-                  Replace
-                </button>
-                <button
-                  type="button"
-                  onClick={handleRemoveSubtitles}
-                  className={`rounded-full border px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.16em] transition ${
-                    isDark
-                      ? 'border-[#6f3a45] text-[#ff8f9a] hover:bg-[#24141a]'
-                      : 'border-[#f0b8b8] text-[#a23535] hover:bg-[#fff3f4]'
-                  }`}
-                >
-                  Remove
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleExportSubtitle('srt')}
-                  disabled={subtitleSegments.length === 0}
-                  className={`rounded-full border px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-40 ${
-                    isDark
-                      ? 'border-[#31415a] text-[#c6d3eb] hover:bg-[#182238]'
-                      : 'border-[#d9dde5] text-[#515f74] hover:bg-[#f7f9fb]'
-                  }`}
-                >
-                  Export SRT
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleExportSubtitle('vtt')}
-                  disabled={subtitleSegments.length === 0}
-                  className={`rounded-full border px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-40 ${
-                    isDark
-                      ? 'border-[#31415a] text-[#c6d3eb] hover:bg-[#182238]'
-                      : 'border-[#d9dde5] text-[#515f74] hover:bg-[#f7f9fb]'
-                  }`}
-                >
-                  Export VTT
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIsSubtitlesModalOpen(false)}
-                  className={`rounded-full px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.16em] transition ${
-                    isDark
-                      ? 'bg-[#182238] text-[#c6d3eb] hover:bg-[#22314a]'
-                      : 'bg-[#eef3ff] text-[#003fb1] hover:bg-[#dfe8ff]'
-                  }`}
-                >
-                  Close
-                </button>
-              </div>
-            </header>
-
-            <div className="flex min-h-0 flex-1 flex-col px-6 py-5">
-              {subtitleError ? (
-                <div
-                  className={`mb-4 rounded-2xl border px-4 py-3 text-[12px] leading-5 ${
-                    isDark
-                      ? 'border-[#6f3a45] bg-[#24141a] text-[#ffb8c0]'
-                      : 'border-[#f0b8b8] bg-[#fff3f4] text-[#a23535]'
-                  }`}
-                >
-                  {subtitleError}
-                </div>
-              ) : null}
-
-              {subtitleSegments.length === 0 ? (
-                <div
-                  className={`rounded-2xl border border-dashed px-5 py-5 text-[12px] leading-6 ${
-                    isDark
-                      ? 'border-[#31415a] bg-[#111827] text-[#8fa2c2]'
-                      : 'border-[#c3c5d7] bg-[#fbfcfd] text-[#737686]'
-                  }`}
-                >
-                  No subtitles are available yet. Generate them from the toolbar
-                  first, then reopen this editor.
-                </div>
-              ) : (
-                <div className="min-h-0 space-y-3 overflow-y-auto pr-1">
-                  {subtitleSegments.map((segment) => (
-                    <div
-                      key={segment.id}
-                      className={`rounded-2xl border p-4 shadow-sm ${
-                        isDark
-                          ? 'border-[#31415a] bg-[#111827]'
-                          : 'border-[#d9dde5] bg-[#fbfcfd]'
-                      }`}
-                    >
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div className="flex flex-wrap items-center gap-3">
-                          <span
-                            className={`rounded-full px-2.5 py-1 text-[10px] font-mono ${
-                              isDark
-                                ? 'bg-[#1e293b] text-[#c6d3eb]'
-                                : 'bg-[#f2f4f6] text-[#515f74]'
-                            }`}
-                          >
-                            {formatClock(segment.start)} - {formatClock(segment.end)}
-                          </span>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <label className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-slate-500 dark:text-[#8fa2c2]">
-                              <span>Start</span>
-                              <input
-                                type="text"
-                                inputMode="decimal"
-                                value={getSubtitleTimingDraft(segment, 'start')}
-                                onChange={(event) =>
-                                  handleSubtitleTimingDraftChange(
-                                    segment.id,
-                                    'start',
-                                    event.target.value,
-                                  )
-                                }
-                                onBlur={() =>
-                                  handleSubtitleTimingDraftCommit(segment, 'start')
-                                }
-                                onKeyDown={(event) => {
-                                  if (event.key === 'Enter') {
-                                    event.currentTarget.blur()
-                                  }
-                                }}
-                                className={`w-20 rounded-full border px-2 py-1 text-[11px] font-medium outline-none transition ${
-                                  isDark
-                                    ? 'border-[#31415a] bg-[#0f172a] text-[#edf2ff] focus:border-[#60a5fa]'
-                                    : 'border-[#d9dde5] bg-white text-[#191c1e] focus:border-[#1a56db]'
-                                }`}
-                              />
-                            </label>
-                            <label className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-slate-500 dark:text-[#8fa2c2]">
-                              <span>End</span>
-                              <input
-                                type="text"
-                                inputMode="decimal"
-                                value={getSubtitleTimingDraft(segment, 'end')}
-                                onChange={(event) =>
-                                  handleSubtitleTimingDraftChange(
-                                    segment.id,
-                                    'end',
-                                    event.target.value,
-                                  )
-                                }
-                                onBlur={() =>
-                                  handleSubtitleTimingDraftCommit(segment, 'end')
-                                }
-                                onKeyDown={(event) => {
-                                  if (event.key === 'Enter') {
-                                    event.currentTarget.blur()
-                                  }
-                                }}
-                                className={`w-20 rounded-full border px-2 py-1 text-[11px] font-medium outline-none transition ${
-                                  isDark
-                                    ? 'border-[#31415a] bg-[#0f172a] text-[#edf2ff] focus:border-[#60a5fa]'
-                                    : 'border-[#d9dde5] bg-white text-[#191c1e] focus:border-[#1a56db]'
-                                }`}
-                              />
-                            </label>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              handleSeek(segment.start)
-                              setIsSubtitlesModalOpen(false)
-                            }}
-                            className="rounded-full bg-[#003fb1] px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-white"
-                          >
-                            Go to
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteSubtitle(segment.id)}
-                            className={`rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] ${
-                              isDark
-                                ? 'border-[#6f3a45] text-[#ff8f9a]'
-                                : 'border-[#f0b8b8] text-[#a23535]'
-                            }`}
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </div>
-                      <textarea
-                        value={segment.text}
-                        onChange={(event) =>
-                          handleUpdateSubtitle({
-                            ...segment,
-                            text: event.target.value,
-                          })
-                        }
-                        className={`mt-3 min-h-[88px] w-full resize-none rounded-2xl border px-3 py-3 text-[12px] leading-5 outline-none transition ${
-                          isDark
-                            ? 'border-[#31415a] bg-[#0f172a] text-[#edf2ff] focus:border-[#60a5fa] focus:bg-[#111827]'
-                            : 'border-[#d9dde5] bg-white text-[#191c1e] focus:border-[#1a56db] focus:bg-white'
-                        }`}
-                      />
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      ) : null}
     </div>
   )
 }

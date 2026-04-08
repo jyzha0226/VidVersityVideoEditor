@@ -25,6 +25,9 @@ const PYTHON_BIN =
 const WORKER_PATH = fileURLToPath(
   new URL('./faster_whisper_transcribe.py', import.meta.url),
 )
+const AUDIO_ACTIVITY_WORKER_PATH = fileURLToPath(
+  new URL('./audio_activity_detect.py', import.meta.url),
+)
 const TEMP_DIR = join(tmpdir(), 'vidversity-faster-whisper')
 const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
 
@@ -66,15 +69,9 @@ function readRequestBody(request) {
   })
 }
 
-function runFasterWhisper(tempFilePath, { model, language }) {
+function runPythonWorker(workerPath, args) {
   return new Promise((resolve, reject) => {
-    const args = [WORKER_PATH, '--input', tempFilePath, '--model', model]
-
-    if (language) {
-      args.push('--language', language)
-    }
-
-    const child = spawn(PYTHON_BIN, args, {
+    const child = spawn(PYTHON_BIN, [workerPath, ...args], {
       stdio: ['ignore', 'pipe', 'pipe'],
     })
 
@@ -93,7 +90,7 @@ function runFasterWhisper(tempFilePath, { model, language }) {
         reject(
           new Error(
             stderr.trim() ||
-              `faster-whisper worker exited with code ${code ?? 'unknown'}.`,
+              `${workerPath} exited with code ${code ?? 'unknown'}.`,
           ),
         )
         return
@@ -112,6 +109,35 @@ function runFasterWhisper(tempFilePath, { model, language }) {
       }
     })
   })
+}
+
+function runFasterWhisper(tempFilePath, { model, language }) {
+  const args = ['--input', tempFilePath, '--model', model]
+
+  if (language) {
+    args.push('--language', language)
+  }
+
+  return runPythonWorker(WORKER_PATH, args)
+}
+
+function runAudioActivityDetection(
+  tempFilePath,
+  { noiseThresholdDb, minSilenceDuration, minSegmentDuration },
+) {
+  const args = ['--input', tempFilePath]
+
+  if (Number.isFinite(noiseThresholdDb)) {
+    args.push('--noise-threshold-db', `${Math.round(noiseThresholdDb)}`)
+  }
+  if (Number.isFinite(minSilenceDuration)) {
+    args.push('--min-silence-duration', `${minSilenceDuration}`)
+  }
+  if (Number.isFinite(minSegmentDuration)) {
+    args.push('--min-segment-duration', `${minSegmentDuration}`)
+  }
+
+  return runPythonWorker(AUDIO_ACTIVITY_WORKER_PATH, args)
 }
 
 await mkdir(TEMP_DIR, { recursive: true })
@@ -134,6 +160,7 @@ const server = createServer(async (request, response) => {
       ok: true,
       python: PYTHON_BIN,
       worker: WORKER_PATH,
+      audioActivityWorker: AUDIO_ACTIVITY_WORKER_PATH,
     })
     return
   }
@@ -144,12 +171,13 @@ const server = createServer(async (request, response) => {
       message: 'VidVersity subtitle API is running.',
       health: '/api/health',
       generate: '/api/subtitles/generate',
+      detectSilence: '/api/audio/detect-silence',
       python: PYTHON_BIN,
     })
     return
   }
 
-  if (request.method !== 'POST' || url.pathname !== '/api/subtitles/generate') {
+  if (request.method !== 'POST') {
     sendJson(response, 404, { error: 'Route not found.' })
     return
   }
@@ -174,8 +202,31 @@ const server = createServer(async (request, response) => {
     }
 
     await writeFile(tempFilePath, body)
-    const result = await runFasterWhisper(tempFilePath, { model, language })
-    sendJson(response, 200, result)
+    if (url.pathname === '/api/subtitles/generate') {
+      const result = await runFasterWhisper(tempFilePath, { model, language })
+      sendJson(response, 200, result)
+      return
+    }
+
+    if (url.pathname === '/api/audio/detect-silence') {
+      const noiseThresholdDb = Number(url.searchParams.get('noiseThresholdDb') || '-35')
+      const minSilenceDuration = Number(
+        url.searchParams.get('minSilenceDuration') || '0.5',
+      )
+      const minSegmentDuration = Number(
+        url.searchParams.get('minSegmentDuration') || '0.1',
+      )
+
+      const result = await runAudioActivityDetection(tempFilePath, {
+        noiseThresholdDb,
+        minSilenceDuration,
+        minSegmentDuration,
+      })
+      sendJson(response, 200, result)
+      return
+    }
+
+    sendJson(response, 404, { error: 'Route not found.' })
   } catch (error) {
     sendJson(response, 500, {
       error:
