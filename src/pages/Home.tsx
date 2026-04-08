@@ -135,6 +135,33 @@ export default function HomePage(): JSX.Element {
       videoRef.current.currentTime = trimStart
       void videoRef.current.play()
     }
+    pushHistory()
+
+    setSegments((prev) => {
+      const splitIndex = prev.findIndex((segment) => segment.id === selectedSegment.id)
+      if (splitIndex === -1) return prev
+
+      const baseId = Date.now()
+      const leftSegment: ClipSegment = {
+        id: baseId,
+        label: `${selectedSegment.label} A`,
+        start: selectedSegment.start,
+        end: playhead,
+      }
+      const rightSegment: ClipSegment = {
+        id: baseId + 1,
+        label: `${selectedSegment.label} B`,
+        start: playhead,
+        end: selectedSegment.end,
+      }
+
+      const copy = [...prev]
+      copy.splice(splitIndex, 1, leftSegment, rightSegment)
+      setSelectedId(rightSegment.id)
+      return copy
+    })
+
+    handleSeek(playhead)
   }
 
   const seekToClip = (clip: TrimClip): void => {
