@@ -6,7 +6,6 @@ import {
   FolderArchive,
   HelpCircle,
   Moon,
-  Settings,
   Sun,
   Upload,
   Video,
@@ -155,6 +154,23 @@ export default function VideoLibraryPage({
           }`}
         >
           <div className="space-y-5">
+            <nav className="space-y-1 text-sm">
+              <NavLink to="/drafts" className={navLinkClass}>
+                <Files className="h-4 w-4" />
+                Drafts
+              </NavLink>
+              <NavLink to="/archive" className={navLinkClass}>
+                <FolderArchive className="h-4 w-4" />
+                Archive
+              </NavLink>
+              <NavLink to="/" end className={navLinkClass}>
+                <Clapperboard className="h-4 w-4" />
+                Editor
+              </NavLink>
+            </nav>
+          </div>
+
+          <div className="space-y-2">
             <button
               type="button"
               onClick={handlePrimaryAction}
@@ -181,34 +197,7 @@ export default function VideoLibraryPage({
                 onChange={handleUploadVideo}
               />
             )}
-
-            <nav className="space-y-1 text-sm">
-              <NavLink to="/drafts" className={navLinkClass}>
-                <Files className="h-4 w-4" />
-                Drafts
-              </NavLink>
-              <NavLink to="/archive" className={navLinkClass}>
-                <FolderArchive className="h-4 w-4" />
-                Archive
-              </NavLink>
-              <NavLink to="/" end className={navLinkClass}>
-                <Clapperboard className="h-4 w-4" />
-                Editor
-              </NavLink>
-            </nav>
           </div>
-
-          <button
-            type="button"
-            className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition ${
-              isDark
-                ? 'text-[#9fb0ca] hover:bg-[#182238] hover:text-[#8bb8ff]'
-                : 'text-[#57657a] hover:bg-white hover:text-[#003fb1]'
-            }`}
-          >
-            <Settings className="h-4 w-4" />
-            Settings
-          </button>
         </aside>
 
         <main

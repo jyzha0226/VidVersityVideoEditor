@@ -19,12 +19,13 @@ import {
   Play,
   Scissors,
   Send,
-  Settings,
   SkipBack,
   SkipForward,
   Sparkles,
   RotateCcw,
   Save,
+  PanelRightClose,
+  PanelRightOpen,
   Split,
   Subtitles,
   Sun,
@@ -36,6 +37,12 @@ import {
 } from 'lucide-react'
 import { NavLink, useLocation } from 'react-router'
 import { useTheme } from '../theme/ThemeProvider'
+import {
+  downloadSubtitleFile,
+  buildVttFromSubtitles,
+} from '../subtitles/export'
+import { generateSubtitlesFromVideo } from '../subtitles/api'
+import { importSubtitlesFromFile } from '../subtitles/import'
 import type { SubtitleSegment } from '../subtitles/types'
 
 interface VideoPreviewHandle {
@@ -53,6 +60,7 @@ interface VideoPreviewPanelProps {
   onTimeUpdate: (timeInSeconds: number) => void
   onPlaybackStateChange: (isPlaying: boolean) => void
   onVideoSourceChange: (videoUrl: string | null) => void
+  onVideoFileChange: (file: File | null) => void
 }
 
 interface ClipSegment {
@@ -81,6 +89,16 @@ interface EditorHistoryEntry {
   selectedId: number
   subtitleSegments: SubtitleSegment[]
 }
+
+interface AIDraftMessage {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+}
+
+type SubtitleStatus = 'idle' | 'processing' | 'success' | 'error'
+type SubtitleTimingField = 'start' | 'end'
+type SubtitleEntryStatus = 'idle' | 'uploading' | 'generating' | 'success'
 
 interface ToolbarButtonProps {
   label: string
@@ -117,15 +135,13 @@ const AI_SUGGESTIONS: AISuggestion[] = [
   },
 ]
 
-function formatVttTime(seconds: number): string {
-  const totalMs = Math.max(0, Math.floor(seconds * 1000))
-  const hours = Math.floor(totalMs / 3_600_000)
-  const minutes = Math.floor((totalMs % 3_600_000) / 60_000)
-  const secs = Math.floor((totalMs % 60_000) / 1_000)
-  const ms = totalMs % 1_000
-  const pad = (n: number, size: number) => n.toString().padStart(size, '0')
-  return `${pad(hours, 2)}:${pad(minutes, 2)}:${pad(secs, 2)}.${pad(ms, 3)}`
-}
+const AI_QUICK_ACTIONS = [
+  'Split the video into chapters',
+  'Trim the first 10 seconds',
+  'Find the cleanest opening sentence',
+  'Remove long pauses across the edit',
+  'Rewrite subtitles for readability',
+]
 
 function formatClock(seconds: number): string {
   const safeSeconds = Math.max(0, Math.floor(seconds))
@@ -145,17 +161,59 @@ function formatTransportClock(seconds: number): string {
     .padStart(4, '0')}`
 }
 
-function buildVttFromSubtitles(segments: SubtitleSegment[]): string {
-  const header = 'WEBVTT\n\n'
-  const body = segments
-    .map((segment, index) => {
-      const text = segment.text.trim().length > 0 ? segment.text : '...'
-      return `${index + 1}\n${formatVttTime(segment.start)} --> ${formatVttTime(
-        segment.end,
-      )}\n${text}\n`
-    })
-    .join('\n')
-  return header + body
+function formatEditableTimestamp(seconds: number): string {
+  const safeSeconds = Math.max(0, seconds)
+  const hours = Math.floor(safeSeconds / 3600)
+  const minutes = Math.floor((safeSeconds % 3600) / 60)
+  const remainingSeconds = safeSeconds - hours * 3600 - minutes * 60
+
+  if (hours > 0) {
+    return `${hours.toString().padStart(2, '0')}:${minutes
+      .toString()
+      .padStart(2, '0')}:${remainingSeconds.toFixed(1).padStart(4, '0')}`
+  }
+
+  return `${minutes.toString().padStart(2, '0')}:${remainingSeconds
+    .toFixed(1)
+    .padStart(4, '0')}`
+}
+
+function parseEditableTimestamp(value: string): number | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+
+  const parts = trimmed.split(':')
+  if (parts.length === 1) {
+    const secondsOnly = Number(parts[0])
+    return Number.isFinite(secondsOnly) ? Math.max(0, secondsOnly) : null
+  }
+
+  if (parts.length === 2) {
+    const minutes = Number(parts[0])
+    const seconds = Number(parts[1])
+    if (!Number.isFinite(minutes) || !Number.isFinite(seconds)) {
+      return null
+    }
+
+    return Math.max(0, minutes * 60 + seconds)
+  }
+
+  if (parts.length !== 3) {
+    return null
+  }
+
+  const hours = Number(parts[0])
+  const minutes = Number(parts[1])
+  const seconds = Number(parts[2])
+  if (
+    !Number.isFinite(hours) ||
+    !Number.isFinite(minutes) ||
+    !Number.isFinite(seconds)
+  ) {
+    return null
+  }
+
+  return Math.max(0, hours * 3600 + minutes * 60 + seconds)
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -333,6 +391,7 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
       onTimeUpdate,
       onPlaybackStateChange,
       onVideoSourceChange,
+      onVideoFileChange,
     }: VideoPreviewPanelProps,
     ref,
   ): JSX.Element {
@@ -433,6 +492,7 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
       onTimeUpdate(0)
       onPlaybackStateChange(false)
       onVideoSourceChange(nextUrl)
+      onVideoFileChange(file)
     }
 
     const handleUploadClick = () => {
@@ -557,10 +617,29 @@ export default function HomePage(): JSX.Element {
     null
   const [videoDuration, setVideoDuration] = useState<number | null>(null)
   const [videoSourceUrl, setVideoSourceUrl] = useState<string | null>(null)
+  const [selectedVideoFile, setSelectedVideoFile] = useState<File | null>(null)
   const [currentTime, setCurrentTime] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
   const [guidedMode, setGuidedMode] = useState(true)
+  const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false)
+  const [aiPromptDraft, setAiPromptDraft] = useState('')
+  const [aiMessages, setAiMessages] = useState<AIDraftMessage[]>([
+    {
+      id: 'assistant-seed',
+      role: 'assistant',
+      text: 'AI actions will appear here once the backend is connected. For now, suggestion chips can prefill a request and Send stores it in this workspace panel.',
+    },
+  ])
   const [subtitleSegments, setSubtitleSegments] = useState<SubtitleSegment[]>([])
+  const [subtitleStatus, setSubtitleStatus] = useState<SubtitleStatus>('idle')
+  const [subtitleError, setSubtitleError] = useState<string | null>(null)
+  const [isSubtitlesModalOpen, setIsSubtitlesModalOpen] = useState(false)
+  const [isSubtitleEntryModalOpen, setIsSubtitleEntryModalOpen] = useState(false)
+  const [subtitleEntryStatus, setSubtitleEntryStatus] =
+    useState<SubtitleEntryStatus>('idle')
+  const [subtitleTimingDrafts, setSubtitleTimingDrafts] = useState<
+    Record<string, string>
+  >({})
   const [segments, setSegments] = useState<ClipSegment[]>(createInitialSegments(180))
   const [selectedId, setSelectedId] = useState<number>(2)
   const [timelineThumbnails, setTimelineThumbnails] = useState<TimelineThumbnail[]>([])
@@ -572,6 +651,7 @@ export default function HomePage(): JSX.Element {
 
   const videoPreviewRef = useRef<VideoPreviewHandle | null>(null)
   const timelineTrackRef = useRef<HTMLDivElement | null>(null)
+  const subtitleUploadInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     if (!videoDuration || videoDuration <= 0) return
@@ -579,6 +659,44 @@ export default function HomePage(): JSX.Element {
     setSelectedId(2)
     setHistory([])
   }, [videoDuration])
+
+  useEffect(() => {
+    if (!preloadedVideoUrl) {
+      return
+    }
+
+    setSelectedVideoFile(null)
+  }, [preloadedVideoUrl])
+
+  useEffect(() => {
+    if (!isSubtitlesModalOpen) return
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsSubtitlesModalOpen(false)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [isSubtitlesModalOpen])
+
+  useEffect(() => {
+    if (!isSubtitleEntryModalOpen) return
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && subtitleEntryStatus === 'idle') {
+        setIsSubtitleEntryModalOpen(false)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [isSubtitleEntryModalOpen, subtitleEntryStatus])
 
   useEffect(() => {
     let cancelled = false
@@ -674,9 +792,35 @@ export default function HomePage(): JSX.Element {
     handleSeek(nextStart)
   }
 
-  const handleGenerateSubtitles = () => {
+  const handleGenerateSubtitles = async (): Promise<boolean> => {
+    if (!selectedVideoFile) {
+      setSubtitleStatus('error')
+      setSubtitleError('Upload a local video file before generating subtitles.')
+      return false
+    }
+
     pushHistory()
-    setSubtitleSegments(makeMockSubtitles(totalDuration))
+    setSubtitleStatus('processing')
+    setSubtitleError(null)
+
+    try {
+      const generated = await generateSubtitlesFromVideo(selectedVideoFile, {
+        model: 'tiny.en',
+        language: 'en',
+      })
+      setSubtitleSegments(generated)
+      setSubtitleTimingDrafts({})
+      setSubtitleStatus('success')
+      return true
+    } catch (error) {
+      setSubtitleStatus('error')
+      setSubtitleError(
+        error instanceof Error
+          ? error.message
+          : 'Subtitle generation failed unexpectedly.',
+      )
+      return false
+    }
   }
 
   const handleSplitAtPlayhead = () => {
@@ -803,6 +947,7 @@ export default function HomePage(): JSX.Element {
 
   const handleUpdateSubtitle = (updated: SubtitleSegment) => {
     pushHistory()
+    setSubtitleError(null)
     setSubtitleSegments((prev) =>
       prev.map((segment) => (segment.id === updated.id ? updated : segment)),
     )
@@ -810,7 +955,169 @@ export default function HomePage(): JSX.Element {
 
   const handleDeleteSubtitle = (id: string) => {
     pushHistory()
+    setSubtitleError(null)
     setSubtitleSegments((prev) => prev.filter((segment) => segment.id !== id))
+    setSubtitleTimingDrafts((prev) => {
+      const next = { ...prev }
+      delete next[`${id}:start`]
+      delete next[`${id}:end`]
+      return next
+    })
+  }
+
+  const handleUpdateSubtitleTiming = (
+    segment: SubtitleSegment,
+    field: SubtitleTimingField,
+    nextValue: number,
+  ) => {
+    const normalizedValue = Math.max(0, nextValue)
+    const minimumGap = 0.1
+    const updatedSegment: SubtitleSegment =
+      field === 'start'
+        ? {
+            ...segment,
+            start: Math.min(normalizedValue, Math.max(0, segment.end - minimumGap)),
+          }
+        : {
+            ...segment,
+            end: Math.max(normalizedValue, segment.start + minimumGap),
+          }
+
+    handleUpdateSubtitle(updatedSegment)
+  }
+
+  const getSubtitleTimingDraft = (
+    segment: SubtitleSegment,
+    field: SubtitleTimingField,
+  ): string =>
+    subtitleTimingDrafts[`${segment.id}:${field}`] ??
+    formatEditableTimestamp(segment[field])
+
+  const handleSubtitleTimingDraftChange = (
+    segmentId: string,
+    field: SubtitleTimingField,
+    value: string,
+  ) => {
+    setSubtitleTimingDrafts((prev) => ({
+      ...prev,
+      [`${segmentId}:${field}`]: value,
+    }))
+  }
+
+  const handleSubtitleTimingDraftCommit = (
+    segment: SubtitleSegment,
+    field: SubtitleTimingField,
+  ) => {
+    const key = `${segment.id}:${field}`
+    const draft = subtitleTimingDrafts[key]
+    const parsed = parseEditableTimestamp(draft ?? formatEditableTimestamp(segment[field]))
+
+    if (parsed == null) {
+      setSubtitleError(
+        'Use subtitle times in mm:ss.s or hh:mm:ss.s format, for example 01:23.4 or 01:02:03.4.',
+      )
+      setSubtitleTimingDrafts((prev) => ({
+        ...prev,
+        [key]: formatEditableTimestamp(segment[field]),
+      }))
+      return
+    }
+
+    setSubtitleError(null)
+    handleUpdateSubtitleTiming(segment, field, parsed)
+    setSubtitleTimingDrafts((prev) => ({
+      ...prev,
+      [key]: formatEditableTimestamp(
+        field === 'start'
+          ? Math.min(parsed, Math.max(0, segment.end - 0.1))
+          : Math.max(parsed, segment.start + 0.1),
+      ),
+    }))
+  }
+
+  const handleExportSubtitle = (format: 'srt' | 'vtt') => {
+    if (subtitleSegments.length === 0) return
+
+    const baseName = selectedVideoFile?.name || 'vidversity-subtitles'
+    downloadSubtitleFile(subtitleSegments, baseName, format)
+  }
+
+  const handleSubtitleToolbarAction = () => {
+    if (subtitleSegments.length > 0) {
+      setIsSubtitlesModalOpen(true)
+      return
+    }
+
+    setSubtitleEntryStatus('idle')
+    setSubtitleError(null)
+    setIsSubtitleEntryModalOpen(true)
+  }
+
+  const handleReplaceSubtitles = () => {
+    setIsSubtitlesModalOpen(false)
+    setSubtitleEntryStatus('idle')
+    setSubtitleError(null)
+    setIsSubtitleEntryModalOpen(true)
+  }
+
+  const handleRemoveSubtitles = () => {
+    pushHistory()
+    setSubtitleSegments([])
+    setSubtitleStatus('idle')
+    setSubtitleError(null)
+    setSubtitleTimingDrafts({})
+    setIsSubtitlesModalOpen(false)
+  }
+
+  const closeSubtitleEntryModalAfterSuccess = () => {
+    window.setTimeout(() => {
+      setIsSubtitleEntryModalOpen(false)
+      setSubtitleEntryStatus('idle')
+    }, 700)
+  }
+
+  const handleGenerateSubtitlesFromEntryModal = async () => {
+    setSubtitleEntryStatus('generating')
+    const didSucceed = await handleGenerateSubtitles()
+    if (didSucceed) {
+      setSubtitleEntryStatus('success')
+      closeSubtitleEntryModalAfterSuccess()
+    } else {
+      setSubtitleEntryStatus('idle')
+    }
+  }
+
+  const handleSubtitleUploadClick = () => {
+    subtitleUploadInputRef.current?.click()
+  }
+
+  const handleSubtitleFileSelected = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+
+    setSubtitleEntryStatus('uploading')
+    setSubtitleError(null)
+
+    try {
+      const importedSegments = await importSubtitlesFromFile(file)
+      pushHistory()
+      setSubtitleSegments(importedSegments)
+      setSubtitleStatus('success')
+      setSubtitleTimingDrafts({})
+      setSubtitleEntryStatus('success')
+      closeSubtitleEntryModalAfterSuccess()
+    } catch (error) {
+      setSubtitleStatus('error')
+      setSubtitleEntryStatus('idle')
+      setSubtitleError(
+        error instanceof Error
+          ? error.message
+          : 'Subtitle upload failed unexpectedly.',
+      )
+    }
   }
 
   const handlePreviewSuggestion = (suggestionId: string) => {
@@ -834,6 +1141,21 @@ export default function HomePage(): JSX.Element {
 
   const handleTimelineZoom = (direction: -1 | 1) => {
     setTimelineZoom((prev) => clamp(prev + direction * 0.5, 1, 4))
+  }
+
+  const handleSendAIPrompt = () => {
+    const trimmed = aiPromptDraft.trim()
+    if (!trimmed) return
+
+    setAiMessages((prev) => [
+      ...prev,
+      {
+        id: `user-${Date.now()}`,
+        role: 'user',
+        text: trimmed,
+      },
+    ])
+    setAiPromptDraft('')
   }
 
   useEffect(() => {
@@ -941,10 +1263,20 @@ export default function HomePage(): JSX.Element {
       </header>
 
       <div
-        className={`grid h-[calc(100vh-68px)] grid-cols-1 overflow-hidden xl:grid-cols-[248px_minmax(0,1fr)_340px] ${
-          isDark ? 'bg-[#0b1220]' : 'bg-[#f7f9fb]'
-        }`}
+        className={`grid h-[calc(100vh-68px)] grid-cols-1 overflow-hidden ${
+          isRightPanelCollapsed
+            ? 'xl:grid-cols-[248px_minmax(0,1fr)_72px]'
+            : 'xl:grid-cols-[248px_minmax(0,1fr)_340px]'
+        } ${isDark ? 'bg-[#0b1220]' : 'bg-[#f7f9fb]'}`}
       >
+        <input
+          ref={subtitleUploadInputRef}
+          type="file"
+          accept=".srt,.vtt,text/vtt,application/x-subrip,text/plain"
+          className="hidden"
+          onChange={handleSubtitleFileSelected}
+        />
+
         <aside
           className={`hidden min-h-0 overflow-hidden border-r px-4 py-4 xl:flex xl:flex-col xl:justify-between ${
             isDark
@@ -953,37 +1285,6 @@ export default function HomePage(): JSX.Element {
           }`}
         >
           <div className="space-y-5">
-            <div className="space-y-2">
-              <button
-                type="button"
-                className="w-full rounded-xl bg-gradient-to-r from-[#003fb1] to-[#1a56db] px-4 py-3 text-sm font-semibold text-white shadow-[0_12px_30px_rgba(0,63,177,0.22)] transition hover:brightness-110"
-              >
-                Export Video
-              </button>
-              <button
-                type="button"
-                className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${
-                  isDark
-                    ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
-                    : 'border border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb] hover:text-[#003fb1]'
-                }`}
-              >
-                <Save className="h-4 w-4" />
-                Save Draft
-              </button>
-              <button
-                type="button"
-                className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${
-                  isDark
-                    ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
-                    : 'border border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb] hover:text-[#003fb1]'
-                }`}
-              >
-                <FolderArchive className="h-4 w-4" />
-                Archive Video
-              </button>
-            </div>
-
             <nav className="space-y-1 text-sm">
               <NavLink to="/drafts" className={navLinkClass}>
                 <Files className="h-4 w-4" />
@@ -998,19 +1299,84 @@ export default function HomePage(): JSX.Element {
                 Editor
               </NavLink>
             </nav>
+
+            <div
+              className={`rounded-[20px] border px-4 py-4 ${
+                isDark
+                  ? 'border-[#243149] bg-[#0f172a]'
+                  : 'border-[#e3e7ee] bg-white'
+              }`}
+            >
+              <p
+                className={`text-[11px] font-bold uppercase tracking-[0.18em] ${
+                  isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+                }`}
+              >
+                Session Status
+              </p>
+              <div className="mt-3 space-y-3">
+                <div className="flex items-center justify-between text-[12px]">
+                  <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
+                    Video loaded
+                  </span>
+                  <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
+                    {selectedVideoFile || videoSourceUrl ? 'Ready' : 'Waiting'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-[12px]">
+                  <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
+                    Subtitles
+                  </span>
+                  <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
+                    {subtitleSegments.length > 0
+                      ? `${subtitleSegments.length} loaded`
+                      : subtitleStatus === 'processing'
+                        ? 'Processing'
+                        : 'Not added'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-[12px]">
+                  <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
+                    Guided mode
+                  </span>
+                  <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
+                    {guidedMode ? 'On' : 'Off'}
+                  </span>
+                </div>
+              </div>
+            </div>
           </div>
 
-          <button
-            type="button"
-            className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition ${
-              isDark
-                ? 'text-[#9fb0ca] hover:bg-[#182238] hover:text-[#8bb8ff]'
-                : 'text-[#57657a] hover:bg-white hover:text-[#003fb1]'
-            }`}
-          >
-            <Settings className="h-4 w-4" />
-            Settings
-          </button>
+          <div className="space-y-2">
+            <button
+              type="button"
+              className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${
+                isDark
+                  ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
+                  : 'border border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb] hover:text-[#003fb1]'
+              }`}
+            >
+              <Save className="h-4 w-4" />
+              Save Draft
+            </button>
+            <button
+              type="button"
+              className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${
+                isDark
+                  ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
+                  : 'border border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb] hover:text-[#003fb1]'
+              }`}
+            >
+              <FolderArchive className="h-4 w-4" />
+              Archive Video
+            </button>
+            <button
+              type="button"
+              className="w-full rounded-xl bg-gradient-to-r from-[#003fb1] to-[#1a56db] px-4 py-3 text-sm font-semibold text-white shadow-[0_12px_30px_rgba(0,63,177,0.22)] transition hover:brightness-110"
+            >
+              Export Video
+            </button>
+          </div>
         </aside>
 
         <main
@@ -1034,6 +1400,12 @@ export default function HomePage(): JSX.Element {
                 onPlaybackStateChange={setIsPlaying}
                 onTimeUpdate={setCurrentTime}
                 onVideoSourceChange={setVideoSourceUrl}
+                onVideoFileChange={(file) => {
+                  setSelectedVideoFile(file)
+                  setSubtitleSegments([])
+                  setSubtitleStatus('idle')
+                  setSubtitleError(null)
+                }}
               />
 
               <section
@@ -1188,12 +1560,19 @@ export default function HomePage(): JSX.Element {
                         icon={Mic}
                       />
                       <ToolbarButton
-                        label="Add subtitles"
-                        tooltip="Generates a mock subtitle pass you can edit on the right."
+                        label={
+                          subtitleSegments.length > 0 ? 'Edit subtitles' : 'Add subtitles'
+                        }
+                        tooltip={
+                          subtitleSegments.length > 0
+                            ? 'Opens the subtitle editor overlay so you can revise lines and export files.'
+                            : 'Generates subtitle cues from the uploaded local video using the local Faster-Whisper service.'
+                        }
                         guidedMode={guidedMode}
                         isDark={isDark}
-                        onClick={handleGenerateSubtitles}
+                        onClick={handleSubtitleToolbarAction}
                         icon={Subtitles}
+                        disabled={subtitleStatus === 'processing'}
                       />
                       <ToolbarButton
                         label="Merge"
@@ -1217,6 +1596,20 @@ export default function HomePage(): JSX.Element {
                     </div>
                   </div>
                 </div>
+
+                {subtitleError ? (
+                  <div className="mx-auto w-full max-w-[1040px] px-4 pb-4">
+                    <div
+                      className={`rounded-[20px] border px-4 py-3 text-[12px] leading-5 ${
+                        isDark
+                          ? 'border-[#6f3a45] bg-[#24141a] text-[#ffb8c0]'
+                          : 'border-[#f0b8b8] bg-[#fff3f4] text-[#a23535]'
+                      }`}
+                    >
+                      {subtitleError}
+                    </div>
+                  </div>
+                ) : null}
 
                 <div className="mx-auto w-full max-w-[1040px] px-4 pb-4">
                   <div
@@ -1344,26 +1737,77 @@ export default function HomePage(): JSX.Element {
               : 'border-[#d9dde5] bg-white'
           }`}
         >
-          <div className="mb-3 flex items-center gap-2">
-            <Sparkles className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
-            <h2
-              className={`font-['Manrope'] text-xs font-extrabold uppercase tracking-[0.25em] ${
-                isDark ? 'text-[#c6d3eb]' : 'text-[#515f74]'
+          <div className="mb-3 flex items-center justify-between gap-2">
+            {!isRightPanelCollapsed ? (
+              <div className="flex items-center gap-2">
+                <Sparkles className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
+                <h2
+                  className={`font-['Manrope'] text-xs font-extrabold uppercase tracking-[0.25em] ${
+                    isDark ? 'text-[#c6d3eb]' : 'text-[#515f74]'
+                  }`}
+                >
+                  AI Workspace
+                </h2>
+              </div>
+            ) : (
+              <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-2xl bg-[#eef3ff] text-[#003fb1] dark:bg-[#1b3566] dark:text-[#9ec5ff]">
+                <Sparkles className="h-4 w-4" />
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setIsRightPanelCollapsed((prev) => !prev)}
+              className={`flex h-10 w-10 items-center justify-center rounded-2xl border transition ${
+                isDark
+                  ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb] hover:bg-[#182238]'
+                  : 'border-[#d9dde5] bg-[#fbfcfd] text-[#515f74] hover:bg-white'
               }`}
+              title={isRightPanelCollapsed ? 'Expand right panel' : 'Collapse right panel'}
             >
-              AI Assistant
-            </h2>
+              {isRightPanelCollapsed ? (
+                <PanelRightOpen className="h-4 w-4" />
+              ) : (
+                <PanelRightClose className="h-4 w-4" />
+              )}
+            </button>
           </div>
 
-          <div className="flex min-h-0 flex-1 flex-col gap-3">
+          {isRightPanelCollapsed ? (
+            <div className="flex min-h-0 flex-1 flex-col items-center justify-between py-2">
+              <div className="writing-mode-vertical text-center [writing-mode:vertical-rl]">
+                <span
+                  className={`text-[10px] font-bold uppercase tracking-[0.2em] ${
+                    isDark ? 'text-[#8fa2c2]' : 'text-[#737686]'
+                  }`}
+                >
+                  AI Workspace
+                </span>
+              </div>
+              <div className="space-y-2">
+                {['Chapters', 'Trim', 'Captions'].map((item) => (
+                  <div
+                    key={item}
+                    className={`rounded-full px-2 py-1 text-[9px] font-bold uppercase tracking-[0.14em] ${
+                      isDark
+                        ? 'bg-[#111827] text-[#8fa2c2]'
+                        : 'bg-[#f2f4f6] text-[#637287]'
+                    }`}
+                  >
+                    {item}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
             <div
-              className={`rounded-[22px] border border-dashed p-4 ${
+              className={`flex min-h-0 flex-1 flex-col rounded-[22px] border p-4 ${
                 isDark
-                  ? 'border-[#31415a] bg-[#0f172a]'
-                  : 'border-[#c3c5d7] bg-[#f7f9fb]'
+                  ? 'border-[#31415a] bg-[linear-gradient(180deg,#0f172a_0%,#111827_100%)]'
+                  : 'border-[#d9dde5] bg-[linear-gradient(180deg,#ffffff_0%,#f7f9fb_100%)]'
               }`}
             >
-              <div className="flex items-center gap-3">
+              <div className="mb-4 flex items-center gap-3">
                 <div
                   className={`flex h-11 w-11 items-center justify-center rounded-2xl ${
                     isDark
@@ -1373,98 +1817,412 @@ export default function HomePage(): JSX.Element {
                 >
                   <Send className="h-5 w-5" />
                 </div>
-                <div>
-                  <p
-                    className={`text-[11px] font-bold uppercase tracking-[0.18em] ${
-                      isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+              </div>
+
+              <div className="mb-4 flex flex-wrap gap-2">
+                {AI_QUICK_ACTIONS.map((item) => (
+                  <button
+                    key={item}
+                    type="button"
+                    onClick={() => setAiPromptDraft(item)}
+                    className={`rounded-full border px-3 py-2 text-left text-[12px] transition ${
+                      isDark
+                        ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb] hover:border-[#4b6388] hover:bg-[#131f33]'
+                        : 'border-[#d9dde5] bg-white text-[#515f74] hover:border-[#7aa4ff] hover:bg-[#f6f9ff]'
                     }`}
                   >
-                    Chat Placement
-                  </p>
-                  <p
-                    className={`mt-1 text-sm font-semibold ${
-                      isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'
+                    {item}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                <div className="flex-1 space-y-3 overflow-y-auto pr-1">
+                  {aiMessages.map((message) => (
+                    <div
+                      key={message.id}
+                      className={`max-w-[92%] rounded-2xl px-3 py-2 text-[12px] leading-5 ${
+                        message.role === 'user'
+                          ? isDark
+                            ? 'ml-auto bg-[#1b3566] text-[#edf2ff]'
+                            : 'ml-auto bg-[#eef3ff] text-[#003fb1]'
+                          : isDark
+                            ? 'bg-[#111827] text-[#c6d3eb]'
+                            : 'bg-white text-[#515f74]'
+                      }`}
+                    >
+                      {message.text}
+                    </div>
+                  ))}
+                </div>
+
+                <div
+                  className={`mt-4 flex items-end gap-2 rounded-2xl border px-3 py-3 ${
+                    isDark
+                      ? 'border-[#31415a] bg-[#111827]'
+                      : 'border-[#d9dde5] bg-white'
+                  }`}
+                >
+                  <textarea
+                    value={aiPromptDraft}
+                    onChange={(event) => setAiPromptDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' && !event.shiftKey) {
+                        event.preventDefault()
+                        handleSendAIPrompt()
+                      }
+                    }}
+                    placeholder="Ask AI to edit..."
+                    className={`min-h-[72px] flex-1 resize-none bg-transparent text-[12px] leading-5 outline-none ${
+                      isDark
+                        ? 'text-[#edf2ff] placeholder:text-[#71839d]'
+                        : 'text-[#191c1e] placeholder:text-[#9aa3b2]'
                     }`}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSendAIPrompt}
+                    disabled={aiPromptDraft.trim().length === 0}
+                    className={`flex h-11 w-11 items-center justify-center rounded-2xl transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                      isDark
+                        ? 'bg-[#1b3566] text-[#edf2ff] hover:bg-[#234178]'
+                        : 'bg-[#003fb1] text-white hover:bg-[#1a56db]'
+                    }`}
+                    title="Send AI prompt"
                   >
-                    Future AI chat area
-                  </p>
+                    <Send className="h-4 w-4" />
+                  </button>
                 </div>
               </div>
-              <p
-                className={`mt-3 text-[12px] leading-5 ${
-                  isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'
-                }`}
-              >
-                The mock chat history has been removed. This area is now reserved
-                for the real assistant workflow we will integrate later.
-              </p>
-              <div
-                className={`mt-3 rounded-2xl border px-4 py-3 text-[12px] ${
-                  isDark
-                    ? 'border-[#31415a] bg-[#111827] text-[#71839d]'
-                    : 'border-[#d9dde5] bg-white text-[#9aa3b2]'
-                }`}
-              >
-                Ask AI to edit...
+            </div>
+          )}
+        </aside>
+      </div>
+
+      {isSubtitleEntryModalOpen ? (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-950/45 px-4 py-6 backdrop-blur-sm">
+          <div
+            className={`w-full max-w-xl rounded-[28px] border px-6 py-6 shadow-[0_30px_120px_rgba(15,23,42,0.28)] ${
+              isDark
+                ? 'border-[#31415a] bg-[#0f172a]'
+                : 'border-[#d9dde5] bg-white'
+            }`}
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2
+                  className={`font-['Manrope'] text-lg font-extrabold tracking-[-0.03em] ${
+                    isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'
+                  }`}
+                >
+                  Add Subtitles
+                </h2>
+                <p
+                  className={`mt-1 text-[12px] leading-5 ${
+                    isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'
+                  }`}
+                >
+                  Start with an existing subtitle file or generate a fresh pass
+                  from the current video.
+                </p>
               </div>
+
+              <button
+                type="button"
+                onClick={() => setIsSubtitleEntryModalOpen(false)}
+                disabled={subtitleEntryStatus !== 'idle'}
+                className={`rounded-full px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                  isDark
+                    ? 'bg-[#182238] text-[#c6d3eb] hover:bg-[#22314a]'
+                    : 'bg-[#eef3ff] text-[#003fb1] hover:bg-[#dfe8ff]'
+                }`}
+              >
+                Close
+              </button>
             </div>
 
-            <div
-              className={`min-h-0 flex-1 rounded-[22px] border p-3 shadow-[0_10px_30px_rgba(15,23,42,0.04)] ${
-                isDark
-                  ? 'border-[#243149] bg-[#0f172a]'
-                  : 'border-[#d9dde5] bg-[#fbfcfd]'
-              }`}
-            >
-              <div className="mb-2 flex items-center justify-between">
-                <h3
+            <div className="mt-5 grid gap-3 md:grid-cols-2">
+              <button
+                type="button"
+                onClick={handleSubtitleUploadClick}
+                disabled={subtitleEntryStatus !== 'idle'}
+                className={`rounded-[22px] border px-5 py-5 text-left transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                  isDark
+                    ? 'border-[#31415a] bg-[#111827] hover:border-[#4b6388] hover:bg-[#131f33]'
+                    : 'border-[#d9dde5] bg-[#fbfcfd] hover:border-[#7aa4ff] hover:bg-[#f6f9ff]'
+                }`}
+              >
+                <div
                   className={`text-[11px] font-bold uppercase tracking-[0.18em] ${
+                    isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+                  }`}
+                >
+                  Upload Subtitles
+                </div>
+                <p
+                  className={`mt-2 text-[12px] leading-5 ${
                     isDark ? 'text-[#c6d3eb]' : 'text-[#515f74]'
                   }`}
                 >
-                  Subtitles
-                </h3>
-                <span className={`text-[10px] ${isDark ? 'text-[#8fa2c2]' : 'text-[#737686]'}`}>
-                  {subtitleSegments.length} items
-                </span>
+                  Import an `.srt` or `.vtt` file and attach those cues to the
+                  current edit.
+                </p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  void handleGenerateSubtitlesFromEntryModal()
+                }}
+                disabled={subtitleEntryStatus !== 'idle'}
+                className={`rounded-[22px] border px-5 py-5 text-left transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                  isDark
+                    ? 'border-[#31415a] bg-[#111827] hover:border-[#4b6388] hover:bg-[#131f33]'
+                    : 'border-[#d9dde5] bg-[#fbfcfd] hover:border-[#7aa4ff] hover:bg-[#f6f9ff]'
+                }`}
+              >
+                <div
+                  className={`text-[11px] font-bold uppercase tracking-[0.18em] ${
+                    isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+                  }`}
+                >
+                  Generate Subtitles
+                </div>
+                <p
+                  className={`mt-2 text-[12px] leading-5 ${
+                    isDark ? 'text-[#c6d3eb]' : 'text-[#515f74]'
+                  }`}
+                >
+                  Send the uploaded local video to the subtitle service and
+                  create a fresh editable subtitle pass.
+                </p>
+              </button>
+            </div>
+
+            <div
+              className={`mt-4 rounded-2xl border px-4 py-3 text-[12px] leading-5 ${
+                isDark
+                  ? 'border-[#243149] bg-[#111827] text-[#9fb0ca]'
+                  : 'border-[#e3e7ee] bg-[#fbfcfd] text-[#57657a]'
+              }`}
+            >
+              {subtitleEntryStatus === 'uploading'
+                ? 'Uploading subtitles...'
+                : subtitleEntryStatus === 'generating'
+                  ? 'Generating subtitles...'
+                  : subtitleEntryStatus === 'success'
+                    ? 'Subtitles are ready. Closing this window...'
+                    : 'Choose upload to import a subtitle file, or generate to create subtitles from the current video.'}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {isSubtitlesModalOpen ? (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-950/55 px-4 py-6 backdrop-blur-sm">
+          <div
+            className={`flex h-full max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-[28px] border shadow-[0_30px_120px_rgba(15,23,42,0.35)] ${
+              isDark
+                ? 'border-[#31415a] bg-[#0f172a]'
+                : 'border-[#d9dde5] bg-white'
+            }`}
+          >
+            <header
+              className={`flex items-start justify-between gap-4 border-b px-6 py-5 ${
+                isDark ? 'border-[#243149]' : 'border-[#e3e7ee]'
+              }`}
+            >
+              <div>
+                <h2
+                  className={`font-['Manrope'] text-lg font-extrabold tracking-[-0.03em] ${
+                    isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'
+                  }`}
+                >
+                  Edit Subtitles
+                </h2>
+                <p
+                  className={`mt-1 text-[12px] leading-5 ${
+                    isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'
+                  }`}
+                >
+                  Review, rewrite, jump to cues, and export subtitle files
+                  without leaving the editor.
+                </p>
               </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleReplaceSubtitles}
+                  className={`rounded-full border px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.16em] transition ${
+                    isDark
+                      ? 'border-[#31415a] text-[#c6d3eb] hover:bg-[#182238]'
+                      : 'border-[#d9dde5] text-[#515f74] hover:bg-[#f7f9fb]'
+                  }`}
+                >
+                  Replace
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRemoveSubtitles}
+                  className={`rounded-full border px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.16em] transition ${
+                    isDark
+                      ? 'border-[#6f3a45] text-[#ff8f9a] hover:bg-[#24141a]'
+                      : 'border-[#f0b8b8] text-[#a23535] hover:bg-[#fff3f4]'
+                  }`}
+                >
+                  Remove
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleExportSubtitle('srt')}
+                  disabled={subtitleSegments.length === 0}
+                  className={`rounded-full border px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                    isDark
+                      ? 'border-[#31415a] text-[#c6d3eb] hover:bg-[#182238]'
+                      : 'border-[#d9dde5] text-[#515f74] hover:bg-[#f7f9fb]'
+                  }`}
+                >
+                  Export SRT
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleExportSubtitle('vtt')}
+                  disabled={subtitleSegments.length === 0}
+                  className={`rounded-full border px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                    isDark
+                      ? 'border-[#31415a] text-[#c6d3eb] hover:bg-[#182238]'
+                      : 'border-[#d9dde5] text-[#515f74] hover:bg-[#f7f9fb]'
+                  }`}
+                >
+                  Export VTT
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsSubtitlesModalOpen(false)}
+                  className={`rounded-full px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.16em] transition ${
+                    isDark
+                      ? 'bg-[#182238] text-[#c6d3eb] hover:bg-[#22314a]'
+                      : 'bg-[#eef3ff] text-[#003fb1] hover:bg-[#dfe8ff]'
+                  }`}
+                >
+                  Close
+                </button>
+              </div>
+            </header>
+
+            <div className="flex min-h-0 flex-1 flex-col px-6 py-5">
+              {subtitleError ? (
+                <div
+                  className={`mb-4 rounded-2xl border px-4 py-3 text-[12px] leading-5 ${
+                    isDark
+                      ? 'border-[#6f3a45] bg-[#24141a] text-[#ffb8c0]'
+                      : 'border-[#f0b8b8] bg-[#fff3f4] text-[#a23535]'
+                  }`}
+                >
+                  {subtitleError}
+                </div>
+              ) : null}
 
               {subtitleSegments.length === 0 ? (
                 <div
-                  className={`rounded-2xl border border-dashed px-4 py-4 text-[11px] leading-5 ${
+                  className={`rounded-2xl border border-dashed px-5 py-5 text-[12px] leading-6 ${
                     isDark
                       ? 'border-[#31415a] bg-[#111827] text-[#8fa2c2]'
-                      : 'border-[#c3c5d7] bg-white text-[#737686]'
+                      : 'border-[#c3c5d7] bg-[#fbfcfd] text-[#737686]'
                   }`}
                 >
-                  Generate mock subtitles to edit text, jump to a subtitle,
-                  or delete lines from the current pass.
+                  No subtitles are available yet. Generate them from the toolbar
+                  first, then reopen this editor.
                 </div>
               ) : (
-                <div className="max-h-full space-y-2 overflow-y-auto pr-1">
+                <div className="min-h-0 space-y-3 overflow-y-auto pr-1">
                   {subtitleSegments.map((segment) => (
                     <div
                       key={segment.id}
-                      className={`rounded-2xl border p-3 shadow-sm ${
+                      className={`rounded-2xl border p-4 shadow-sm ${
                         isDark
                           ? 'border-[#31415a] bg-[#111827]'
-                          : 'border-[#d9dde5] bg-white'
+                          : 'border-[#d9dde5] bg-[#fbfcfd]'
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-2">
-                        <span
-                          className={`rounded-full px-2 py-1 text-[10px] font-mono ${
-                            isDark
-                              ? 'bg-[#1e293b] text-[#c6d3eb]'
-                              : 'bg-[#f2f4f6] text-[#515f74]'
-                          }`}
-                        >
-                          {formatClock(segment.start)} - {formatClock(segment.end)}
-                        </span>
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="flex flex-wrap items-center gap-3">
+                          <span
+                            className={`rounded-full px-2.5 py-1 text-[10px] font-mono ${
+                              isDark
+                                ? 'bg-[#1e293b] text-[#c6d3eb]'
+                                : 'bg-[#f2f4f6] text-[#515f74]'
+                            }`}
+                          >
+                            {formatClock(segment.start)} - {formatClock(segment.end)}
+                          </span>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <label className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-slate-500 dark:text-[#8fa2c2]">
+                              <span>Start</span>
+                              <input
+                                type="text"
+                                inputMode="decimal"
+                                value={getSubtitleTimingDraft(segment, 'start')}
+                                onChange={(event) =>
+                                  handleSubtitleTimingDraftChange(
+                                    segment.id,
+                                    'start',
+                                    event.target.value,
+                                  )
+                                }
+                                onBlur={() =>
+                                  handleSubtitleTimingDraftCommit(segment, 'start')
+                                }
+                                onKeyDown={(event) => {
+                                  if (event.key === 'Enter') {
+                                    event.currentTarget.blur()
+                                  }
+                                }}
+                                className={`w-20 rounded-full border px-2 py-1 text-[11px] font-medium outline-none transition ${
+                                  isDark
+                                    ? 'border-[#31415a] bg-[#0f172a] text-[#edf2ff] focus:border-[#60a5fa]'
+                                    : 'border-[#d9dde5] bg-white text-[#191c1e] focus:border-[#1a56db]'
+                                }`}
+                              />
+                            </label>
+                            <label className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-slate-500 dark:text-[#8fa2c2]">
+                              <span>End</span>
+                              <input
+                                type="text"
+                                inputMode="decimal"
+                                value={getSubtitleTimingDraft(segment, 'end')}
+                                onChange={(event) =>
+                                  handleSubtitleTimingDraftChange(
+                                    segment.id,
+                                    'end',
+                                    event.target.value,
+                                  )
+                                }
+                                onBlur={() =>
+                                  handleSubtitleTimingDraftCommit(segment, 'end')
+                                }
+                                onKeyDown={(event) => {
+                                  if (event.key === 'Enter') {
+                                    event.currentTarget.blur()
+                                  }
+                                }}
+                                className={`w-20 rounded-full border px-2 py-1 text-[11px] font-medium outline-none transition ${
+                                  isDark
+                                    ? 'border-[#31415a] bg-[#0f172a] text-[#edf2ff] focus:border-[#60a5fa]'
+                                    : 'border-[#d9dde5] bg-white text-[#191c1e] focus:border-[#1a56db]'
+                                }`}
+                              />
+                            </label>
+                          </div>
+                        </div>
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
-                            onClick={() => handleSeek(segment.start)}
+                            onClick={() => {
+                              handleSeek(segment.start)
+                              setIsSubtitlesModalOpen(false)
+                            }}
                             className="rounded-full bg-[#003fb1] px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-white"
                           >
                             Go to
@@ -1490,10 +2248,10 @@ export default function HomePage(): JSX.Element {
                             text: event.target.value,
                           })
                         }
-                        className={`mt-3 min-h-[76px] w-full resize-none rounded-2xl border px-3 py-3 text-[12px] leading-5 outline-none transition ${
+                        className={`mt-3 min-h-[88px] w-full resize-none rounded-2xl border px-3 py-3 text-[12px] leading-5 outline-none transition ${
                           isDark
                             ? 'border-[#31415a] bg-[#0f172a] text-[#edf2ff] focus:border-[#60a5fa] focus:bg-[#111827]'
-                            : 'border-[#d9dde5] bg-[#f7f9fb] text-[#191c1e] focus:border-[#1a56db] focus:bg-white'
+                            : 'border-[#d9dde5] bg-white text-[#191c1e] focus:border-[#1a56db] focus:bg-white'
                         }`}
                       />
                     </div>
@@ -1502,8 +2260,8 @@ export default function HomePage(): JSX.Element {
               )}
             </div>
           </div>
-        </aside>
-      </div>
+        </div>
+      ) : null}
     </div>
   )
 }
