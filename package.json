@@ -3,8 +3,7 @@
   "version": "1.0.0",
   "scripts": {
     "dev": "node scripts/build.mjs",
-    "build": "node scripts/build.mjs --production",
-    "subtitles:server": "node scripts/subtitle-server.mjs"
+    "build": "node scripts/build.mjs --production"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.0.1",
