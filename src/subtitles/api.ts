@@ -26,6 +26,25 @@ export interface AudioActivityDetectionResult {
   }>
 }
 
+export interface EditorClipSegment {
+  id: number
+  label: string
+  start: number
+  end: number
+}
+
+export interface EditorSessionState {
+  sessionId: string
+  duration: number
+  selectedSegmentId: number | null
+  segments: EditorClipSegment[]
+}
+
+export interface RenderedEditorVideo {
+  blob: Blob
+  fileName: string
+}
+
 interface SubtitleApiResponse {
   segments?: Array<{
     id?: string
@@ -40,6 +59,19 @@ interface AudioActivityApiResponse {
   audioDuration?: number
   silenceSegments?: AudioActivitySegment[]
   speechSegments?: AudioActivitySegment[]
+  error?: string
+}
+
+interface EditorSessionApiResponse {
+  sessionId?: string
+  duration?: number
+  selectedSegmentId?: number | null
+  segments?: Array<{
+    id?: number
+    label?: string
+    start?: number
+    end?: number
+  }>
   error?: string
 }
 
@@ -100,6 +132,45 @@ function normalizeAudioActivitySegments(
         Number.isFinite(segment.end) &&
         segment.end > segment.start,
     )
+}
+
+function normalizeEditorSegments(
+  segments: EditorSessionApiResponse['segments'],
+): EditorClipSegment[] {
+  if (!segments || segments.length === 0) {
+    return []
+  }
+
+  return segments
+    .map((segment, index) => ({
+      id: Number(segment.id ?? index + 1),
+      label: segment.label?.trim() || `Clip ${index + 1}`,
+      start: Number(segment.start ?? 0),
+      end: Number(segment.end ?? 0),
+    }))
+    .filter(
+      (segment) =>
+        Number.isFinite(segment.id) &&
+        Number.isFinite(segment.start) &&
+        Number.isFinite(segment.end) &&
+        segment.end > segment.start,
+    )
+}
+
+function normalizeEditorSession(
+  payload: EditorSessionApiResponse | null,
+): EditorSessionState {
+  const segments = normalizeEditorSegments(payload?.segments)
+
+  return {
+    sessionId: `${payload?.sessionId ?? ''}`,
+    duration: Number(payload?.duration ?? 0),
+    selectedSegmentId:
+      payload?.selectedSegmentId == null
+        ? segments[0]?.id ?? null
+        : Number(payload.selectedSegmentId),
+    segments,
+  }
 }
 
 export async function generateSubtitlesFromVideo(
@@ -196,4 +267,127 @@ export async function detectSilenceFromVideo(
       (segment) => ({ ...segment, label: 'speech' }),
     ),
   }
+}
+
+export async function createEditorSessionFromVideo(
+  file: File,
+): Promise<EditorSessionState> {
+  const apiBaseUrl = resolveSubtitleApiUrl()
+  const response = await fetch(`${apiBaseUrl}/api/editor/session`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': file.type || 'application/octet-stream',
+      'X-File-Name': encodeURIComponent(file.name),
+    },
+    body: file,
+  })
+
+  const payload = (await response.json().catch(() => null)) as
+    | EditorSessionApiResponse
+    | null
+
+  if (!response.ok) {
+    throw new Error(
+      payload?.error ||
+        'Could not create an editor session for this video.',
+    )
+  }
+
+  const session = normalizeEditorSession(payload)
+  if (!session.sessionId || session.segments.length === 0) {
+    throw new Error('Editor session was created without any clip segments.')
+  }
+
+  return session
+}
+
+export async function replaceEditorSessionSegments(
+  sessionId: string,
+  segments: EditorClipSegment[],
+  selectedSegmentId: number | null,
+): Promise<EditorSessionState> {
+  const apiBaseUrl = resolveSubtitleApiUrl()
+  const response = await fetch(`${apiBaseUrl}/api/editor/session/replace`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      sessionId,
+      selectedSegmentId,
+      segments,
+    }),
+  })
+
+  const payload = (await response.json().catch(() => null)) as
+    | EditorSessionApiResponse
+    | null
+
+  if (!response.ok) {
+    throw new Error(
+      payload?.error || 'Could not update the editor session.',
+    )
+  }
+
+  return normalizeEditorSession(payload)
+}
+
+export async function splitEditorSessionAtTime(
+  sessionId: string,
+  segmentId: number,
+  splitTime: number,
+): Promise<EditorSessionState> {
+  const apiBaseUrl = resolveSubtitleApiUrl()
+  const response = await fetch(`${apiBaseUrl}/api/editor/split`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      sessionId,
+      segmentId,
+      splitTime,
+    }),
+  })
+
+  const payload = (await response.json().catch(() => null)) as
+    | EditorSessionApiResponse
+    | null
+
+  if (!response.ok) {
+    throw new Error(
+      payload?.error || 'Could not split the selected clip.',
+    )
+  }
+
+  return normalizeEditorSession(payload)
+}
+
+export async function exportEditorSessionVideo(
+  sessionId: string,
+): Promise<RenderedEditorVideo> {
+  const apiBaseUrl = resolveSubtitleApiUrl()
+  const response = await fetch(`${apiBaseUrl}/api/editor/export`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ sessionId }),
+  })
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as
+      | { error?: string }
+      | null
+    throw new Error(
+      payload?.error || 'Could not export the edited video.',
+    )
+  }
+
+  const blob = await response.blob()
+  const contentDisposition = response.headers.get('Content-Disposition') || ''
+  const match = contentDisposition.match(/filename="([^"]+)"/i)
+  const fileName = match?.[1] || 'vidversity-edited.mp4'
+
+  return { blob, fileName }
 }

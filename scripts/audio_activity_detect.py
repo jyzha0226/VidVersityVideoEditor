@@ -7,6 +7,15 @@ import sys
 from dataclasses import asdict, dataclass
 from typing import List, Optional
 
+DEFAULT_FFMPEG_BIN = (
+    os.environ.get("VIDVERSITY_FFMPEG_BIN")
+    or ("/opt/homebrew/bin/ffmpeg" if os.path.exists("/opt/homebrew/bin/ffmpeg") else "ffmpeg")
+)
+DEFAULT_FFPROBE_BIN = (
+    os.environ.get("VIDVERSITY_FFPROBE_BIN")
+    or ("/opt/homebrew/bin/ffprobe" if os.path.exists("/opt/homebrew/bin/ffprobe") else "ffprobe")
+)
+
 
 @dataclass
 class AudioSegment:
@@ -37,6 +46,8 @@ class FFmpegAudioActivityDetector:
         self.silence_noise_threshold_db = silence_noise_threshold_db
         self.silence_min_duration = silence_min_duration
         self.min_segment_duration = min_segment_duration
+        self.ffmpeg_bin = DEFAULT_FFMPEG_BIN
+        self.ffprobe_bin = DEFAULT_FFPROBE_BIN
 
         os.makedirs(self.temp_dir, exist_ok=True)
 
@@ -48,7 +59,7 @@ class FFmpegAudioActivityDetector:
         output_path = os.path.join(self.temp_dir, f"{base_name}_standard.wav")
 
         command = [
-            "ffmpeg",
+            self.ffmpeg_bin,
             "-y",
             "-i",
             audio_path,
@@ -70,7 +81,7 @@ class FFmpegAudioActivityDetector:
             )
         except FileNotFoundError as exc:
             raise RuntimeError(
-                "ffmpeg is not installed or not available on PATH."
+                f"ffmpeg is not installed or not available at {self.ffmpeg_bin}."
             ) from exc
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(f"ffmpeg audio conversion failed:\n{exc.stderr}") from exc
@@ -79,7 +90,7 @@ class FFmpegAudioActivityDetector:
 
     def get_audio_duration(self, audio_path: str) -> float:
         command = [
-            "ffprobe",
+            self.ffprobe_bin,
             "-v",
             "error",
             "-show_entries",
@@ -100,7 +111,7 @@ class FFmpegAudioActivityDetector:
             return float(result.stdout.strip())
         except FileNotFoundError as exc:
             raise RuntimeError(
-                "ffprobe is not installed or not available on PATH."
+                f"ffprobe is not installed or not available at {self.ffprobe_bin}."
             ) from exc
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(f"ffprobe failed:\n{exc.stderr}") from exc
@@ -109,7 +120,7 @@ class FFmpegAudioActivityDetector:
 
     def detect_silence_segments(self, standard_audio_path: str) -> List[AudioSegment]:
         command = [
-            "ffmpeg",
+            self.ffmpeg_bin,
             "-i",
             standard_audio_path,
             "-af",
@@ -136,7 +147,7 @@ class FFmpegAudioActivityDetector:
             ffmpeg_output = exc.stderr
         except FileNotFoundError as exc:
             raise RuntimeError(
-                "ffmpeg is not installed or not available on PATH."
+                f"ffmpeg is not installed or not available at {self.ffmpeg_bin}."
             ) from exc
 
         silence_segments = self._parse_silencedetect_output(ffmpeg_output)

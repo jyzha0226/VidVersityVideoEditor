@@ -40,10 +40,16 @@ import { useTheme } from '../theme/ThemeProvider'
 import {
   downloadSubtitleFile,
   buildVttFromSubtitles,
+  remapSubtitlesToEditedTimeline,
 } from '../subtitles/export'
 import {
   type AudioActivityDetectionResult,
+  createEditorSessionFromVideo,
   detectSilenceFromVideo,
+  type EditorSessionState,
+  exportEditorSessionVideo,
+  replaceEditorSessionSegments,
+  splitEditorSessionAtTime,
   generateSubtitlesFromVideo,
 } from '../subtitles/api'
 import { importSubtitlesFromFile } from '../subtitles/import'
@@ -102,6 +108,8 @@ interface AIDraftMessage {
 
 type SubtitleStatus = 'idle' | 'processing' | 'success' | 'error'
 type SilenceStatus = 'idle' | 'processing' | 'success' | 'error'
+type EditorStatus = 'idle' | 'syncing' | 'ready' | 'error'
+type ExportStatus = 'idle' | 'processing' | 'error'
 type SubtitleTimingField = 'start' | 'end'
 type SubtitleEntryStatus = 'idle' | 'uploading' | 'generating' | 'success'
 type RightPanelView = 'ai' | 'silence' | 'subtitles' | 'scenes'
@@ -549,23 +557,23 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
               )}
             </video>
           ) : (
-            <div className="relative aspect-video max-h-[42vh] w-full overflow-hidden bg-black">
+            <button
+              type="button"
+              onClick={handleUploadClick}
+              className="relative aspect-video max-h-[42vh] w-full overflow-hidden bg-black text-left transition hover:bg-[#05070b]"
+              aria-label="Upload video"
+            >
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 text-white">
-                <button
-                  type="button"
-                  onClick={handleUploadClick}
-                  className="flex h-20 w-20 items-center justify-center rounded-full bg-white/18 backdrop-blur-md transition hover:bg-white/24"
-                  aria-label="Upload video"
-                >
+                <span className="flex h-20 w-20 items-center justify-center rounded-full bg-white/18 backdrop-blur-md transition hover:bg-white/24">
                   <Upload className="h-9 w-9 text-white" />
-                </button>
+                </span>
                 <div className="text-center">
                   <p className="mt-2 text-sm text-white/70">
                     Upload a local video to start editing in this workspace.
                   </p>
                 </div>
               </div>
-            </div>
+            </button>
           )}
         </div>
 
@@ -582,15 +590,8 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
 )
 
 function createInitialSegments(duration: number): ClipSegment[] {
-  const safeDuration = Math.max(30, Math.floor(duration || 180))
-  const firstBreak = Math.max(12, Math.floor(safeDuration * 0.2))
-  const secondBreak = Math.max(firstBreak + 12, Math.floor(safeDuration * 0.72))
-
-  return [
-    { id: 1, label: 'Interview intro', start: 0, end: firstBreak },
-    { id: 2, label: 'Lab process deep dive', start: firstBreak, end: secondBreak },
-    { id: 3, label: 'Conclusion final', start: secondBreak, end: safeDuration },
-  ]
+  const safeDuration = Math.max(1, duration || 180)
+  return [{ id: 1, label: 'Clip 1', start: 0, end: safeDuration }]
 }
 
 function makeMockSubtitles(duration: number): SubtitleSegment[] {
@@ -638,6 +639,53 @@ function createSilenceSegmentKey(start: number, end: number, index: number): str
   return `${index}:${start.toFixed(3)}:${end.toFixed(3)}`
 }
 
+async function createFileFromVideoUrl(videoUrl: string): Promise<File> {
+  const response = await fetch(videoUrl)
+  if (!response.ok) {
+    throw new Error('Could not load the selected draft video into the editor.')
+  }
+
+  const blob = await response.blob()
+  const contentType = blob.type || 'video/mp4'
+  const extension = contentType.split('/')[1] || 'mp4'
+  return new File([blob], `draft-video.${extension}`, {
+    type: contentType,
+  })
+}
+
+function getSegmentTimelineFrames(
+  thumbnails: TimelineThumbnail[],
+  segment: ClipSegment,
+): TimelineThumbnail[] {
+  if (thumbnails.length === 0) return []
+
+  const frames = thumbnails.filter(
+    (thumbnail) =>
+      thumbnail.time >= segment.start && thumbnail.time < segment.end,
+  )
+
+  if (frames.length > 0) {
+    return frames
+  }
+
+  const nearest = thumbnails.reduce<TimelineThumbnail | null>((closest, thumbnail) => {
+    if (closest == null) return thumbnail
+
+    const thumbnailDistance = Math.min(
+      Math.abs(thumbnail.time - segment.start),
+      Math.abs(thumbnail.time - segment.end),
+    )
+    const closestDistance = Math.min(
+      Math.abs(closest.time - segment.start),
+      Math.abs(closest.time - segment.end),
+    )
+
+    return thumbnailDistance < closestDistance ? thumbnail : closest
+  }, null)
+
+  return nearest ? [nearest] : []
+}
+
 export default function HomePage(): JSX.Element {
   const { theme, toggleTheme } = useTheme()
   const isDark = theme === 'dark'
@@ -681,7 +729,12 @@ export default function HomePage(): JSX.Element {
   >({})
   const [sceneStatus, setSceneStatus] = useState<'idle' | 'pending'>('idle')
   const [segments, setSegments] = useState<ClipSegment[]>(createInitialSegments(180))
-  const [selectedId, setSelectedId] = useState<number>(2)
+  const [selectedId, setSelectedId] = useState<number>(1)
+  const [editorSessionId, setEditorSessionId] = useState<string | null>(null)
+  const [editorStatus, setEditorStatus] = useState<EditorStatus>('idle')
+  const [editorError, setEditorError] = useState<string | null>(null)
+  const [exportStatus, setExportStatus] = useState<ExportStatus>('idle')
+  const [exportError, setExportError] = useState<string | null>(null)
   const [timelineThumbnails, setTimelineThumbnails] = useState<TimelineThumbnail[]>([])
   const [waveformSamples, setWaveformSamples] = useState<number[]>([])
   const [timelineMediaReady, setTimelineMediaReady] = useState(false)
@@ -696,8 +749,11 @@ export default function HomePage(): JSX.Element {
   useEffect(() => {
     if (!videoDuration || videoDuration <= 0) return
     setSegments(createInitialSegments(videoDuration))
-    setSelectedId(2)
+    setSelectedId(1)
     setHistory([])
+    setEditorError(null)
+    setExportStatus('idle')
+    setExportError(null)
     setSilenceStatus('idle')
     setSilenceError(null)
     setSilenceSegments([])
@@ -712,6 +768,11 @@ export default function HomePage(): JSX.Element {
     }
 
     setSelectedVideoFile(null)
+    setEditorSessionId(null)
+    setEditorStatus('idle')
+    setEditorError(null)
+    setExportStatus('idle')
+    setExportError(null)
     setSilenceSegments([])
     setSelectedSilenceSegmentKeys([])
     setStagedSilenceSegmentKeys([])
@@ -750,6 +811,36 @@ export default function HomePage(): JSX.Element {
     }
   }, [videoDuration, videoSourceUrl])
 
+  useEffect(() => {
+    if (!editorSessionId || segments.length === 0) return
+
+    let cancelled = false
+
+    void (async () => {
+      try {
+        setEditorStatus('syncing')
+        await replaceEditorSessionSegments(editorSessionId, segments, selectedId)
+        if (!cancelled) {
+          setEditorStatus('ready')
+          setEditorError(null)
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setEditorStatus('error')
+          setEditorError(
+            error instanceof Error
+              ? error.message
+              : 'Could not sync the editor timeline.',
+          )
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [editorSessionId, segments, selectedId])
+
   const selectedSegment =
     segments.find((segment) => segment.id === selectedId) ?? segments[0] ?? null
   const selectedIndex = selectedSegment
@@ -764,6 +855,10 @@ export default function HomePage(): JSX.Element {
       : segments.length > 0
         ? segments[segments.length - 1].end
         : 180
+  const editedDuration = Math.max(
+    0,
+    segments.reduce((sum, segment) => sum + (segment.end - segment.start), 0),
+  )
 
   const silenceReviewItems = silenceSegments.map((segment, index) => ({
     ...segment,
@@ -776,6 +871,15 @@ export default function HomePage(): JSX.Element {
   const stagedSilenceCount = silenceReviewItems.filter((segment) =>
     stagedSilenceSegmentKeys.includes(segment.key),
   ).length
+  const hasUnsavedChanges =
+    Boolean(selectedVideoFile || videoSourceUrl || preloadedVideoUrl) &&
+    (
+      history.length > 0 ||
+      Boolean(editorSessionId) ||
+      subtitleSegments.length > 0 ||
+      silenceSegments.length > 0 ||
+      stagedSilenceSegmentKeys.length > 0
+    )
 
   const captureEditorState = (): EditorHistoryEntry => ({
     segments: segments.map((segment) => ({ ...segment })),
@@ -787,19 +891,82 @@ export default function HomePage(): JSX.Element {
     setHistory((prev) => [...prev.slice(-29), captureEditorState()])
   }
 
-  const handleUndo = () => {
-    setHistory((prev) => {
-      if (prev.length === 0) return prev
-      const previous = prev[prev.length - 1]
-      setSegments(previous.segments)
-      setSelectedId(previous.selectedId)
-      setSubtitleSegments(previous.subtitleSegments)
-      return prev.slice(0, -1)
-    })
+  const confirmDiscardChanges = () => {
+    if (!hasUnsavedChanges) {
+      return true
+    }
+
+    return window.confirm(
+      'You have unsaved changes in the editor. If you leave now, those changes will be lost.',
+    )
+  }
+
+  const ensureVideoFile = async (): Promise<File | null> => {
+    if (selectedVideoFile) {
+      return selectedVideoFile
+    }
+
+    const sourceUrl = videoSourceUrl || preloadedVideoUrl
+    if (!sourceUrl) {
+      return null
+    }
+
+    try {
+      const file = await createFileFromVideoUrl(sourceUrl)
+      setSelectedVideoFile(file)
+      return file
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Could not prepare the selected video for editing.'
+      setSubtitleError(message)
+      setSilenceError(message)
+      setEditorError(message)
+      return null
+    }
+  }
+
+  const handleUndo = async () => {
+    if (history.length === 0) return
+
+    const previous = history[history.length - 1]
+    setHistory((prev) => prev.slice(0, -1))
+    setSegments(previous.segments)
+    setSelectedId(previous.selectedId)
+    setSubtitleSegments(previous.subtitleSegments)
+
+    if (!editorSessionId) return
+
+    try {
+      setEditorStatus('syncing')
+      const session = await replaceEditorSessionSegments(
+        editorSessionId,
+        previous.segments,
+        previous.selectedId,
+      )
+      setSegments(session.segments)
+      setSelectedId(session.selectedSegmentId ?? previous.selectedId)
+      setEditorStatus('ready')
+      setEditorError(null)
+    } catch (error) {
+      setEditorStatus('error')
+      setEditorError(
+        error instanceof Error
+          ? error.message
+          : 'Could not restore the previous editor state.',
+      )
+    }
   }
 
   const handleSeek = (timeInSeconds: number) => {
     const safeTime = Math.max(0, Math.min(timeInSeconds, totalDuration))
+    const containingSegment = segments.find(
+      (segment) => safeTime >= segment.start && safeTime <= segment.end,
+    )
+    if (containingSegment) {
+      setSelectedId(containingSegment.id)
+    }
     videoPreviewRef.current?.seekTo(safeTime)
     setCurrentTime(safeTime)
   }
@@ -827,7 +994,8 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleGenerateSubtitles = async (): Promise<boolean> => {
-    if (!selectedVideoFile) {
+    const videoFile = await ensureVideoFile()
+    if (!videoFile) {
       setSubtitleStatus('error')
       setSubtitleError('Upload a local video file before generating subtitles.')
       return false
@@ -838,7 +1006,7 @@ export default function HomePage(): JSX.Element {
     setSubtitleError(null)
 
     try {
-      const generated = await generateSubtitlesFromVideo(selectedVideoFile, {
+      const generated = await generateSubtitlesFromVideo(videoFile, {
         model: 'tiny.en',
         language: 'en',
       })
@@ -863,7 +1031,8 @@ export default function HomePage(): JSX.Element {
     setRightPanelView('silence')
     setIsRightPanelCollapsed(false)
 
-    if (!selectedVideoFile) {
+    const videoFile = await ensureVideoFile()
+    if (!videoFile) {
       setSilenceStatus('error')
       setSilenceError(
         'Upload a local video file before running silence detection.',
@@ -876,7 +1045,7 @@ export default function HomePage(): JSX.Element {
     setSilenceNotice(null)
 
     try {
-      const detection = await detectSilenceFromVideo(selectedVideoFile, {
+      const detection = await detectSilenceFromVideo(videoFile, {
         noiseThresholdDb: -35,
         minSilenceDuration: 0.6,
         minSegmentDuration: 0.25,
@@ -955,7 +1124,44 @@ export default function HomePage(): JSX.Element {
     )
   }
 
-  const handleSplitAtPlayhead = () => {
+  const ensureEditorSession = async (): Promise<EditorSessionState | null> => {
+    const videoFile = await ensureVideoFile()
+    if (!videoFile) {
+      setEditorStatus('error')
+      setEditorError('Upload a local video file to use real split editing.')
+      return null
+    }
+
+    if (editorSessionId) {
+      return {
+        sessionId: editorSessionId,
+        duration: videoDuration ?? totalDuration,
+        selectedSegmentId: selectedId,
+        segments,
+      }
+    }
+
+    try {
+      setEditorStatus('syncing')
+      const session = await createEditorSessionFromVideo(videoFile)
+      setEditorSessionId(session.sessionId)
+      setSegments(session.segments)
+      setSelectedId(session.selectedSegmentId ?? session.segments[0]?.id ?? 1)
+      setEditorStatus('ready')
+      setEditorError(null)
+      return session
+    } catch (error) {
+      setEditorStatus('error')
+      setEditorError(
+        error instanceof Error
+          ? error.message
+          : 'Could not create an editor session for this video.',
+      )
+      return null
+    }
+  }
+
+  const handleSplitAtPlayhead = async () => {
     if (!selectedSegment) return
     const playhead = currentTime
     const minGap = 1
@@ -966,33 +1172,35 @@ export default function HomePage(): JSX.Element {
     ) {
       return
     }
-    pushHistory()
 
-    setSegments((prev) => {
-      const splitIndex = prev.findIndex((segment) => segment.id === selectedSegment.id)
-      if (splitIndex === -1) return prev
+    const session = await ensureEditorSession()
+    if (!session) return
 
-      const baseId = Date.now()
-      const leftSegment: ClipSegment = {
-        id: baseId,
-        label: `${selectedSegment.label} A`,
-        start: selectedSegment.start,
-        end: playhead,
-      }
-      const rightSegment: ClipSegment = {
-        id: baseId + 1,
-        label: `${selectedSegment.label} B`,
-        start: playhead,
-        end: selectedSegment.end,
-      }
+    try {
+      setEditorStatus('syncing')
+      const previousState = captureEditorState()
+      const nextSession = await splitEditorSessionAtTime(
+        session.sessionId,
+        selectedSegment.id,
+        playhead,
+      )
 
-      const copy = [...prev]
-      copy.splice(splitIndex, 1, leftSegment, rightSegment)
-      setSelectedId(rightSegment.id)
-      return copy
-    })
-
-    handleSeek(playhead)
+      setHistory((prev) => [...prev.slice(-29), previousState])
+      setSegments(nextSession.segments)
+      setSelectedId(
+        nextSession.selectedSegmentId ?? nextSession.segments[0]?.id ?? selectedSegment.id,
+      )
+      setEditorStatus('ready')
+      setEditorError(null)
+      handleSeek(playhead)
+    } catch (error) {
+      setEditorStatus('error')
+      setEditorError(
+        error instanceof Error
+          ? error.message
+          : 'Could not split the selected clip.',
+      )
+    }
   }
 
   const handleTrimStart = () => {
@@ -1196,6 +1404,48 @@ export default function HomePage(): JSX.Element {
     }
   }
 
+  const handleExportVideo = async () => {
+    const session = await ensureEditorSession()
+    if (!session) return
+
+    try {
+      setExportStatus('processing')
+      setExportError(null)
+
+      await replaceEditorSessionSegments(session.sessionId, segments, selectedId)
+
+      const rendered = await exportEditorSessionVideo(session.sessionId)
+      const url = URL.createObjectURL(rendered.blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = rendered.fileName
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      URL.revokeObjectURL(url)
+
+      if (subtitleSegments.length > 0) {
+        const remappedSubtitles = remapSubtitlesToEditedTimeline(
+          subtitleSegments,
+          segments,
+        )
+        if (remappedSubtitles.length > 0) {
+          const baseName = rendered.fileName.replace(/\.mp4$/i, '')
+          downloadSubtitleFile(remappedSubtitles, baseName, 'srt')
+        }
+      }
+
+      setExportStatus('idle')
+    } catch (error) {
+      setExportStatus('error')
+      setExportError(
+        error instanceof Error
+          ? error.message
+          : 'Could not export the edited video.',
+      )
+    }
+  }
+
   const handleSubtitleUploadClick = () => {
     subtitleUploadInputRef.current?.click()
   }
@@ -1244,6 +1494,21 @@ export default function HomePage(): JSX.Element {
     if (isPlaying) {
       videoPreviewRef.current.pause()
     } else {
+      if (selectedSegment) {
+        const currentPreviewTime = videoPreviewRef.current.getCurrentTime()
+        const clipEndBoundary = Math.max(
+          selectedSegment.start,
+          selectedSegment.end - 0.05,
+        )
+
+        if (
+          currentPreviewTime < selectedSegment.start ||
+          currentPreviewTime >= clipEndBoundary
+        ) {
+          videoPreviewRef.current.seekTo(selectedSegment.start)
+          setCurrentTime(selectedSegment.start)
+        }
+      }
       videoPreviewRef.current.play()
     }
   }
@@ -1251,6 +1516,39 @@ export default function HomePage(): JSX.Element {
   const handleStepFrame = (direction: -1 | 1) => {
     videoPreviewRef.current?.stepFrame(direction)
   }
+
+  useEffect(() => {
+    if (!isPlaying || !selectedSegment || !videoPreviewRef.current) return
+
+    const clipEndBoundary = Math.max(
+      selectedSegment.start,
+      selectedSegment.end - 0.05,
+    )
+
+    if (currentTime < clipEndBoundary) {
+      return
+    }
+
+    videoPreviewRef.current.pause()
+    videoPreviewRef.current.seekTo(clipEndBoundary)
+    setCurrentTime(clipEndBoundary)
+  }, [currentTime, isPlaying, selectedSegment])
+
+  useEffect(() => {
+    if (!hasUnsavedChanges) {
+      return
+    }
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload)
+    }
+  }, [hasUnsavedChanges])
 
   const handleTimelineZoom = (direction: -1 | 1) => {
     setTimelineZoom((prev) => clamp(prev + direction * 0.5, 1, 4))
@@ -1306,9 +1604,9 @@ export default function HomePage(): JSX.Element {
   const timeMarkers = useMemo(
     () =>
       Array.from({ length: 6 }, (_, index) =>
-        formatClock((totalDuration / 5) * index),
+        formatClock((editedDuration / 5) * index),
       ),
-    [totalDuration],
+    [editedDuration],
   )
 
   return (
@@ -1317,6 +1615,37 @@ export default function HomePage(): JSX.Element {
         isDark ? 'bg-[#0b1220] text-[#edf2ff]' : 'bg-[#f7f9fb] text-[#191c1e]'
       }`}
     >
+      {exportStatus === 'processing' ? (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-[#0b1220]/55 px-4 backdrop-blur-sm">
+          <div
+            className={`w-full max-w-sm rounded-[28px] border px-6 py-6 text-center shadow-[0_24px_80px_rgba(15,23,42,0.28)] ${
+              isDark
+                ? 'border-[#31415a] bg-[#111827] text-[#edf2ff]'
+                : 'border-[#d9dde5] bg-white text-[#191c1e]'
+            }`}
+          >
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-[rgba(26,86,219,0.12)]">
+              <span className="h-7 w-7 animate-spin rounded-full border-2 border-[#1a56db] border-t-transparent" />
+            </div>
+            <h2
+              className={`mt-4 text-[15px] font-bold uppercase tracking-[0.2em] ${
+                isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+              }`}
+            >
+              Rendering Video
+            </h2>
+            <p
+              className={`mt-3 text-sm leading-6 ${
+                isDark ? 'text-[#c6d3eb]' : 'text-[#515f74]'
+              }`}
+            >
+              VidVersity is processing your current clip timeline. Your download
+              will start automatically when the render finishes.
+            </p>
+          </div>
+        </div>
+      ) : null}
+
       <header className="sticky top-0 z-40 flex items-center justify-between gap-4 bg-[#de34ab] px-5 py-3 text-white shadow-[0_12px_40px_rgba(222,52,171,0.28)]">
         <div className="flex items-center gap-8">
           <div className="font-['Manrope'] text-xl font-extrabold tracking-[-0.04em]">
@@ -1399,15 +1728,40 @@ export default function HomePage(): JSX.Element {
         >
           <div className="space-y-5">
             <nav className="space-y-1 text-sm">
-              <NavLink to="/drafts" className={navLinkClass}>
+              <NavLink
+                to="/drafts"
+                className={navLinkClass}
+                onClick={(event) => {
+                  if (!confirmDiscardChanges()) {
+                    event.preventDefault()
+                  }
+                }}
+              >
                 <Files className="h-4 w-4" />
                 Drafts
               </NavLink>
-              <NavLink to="/archive" className={navLinkClass}>
+              <NavLink
+                to="/archive"
+                className={navLinkClass}
+                onClick={(event) => {
+                  if (!confirmDiscardChanges()) {
+                    event.preventDefault()
+                  }
+                }}
+              >
                 <FolderArchive className="h-4 w-4" />
                 Archive
               </NavLink>
-              <NavLink to="/" end className={navLinkClass}>
+              <NavLink
+                to="/"
+                end
+                className={navLinkClass}
+                onClick={(event) => {
+                  if (!confirmDiscardChanges()) {
+                    event.preventDefault()
+                  }
+                }}
+              >
                 <Clapperboard className="h-4 w-4" />
                 Editor
               </NavLink>
@@ -1497,21 +1851,29 @@ export default function HomePage(): JSX.Element {
             </button>
             <button
               type="button"
-              className="w-full rounded-xl bg-gradient-to-r from-[#003fb1] to-[#1a56db] px-4 py-3 text-sm font-semibold text-white shadow-[0_12px_30px_rgba(0,63,177,0.22)] transition hover:brightness-110"
+              onClick={() => {
+                void handleExportVideo()
+              }}
+              disabled={
+                exportStatus === 'processing' ||
+                editorStatus === 'syncing' ||
+                (!selectedVideoFile && !editorSessionId)
+              }
+              className="w-full rounded-xl bg-gradient-to-r from-[#003fb1] to-[#1a56db] px-4 py-3 text-sm font-semibold text-white shadow-[0_12px_30px_rgba(0,63,177,0.22)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              Export Video
+              {exportStatus === 'processing' ? 'Rendering...' : 'Export Video'}
             </button>
           </div>
         </aside>
 
         <main
-          className={`min-h-0 min-w-0 overflow-hidden ${
+          className={`min-h-0 min-w-0 overflow-y-auto overflow-x-hidden ${
             isDark ? 'bg-[#0b1220]' : 'bg-[#f7f9fb]'
           }`}
         >
-          <div className="mx-auto flex h-full w-full max-w-[1120px] flex-col px-3 py-3 xl:px-4 xl:py-4">
+          <div className="mx-auto flex min-h-full w-full max-w-[1120px] flex-col px-3 py-3 xl:px-4 xl:py-4">
             <div
-              className={`flex h-full min-h-0 flex-col overflow-hidden rounded-[32px] border shadow-[0_20px_60px_rgba(15,23,42,0.08)] ${
+              className={`flex min-h-0 flex-1 flex-col overflow-hidden rounded-[32px] border shadow-[0_20px_60px_rgba(15,23,42,0.08)] ${
                 isDark
                   ? 'border-[#243149] bg-[#111827]'
                   : 'border-[#d9dde5] bg-white'
@@ -1527,6 +1889,9 @@ export default function HomePage(): JSX.Element {
                 onVideoSourceChange={setVideoSourceUrl}
                 onVideoFileChange={(file) => {
                   setSelectedVideoFile(file)
+                  setEditorSessionId(null)
+                  setEditorStatus('idle')
+                  setEditorError(null)
                   setSubtitleSegments([])
                   setSubtitleStatus('idle')
                   setSubtitleError(null)
@@ -1749,7 +2114,7 @@ export default function HomePage(): JSX.Element {
                 {subtitleError ? (
                   <div className="mx-auto w-full max-w-[1040px] px-4 pb-4">
                     <div
-                      className={`rounded-[20px] border px-4 py-3 text-[12px] leading-5 ${
+                      className={`max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-[20px] border px-4 py-3 text-[12px] leading-5 ${
                         isDark
                           ? 'border-[#6f3a45] bg-[#24141a] text-[#ffb8c0]'
                           : 'border-[#f0b8b8] bg-[#fff3f4] text-[#a23535]'
@@ -1763,13 +2128,41 @@ export default function HomePage(): JSX.Element {
                 {silenceError ? (
                   <div className="mx-auto w-full max-w-[1040px] px-4 pb-4">
                     <div
-                      className={`rounded-[20px] border px-4 py-3 text-[12px] leading-5 ${
+                      className={`max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-[20px] border px-4 py-3 text-[12px] leading-5 ${
                         isDark
                           ? 'border-[#6f3a45] bg-[#24141a] text-[#ffb8c0]'
                           : 'border-[#f0b8b8] bg-[#fff3f4] text-[#a23535]'
                       }`}
                     >
                       {silenceError}
+                    </div>
+                  </div>
+                ) : null}
+
+                {editorError ? (
+                  <div className="mx-auto w-full max-w-[1040px] px-4 pb-4">
+                    <div
+                      className={`max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-[20px] border px-4 py-3 text-[12px] leading-5 ${
+                        isDark
+                          ? 'border-[#6f3a45] bg-[#24141a] text-[#ffb8c0]'
+                          : 'border-[#f0b8b8] bg-[#fff3f4] text-[#a23535]'
+                      }`}
+                    >
+                      {editorError}
+                    </div>
+                  </div>
+                ) : null}
+
+                {exportError ? (
+                  <div className="mx-auto w-full max-w-[1040px] px-4 pb-4">
+                    <div
+                      className={`max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-[20px] border px-4 py-3 text-[12px] leading-5 ${
+                        isDark
+                          ? 'border-[#6f3a45] bg-[#24141a] text-[#ffb8c0]'
+                          : 'border-[#f0b8b8] bg-[#fff3f4] text-[#a23535]'
+                      }`}
+                    >
+                      {exportError}
                     </div>
                   </div>
                 ) : null}
@@ -1787,93 +2180,159 @@ export default function HomePage(): JSX.Element {
                         <div className="relative">
                           <div
                             ref={timelineTrackRef}
-                            className="relative space-y-2.5"
+                            className="relative"
                             onPointerDown={(event) => {
                               seekTimelineFromClientX(event.clientX)
                               setIsTimelineDragging(true)
                             }}
                           >
                             <div
-                              className="pointer-events-none absolute bottom-[40px] top-0 z-20 w-0.5 bg-[#de34ab]"
-                              style={{ left: `${progress * 100}%` }}
-                            >
-                              <div className="absolute -left-[8px] -top-3 h-0 w-0 border-x-[8px] border-t-[0] border-b-[10px] border-x-transparent border-b-[#de34ab]" />
-                            </div>
-
-                            <div
-                              className={`relative h-16 overflow-hidden rounded-2xl border ${
+                              className={`relative flex min-h-[84px] items-stretch gap-1 overflow-hidden rounded-2xl border p-2 ${
                                 isDark
                                   ? 'border-[#2b3950] bg-[#1a2435]'
-                                  : 'border-[#dfe5ec] bg-[#dfe5ec]'
+                                  : 'border-[#dfe5ec] bg-[#eff3f8]'
                               }`}
                             >
-                              {timelineMediaReady && timelineThumbnails.length > 0 ? (
-                                <div className="absolute inset-0 flex">
-                                  {timelineThumbnails.map((thumbnail) => (
-                                    <div
-                                      key={thumbnail.id}
-                                      className="relative h-full flex-1 overflow-hidden border-r border-white/20 last:border-r-0"
-                                    >
-                                      <img
-                                        src={thumbnail.src}
-                                        alt={`Frame at ${formatClock(thumbnail.time)}`}
-                                        className="h-full w-full object-cover"
-                                      />
-                                      <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(15,23,42,0.08),rgba(15,23,42,0.35))]" />
+                              {segments.map((segment) => {
+                                const duration = Math.max(0.1, segment.end - segment.start)
+                                const isSelected = selectedId === segment.id
+                                const containsPlayhead =
+                                  currentTime >= segment.start &&
+                                  currentTime <= segment.end
+                                const playheadRatio = containsPlayhead
+                                  ? clamp(
+                                      (currentTime - segment.start) /
+                                        Math.max(segment.end - segment.start, 0.001),
+                                      0,
+                                      1,
+                                    )
+                                  : 0
+                                const segmentFrames = getSegmentTimelineFrames(
+                                  timelineThumbnails,
+                                  segment,
+                                )
+
+                                return (
+                                  <button
+                                    key={segment.id}
+                                    type="button"
+                                    onPointerDown={(event) => {
+                                      event.stopPropagation()
+                                      const bounds =
+                                        event.currentTarget.getBoundingClientRect()
+                                      const ratio = clamp(
+                                        (event.clientX - bounds.left) / bounds.width,
+                                        0,
+                                        1,
+                                      )
+                                      const nextTime =
+                                        segment.start +
+                                        (segment.end - segment.start) * ratio
+                                      setSelectedId(segment.id)
+                                      handleSeek(nextTime)
+                                    }}
+                                    style={{ flexGrow: duration }}
+                                    className={`relative flex min-w-[110px] flex-1 flex-col justify-end overflow-hidden rounded-xl border text-left transition ${
+                                      isSelected
+                                        ? isDark
+                                          ? 'border-[#8bb8ff] bg-[#1f4da0] text-white'
+                                          : 'border-[#003fb1] bg-[#1a56db] text-white'
+                                        : isDark
+                                          ? 'border-[#344561] bg-[#101a2a] text-[#d6deec] hover:border-[#8bb8ff]'
+                                          : 'border-[#c9d5e8] bg-white text-[#233147] hover:border-[#1a56db]'
+                                    }`}
+                                  >
+                                    {containsPlayhead ? (
+                                      <>
+                                        <span
+                                          className="absolute inset-y-1 z-20 w-0.5 -translate-x-1/2 bg-[#de34ab]"
+                                          style={{ left: `${playheadRatio * 100}%` }}
+                                        />
+                                        <span
+                                          className="absolute top-1 z-20 h-0 w-0 -translate-x-1/2 border-x-[6px] border-b-[8px] border-x-transparent border-b-[#de34ab]"
+                                          style={{ left: `${playheadRatio * 100}%` }}
+                                        />
+                                      </>
+                                    ) : null}
+
+                                    <div className="absolute inset-0">
+                                      {timelineMediaReady && segmentFrames.length > 0 ? (
+                                        <div className="flex h-full w-full">
+                                          {segmentFrames.map((thumbnail) => (
+                                            <div
+                                              key={`${segment.id}-${thumbnail.id}`}
+                                              className="relative h-full flex-1 overflow-hidden border-r border-white/15 last:border-r-0"
+                                            >
+                                              <img
+                                                src={thumbnail.src}
+                                                alt={`Frame at ${formatClock(thumbnail.time)}`}
+                                                className="h-full w-full object-cover"
+                                              />
+                                            </div>
+                                          ))}
+                                        </div>
+                                      ) : (
+                                        <div
+                                          className={`h-full w-full ${
+                                            isDark
+                                              ? 'bg-[linear-gradient(90deg,#182234_0%,#223047_100%)]'
+                                              : 'bg-[linear-gradient(90deg,#e7ebf0_0%,#dfe5ec_100%)]'
+                                          }`}
+                                        />
+                                      )}
+                                      <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(15,23,42,0.06),rgba(15,23,42,0.62))]" />
                                     </div>
-                                  ))}
-                                </div>
-                              ) : (
-                                <div
-                                  className={`absolute inset-0 ${
-                                    isDark
-                                      ? 'bg-[linear-gradient(90deg,#182234_0%,#223047_100%)]'
-                                      : 'bg-[linear-gradient(90deg,#e7ebf0_0%,#dfe5ec_100%)]'
-                                  }`}
-                                />
-                              )}
-                            </div>
 
-                            <div
-                              className={`relative flex h-10 items-center overflow-hidden rounded-2xl border px-2 ${
-                                isDark
-                                  ? 'border-[#2b3950] bg-[#1a2435]'
-                                  : 'border-[#dfe5ec] bg-[#dfe5ec]'
-                              }`}
-                            >
-                              {timelineMediaReady && waveformSamples.length > 0 ? (
-                                <div className="flex h-full w-full items-center gap-[2px]">
-                                  {waveformSamples.map((sample, index) => (
-                                    <span
-                                      key={`wave-${index}`}
-                                      className={`w-full rounded-full ${
-                                        isDark ? 'bg-[#7db7ff]' : 'bg-[#4aa8ff]'
-                                      }`}
-                                      style={{
-                                        height: `${Math.max(8, Math.round(sample * 30))}px`,
-                                        opacity: 0.42 + sample * 0.48,
-                                      }}
-                                    />
-                                  ))}
-                                </div>
-                              ) : (
-                                <div className="flex h-full w-full items-center gap-[3px] opacity-45">
-                                  {Array.from({ length: 80 }, (_, index) => (
-                                    <span
-                                      key={index}
-                                      className={`w-full rounded-full ${
-                                        isDark ? 'bg-[#52647f]' : 'bg-[#7f8ea3]'
-                                      }`}
-                                      style={{ height: `${8 + ((index * 11) % 16)}px` }}
-                                    />
-                                  ))}
-                                </div>
-                              )}
+                                    <div className="relative z-10 px-3 py-2">
+                                      <span className="block truncate pl-2 text-[10px] font-bold uppercase tracking-[0.18em]">
+                                        {segment.label}
+                                      </span>
+                                      <span
+                                        className={`block pl-2 text-[11px] ${
+                                          isSelected
+                                            ? 'text-white/90'
+                                            : isDark
+                                              ? 'text-[#d6deec]'
+                                              : 'text-white/95'
+                                        }`}
+                                      >
+                                        Source {formatClock(segment.start)} - {formatClock(segment.end)}
+                                      </span>
+                                    </div>
+                                  </button>
+                                )
+                              })}
                             </div>
                           </div>
                         </div>
 
                         <div className="pt-1">
+                          <div
+                            className={`mb-1 flex items-center justify-between px-2 text-[9px] font-bold uppercase tracking-[0.18em] ${
+                              isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
+                            }`}
+                          >
+                            <span>
+                              {segments.length} clip{segments.length === 1 ? '' : 's'}
+                            </span>
+                            <span>
+                              {editorStatus === 'syncing'
+                                ? 'Syncing editor'
+                                : editorSessionId
+                                  ? 'Editor session active'
+                                  : selectedVideoFile
+                                    ? 'Ready to create editor session'
+                                    : 'Upload a local video to edit'}
+                            </span>
+                          </div>
+                          <div
+                            className={`mb-1 flex items-center justify-between px-2 text-[9px] font-bold uppercase tracking-[0.18em] ${
+                              isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
+                            }`}
+                          >
+                            <span>Edited Timeline</span>
+                            <span>{formatClock(editedDuration)}</span>
+                          </div>
                           <div
                             className={`flex justify-between px-2 text-[9px] font-mono ${
                               isDark ? 'text-[#8fa2c2]' : 'text-[#737686]'

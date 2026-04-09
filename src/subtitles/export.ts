@@ -1,4 +1,5 @@
 import type { SubtitleSegment } from './types'
+import type { EditorClipSegment } from './api'
 
 export type SubtitleExportFormat = 'srt' | 'vtt'
 
@@ -47,6 +48,45 @@ export function buildVttFromSubtitles(segments: SubtitleSegment[]): string {
     .join('\n\n')
 
   return `WEBVTT\n\n${body}`
+}
+
+export function remapSubtitlesToEditedTimeline(
+  subtitles: SubtitleSegment[],
+  segments: EditorClipSegment[],
+): SubtitleSegment[] {
+  if (subtitles.length === 0 || segments.length === 0) {
+    return []
+  }
+
+  const remapped: SubtitleSegment[] = []
+  let outputOffset = 0
+
+  segments.forEach((segment) => {
+    const segmentDuration = segment.end - segment.start
+    if (segmentDuration <= 0) {
+      return
+    }
+
+    subtitles.forEach((subtitle, index) => {
+      const overlapStart = Math.max(segment.start, subtitle.start)
+      const overlapEnd = Math.min(segment.end, subtitle.end)
+
+      if (overlapEnd <= overlapStart) {
+        return
+      }
+
+      remapped.push({
+        id: `${subtitle.id || `subtitle-${index}`}-${segment.id}-${overlapStart.toFixed(3)}`,
+        start: outputOffset + (overlapStart - segment.start),
+        end: outputOffset + (overlapEnd - segment.start),
+        text: subtitle.text,
+      })
+    })
+
+    outputOffset += segmentDuration
+  })
+
+  return remapped.filter((segment) => segment.end - segment.start >= 0.05)
 }
 
 export function downloadSubtitleFile(
