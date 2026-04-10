@@ -391,3 +391,62 @@ export async function exportEditorSessionVideo(
 
   return { blob, fileName }
 }
+
+export async function appendVideoToEditorSession(
+  sessionId: string,
+  file: File,
+): Promise<EditorSessionState> {
+  const apiBaseUrl = resolveSubtitleApiUrl()
+  const encodedSessionId = encodeURIComponent(sessionId)
+  const response = await fetch(
+    `${apiBaseUrl}/api/editor/append?sessionId=${encodedSessionId}`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': file.type || 'application/octet-stream',
+        'X-File-Name': encodeURIComponent(file.name),
+      },
+      body: file,
+    },
+  )
+
+  const payload = (await response.json().catch(() => null)) as
+    | EditorSessionApiResponse
+    | null
+
+  if (!response.ok) {
+    throw new Error(
+      payload?.error || 'Could not append the uploaded video to the editor timeline.',
+    )
+  }
+
+  return normalizeEditorSession(payload)
+}
+
+export async function downloadEditorSessionSourceFile(
+  sessionId: string,
+): Promise<File> {
+  const apiBaseUrl = resolveSubtitleApiUrl()
+  const encodedSessionId = encodeURIComponent(sessionId)
+  const response = await fetch(
+    `${apiBaseUrl}/api/editor/source?sessionId=${encodedSessionId}`,
+  )
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as
+      | { error?: string }
+      | null
+    throw new Error(
+      payload?.error || 'Could not load the current editor source media.',
+    )
+  }
+
+  const blob = await response.blob()
+  const contentDisposition = response.headers.get('Content-Disposition') || ''
+  const match = contentDisposition.match(/filename="([^"]+)"/i)
+  const fileName = match?.[1] || 'vidversity-editor-source.mp4'
+
+  return new File([blob], fileName, {
+    type: blob.type || 'video/mp4',
+  })
+}

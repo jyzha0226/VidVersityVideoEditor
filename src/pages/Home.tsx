@@ -17,6 +17,7 @@ import {
   Moon,
   Pause,
   Play,
+  Plus,
   Scissors,
   Send,
   SkipBack,
@@ -43,9 +44,11 @@ import {
   remapSubtitlesToEditedTimeline,
 } from '../subtitles/export'
 import {
+  appendVideoToEditorSession,
   type AudioActivityDetectionResult,
   createEditorSessionFromVideo,
   detectSilenceFromVideo,
+  downloadEditorSessionSourceFile,
   type EditorSessionState,
   exportEditorSessionVideo,
   replaceEditorSessionSegments,
@@ -65,7 +68,7 @@ interface VideoPreviewHandle {
 
 interface VideoPreviewPanelProps {
   subtitles: SubtitleSegment[]
-  initialVideoUrl?: string | null
+  videoUrl?: string | null
   onLoadedMetadata: (durationInSeconds: number) => void
   onTimeUpdate: (timeInSeconds: number) => void
   onPlaybackStateChange: (isPlaying: boolean) => void
@@ -110,6 +113,7 @@ type SubtitleStatus = 'idle' | 'processing' | 'success' | 'error'
 type SilenceStatus = 'idle' | 'processing' | 'success' | 'error'
 type EditorStatus = 'idle' | 'syncing' | 'ready' | 'error'
 type ExportStatus = 'idle' | 'processing' | 'error'
+type AppendStatus = 'idle' | 'processing'
 type SubtitleTimingField = 'start' | 'end'
 type SubtitleEntryStatus = 'idle' | 'uploading' | 'generating' | 'success'
 type RightPanelView = 'ai' | 'silence' | 'subtitles' | 'scenes'
@@ -402,7 +406,7 @@ async function generateWaveformSamples(videoUrl: string): Promise<number[]> {
 const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>(
   function VideoPreviewPanelInner(
     {
-      initialVideoUrl,
+      videoUrl: externalVideoUrl,
       subtitles,
       onLoadedMetadata,
       onTimeUpdate,
@@ -478,18 +482,18 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
     )
 
     useEffect(() => {
-      if (!initialVideoUrl || initialVideoUrl === videoUrl) return
+      if (!externalVideoUrl || externalVideoUrl === videoUrl) return
 
       if (videoUrl) {
         URL.revokeObjectURL(videoUrl)
       }
 
-      setVideoUrl(initialVideoUrl)
+      setVideoUrl(externalVideoUrl)
       onTimeUpdate(0)
       onPlaybackStateChange(false)
-      onVideoSourceChange(initialVideoUrl)
+      onVideoSourceChange(externalVideoUrl)
     }, [
-      initialVideoUrl,
+      externalVideoUrl,
       onPlaybackStateChange,
       onTimeUpdate,
       onVideoSourceChange,
@@ -735,6 +739,7 @@ export default function HomePage(): JSX.Element {
   const [editorError, setEditorError] = useState<string | null>(null)
   const [exportStatus, setExportStatus] = useState<ExportStatus>('idle')
   const [exportError, setExportError] = useState<string | null>(null)
+  const [appendStatus, setAppendStatus] = useState<AppendStatus>('idle')
   const [timelineThumbnails, setTimelineThumbnails] = useState<TimelineThumbnail[]>([])
   const [waveformSamples, setWaveformSamples] = useState<number[]>([])
   const [timelineMediaReady, setTimelineMediaReady] = useState(false)
@@ -745,9 +750,11 @@ export default function HomePage(): JSX.Element {
   const videoPreviewRef = useRef<VideoPreviewHandle | null>(null)
   const timelineTrackRef = useRef<HTMLDivElement | null>(null)
   const subtitleUploadInputRef = useRef<HTMLInputElement | null>(null)
+  const appendVideoInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     if (!videoDuration || videoDuration <= 0) return
+    if (editorSessionId) return
     setSegments(createInitialSegments(videoDuration))
     setSelectedId(1)
     setHistory([])
@@ -760,7 +767,7 @@ export default function HomePage(): JSX.Element {
     setSelectedSilenceSegmentKeys([])
     setStagedSilenceSegmentKeys([])
     setSilenceNotice(null)
-  }, [videoDuration])
+  }, [editorSessionId, videoDuration])
 
   useEffect(() => {
     if (!preloadedVideoUrl) {
@@ -925,6 +932,24 @@ export default function HomePage(): JSX.Element {
       setEditorError(message)
       return null
     }
+  }
+
+  const resetWorkspaceForNewSource = () => {
+    setEditorSessionId(null)
+    setEditorStatus('idle')
+    setEditorError(null)
+    setSubtitleSegments([])
+    setSubtitleStatus('idle')
+    setSubtitleError(null)
+    setSubtitleTimingDrafts({})
+    setSilenceStatus('idle')
+    setSilenceError(null)
+    setSilenceSegments([])
+    setSelectedSilenceSegmentKeys([])
+    setStagedSilenceSegmentKeys([])
+    setSilenceNotice(null)
+    setRightPanelView('ai')
+    setHistory([])
   }
 
   const handleUndo = async () => {
@@ -1450,6 +1475,67 @@ export default function HomePage(): JSX.Element {
     subtitleUploadInputRef.current?.click()
   }
 
+  const handleAppendVideoClick = () => {
+    appendVideoInputRef.current?.click()
+  }
+
+  const handleAppendVideoSelected = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+
+    const session = await ensureEditorSession()
+    if (!session) return
+
+    try {
+      setAppendStatus('processing')
+      setEditorStatus('syncing')
+      setEditorError(null)
+      const nextSession = await appendVideoToEditorSession(session.sessionId, file)
+      const combinedFile = await downloadEditorSessionSourceFile(nextSession.sessionId)
+      const combinedUrl = URL.createObjectURL(combinedFile)
+
+      setSelectedVideoFile(combinedFile)
+      setVideoSourceUrl(combinedUrl)
+      setVideoDuration(nextSession.duration)
+      setCurrentTime(0)
+      setSegments(nextSession.segments)
+      setSelectedId(
+        nextSession.selectedSegmentId ?? nextSession.segments.at(-1)?.id ?? selectedId,
+      )
+      setEditorSessionId(nextSession.sessionId)
+      setEditorStatus('ready')
+      setIsPlaying(false)
+      setHistory([])
+      setSubtitleSegments([])
+      setSubtitleStatus('idle')
+      setSubtitleError(null)
+      setSubtitleTimingDrafts({})
+      setSilenceStatus('idle')
+      setSilenceError(null)
+      setSilenceSegments([])
+      setSelectedSilenceSegmentKeys([])
+      setStagedSilenceSegmentKeys([])
+      setSilenceNotice(
+        `${file.name} was added to the end of the current timeline. Regenerate subtitles or silence detection if you want those tools to include the new clip.`,
+      )
+      setRightPanelView('ai')
+      videoPreviewRef.current?.pause()
+      videoPreviewRef.current?.seekTo(0)
+    } catch (error) {
+      setEditorStatus('error')
+      setEditorError(
+        error instanceof Error
+          ? error.message
+          : 'Could not add the uploaded video to the current timeline.',
+      )
+    } finally {
+      setAppendStatus('idle')
+    }
+  }
+
   const handleSubtitleFileSelected = async (
     event: React.ChangeEvent<HTMLInputElement>,
   ) => {
@@ -1646,6 +1732,37 @@ export default function HomePage(): JSX.Element {
         </div>
       ) : null}
 
+      {appendStatus === 'processing' ? (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-[#0b1220]/55 px-4 backdrop-blur-sm">
+          <div
+            className={`w-full max-w-sm rounded-[28px] border px-6 py-6 text-center shadow-[0_24px_80px_rgba(15,23,42,0.28)] ${
+              isDark
+                ? 'border-[#31415a] bg-[#111827] text-[#edf2ff]'
+                : 'border-[#d9dde5] bg-white text-[#191c1e]'
+            }`}
+          >
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-[rgba(222,52,171,0.12)]">
+              <span className="h-7 w-7 animate-spin rounded-full border-2 border-[#de34ab] border-t-transparent" />
+            </div>
+            <h2
+              className={`mt-4 text-[15px] font-bold uppercase tracking-[0.2em] ${
+                isDark ? 'text-[#ff9dd7]' : 'text-[#c2187a]'
+              }`}
+            >
+              Processing Video
+            </h2>
+            <p
+              className={`mt-3 text-sm leading-6 ${
+                isDark ? 'text-[#c6d3eb]' : 'text-[#515f74]'
+              }`}
+            >
+              VidVersity is adding the uploaded video to the end of your current
+              timeline. This can take a moment for larger files.
+            </p>
+          </div>
+        </div>
+      ) : null}
+
       <header className="sticky top-0 z-40 flex items-center justify-between gap-4 bg-[#de34ab] px-5 py-3 text-white shadow-[0_12px_40px_rgba(222,52,171,0.28)]">
         <div className="flex items-center gap-8">
           <div className="font-['Manrope'] text-xl font-extrabold tracking-[-0.04em]">
@@ -1717,6 +1834,13 @@ export default function HomePage(): JSX.Element {
           accept=".srt,.vtt,text/vtt,application/x-subrip,text/plain"
           className="hidden"
           onChange={handleSubtitleFileSelected}
+        />
+        <input
+          ref={appendVideoInputRef}
+          type="file"
+          accept="video/*"
+          className="hidden"
+          onChange={handleAppendVideoSelected}
         />
 
         <aside
@@ -1881,7 +2005,7 @@ export default function HomePage(): JSX.Element {
             >
               <VideoPreviewPanel
                 ref={videoPreviewRef}
-                initialVideoUrl={preloadedVideoUrl}
+                videoUrl={videoSourceUrl ?? preloadedVideoUrl}
                 subtitles={subtitleSegments}
                 onLoadedMetadata={setVideoDuration}
                 onPlaybackStateChange={setIsPlaying}
@@ -1889,19 +2013,7 @@ export default function HomePage(): JSX.Element {
                 onVideoSourceChange={setVideoSourceUrl}
                 onVideoFileChange={(file) => {
                   setSelectedVideoFile(file)
-                  setEditorSessionId(null)
-                  setEditorStatus('idle')
-                  setEditorError(null)
-                  setSubtitleSegments([])
-                  setSubtitleStatus('idle')
-                  setSubtitleError(null)
-                  setSilenceStatus('idle')
-                  setSilenceError(null)
-                  setSilenceSegments([])
-                  setSelectedSilenceSegmentKeys([])
-                  setStagedSilenceSegmentKeys([])
-                  setSilenceNotice(null)
-                  setRightPanelView('ai')
+                  resetWorkspaceForNewSource()
                 }}
               />
 
@@ -2054,6 +2166,21 @@ export default function HomePage(): JSX.Element {
                         danger
                       />
                       <div className="mx-1 h-8 w-px rounded-full bg-[#d9dde5] dark:bg-[#31415a]" />
+                      <ToolbarButton
+                        label="Add Video"
+                        tooltip="Add another video to the end of the timeline."
+                        guidedMode={guidedMode}
+                        isDark={isDark}
+                        onClick={handleAppendVideoClick}
+                        icon={Plus}
+                        disabled={
+                          appendStatus === 'processing' ||
+                          exportStatus === 'processing' ||
+                          editorStatus === 'syncing' ||
+                          (!selectedVideoFile && !videoSourceUrl && !preloadedVideoUrl)
+                        }
+                        tone="workspace"
+                      />
                       <ToolbarButton
                         label="Subtitles"
                         tooltip={

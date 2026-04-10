@@ -182,6 +182,10 @@ function buildEditorExportName(session) {
   return `${sanitizeBaseName(session.fileName || 'vidversity-export')}-edited.mp4`
 }
 
+function buildEditorSourceName(session) {
+  return `${sanitizeBaseName(session.fileName || 'vidversity-source')}.mp4`
+}
+
 function formatSrtTimestamp(seconds) {
   const totalMs = Math.max(0, Math.floor(seconds * 1000))
   const hours = Math.floor(totalMs / 3_600_000)
@@ -407,6 +411,100 @@ async function ensureSubtitleBurnSupport() {
   )
 }
 
+async function normalizeMediaForTimeline(filePath, outputPath) {
+  const { hasVideo, hasAudio } = await inspectMediaStreams(filePath)
+  if (!hasVideo) {
+    throw new Error('The uploaded file does not contain a video stream.')
+  }
+
+  const args = ['-y', '-i', filePath]
+
+  if (!hasAudio) {
+    args.push(
+      '-f',
+      'lavfi',
+      '-i',
+      'anullsrc=channel_layout=stereo:sample_rate=44100',
+      '-shortest',
+    )
+  }
+
+  args.push(
+    '-c:v',
+    'libx264',
+    '-preset',
+    'veryfast',
+    '-pix_fmt',
+    'yuv420p',
+    '-c:a',
+    'aac',
+    '-b:a',
+    '192k',
+    '-movflags',
+    '+faststart',
+    outputPath,
+  )
+
+  try {
+    await runCommand(FFMPEG_BIN, args)
+  } catch (error) {
+    if (isMissingBinaryError(error)) {
+      throw new Error(`ffmpeg is not installed or not available at ${FFMPEG_BIN}.`)
+    }
+    throw error
+  }
+}
+
+async function appendEditorMedia(existingFilePath, appendedFilePath, outputPath) {
+  const normalizedExistingPath = join(
+    EDITOR_SESSION_DIR,
+    `${randomUUID()}-existing-normalized.mp4`,
+  )
+  const normalizedAppendedPath = join(
+    EDITOR_SESSION_DIR,
+    `${randomUUID()}-append-normalized.mp4`,
+  )
+
+  try {
+    await normalizeMediaForTimeline(existingFilePath, normalizedExistingPath)
+    await normalizeMediaForTimeline(appendedFilePath, normalizedAppendedPath)
+    await runCommand(FFMPEG_BIN, [
+      '-y',
+      '-i',
+      normalizedExistingPath,
+      '-i',
+      normalizedAppendedPath,
+      '-filter_complex',
+      '[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[vout][aout]',
+      '-map',
+      '[vout]',
+      '-map',
+      '[aout]',
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-pix_fmt',
+      'yuv420p',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '192k',
+      '-movflags',
+      '+faststart',
+      outputPath,
+    ])
+  } catch (error) {
+    if (isMissingBinaryError(error)) {
+      throw new Error(`ffmpeg is not installed or not available at ${FFMPEG_BIN}.`)
+    }
+    throw error
+  } finally {
+    await rm(normalizedExistingPath, { force: true }).catch(() => undefined)
+    await rm(normalizedAppendedPath, { force: true }).catch(() => undefined)
+  }
+}
+
 async function renderEditorSession(session, subtitles = []) {
   const { hasVideo, hasAudio } = await inspectMediaStreams(session.filePath)
   if (!hasVideo) {
@@ -588,7 +686,9 @@ const server = createServer(async (request, response) => {
       generate: '/api/subtitles/generate',
       detectSilence: '/api/audio/detect-silence',
       createEditorSession: '/api/editor/session',
+      editorSource: '/api/editor/source?sessionId=...',
       replaceEditorSession: '/api/editor/session/replace',
+      appendEditorMedia: '/api/editor/append?sessionId=...',
       splitEditorSession: '/api/editor/split',
       exportEditorSession: '/api/editor/export',
       python: PYTHON_BIN,
@@ -597,6 +697,29 @@ const server = createServer(async (request, response) => {
   }
 
   if (request.method !== 'POST') {
+    if (request.method === 'GET' && url.pathname === '/api/editor/source') {
+      const sessionId = url.searchParams.get('sessionId') || ''
+      try {
+        const session = getEditorSession(sessionId)
+        const data = await readFile(session.filePath)
+        sendBinary(
+          response,
+          200,
+          data,
+          'video/mp4',
+          buildEditorSourceName(session),
+        )
+      } catch (error) {
+        sendJson(response, 400, {
+          error:
+            error instanceof Error
+              ? error.message
+              : 'Could not load the current editor source media.',
+        })
+      }
+      return
+    }
+
     sendJson(response, 404, { error: 'Route not found.' })
     return
   }
@@ -667,6 +790,55 @@ const server = createServer(async (request, response) => {
       )
 
       sendJson(response, 200, serializeEditorSession(session))
+      return
+    }
+
+    if (url.pathname === '/api/editor/append') {
+      const sessionId = url.searchParams.get('sessionId') || ''
+      const session = getEditorSession(sessionId)
+      const rawFileName = request.headers['x-file-name']
+      const fileName =
+        typeof rawFileName === 'string' && rawFileName.length > 0
+          ? decodeURIComponent(rawFileName)
+          : 'append.bin'
+      const appendedInputPath = join(
+        EDITOR_SESSION_DIR,
+        `${randomUUID()}${sanitizeFileExtension(fileName)}`,
+      )
+      const combinedOutputPath = join(
+        EDITOR_SESSION_DIR,
+        `${session.id}-timeline-${Date.now()}.mp4`,
+      )
+
+      await writeFile(appendedInputPath, body)
+
+      try {
+        const appendedDuration = await getMediaDuration(appendedInputPath)
+        const nextSegment = {
+          id: session.nextSegmentId,
+          label: `Clip ${session.segments.length + 1}`,
+          start: session.duration,
+          end: session.duration + appendedDuration,
+        }
+
+        await appendEditorMedia(session.filePath, appendedInputPath, combinedOutputPath)
+
+        const previousFilePath = session.filePath
+        session.filePath = combinedOutputPath
+        session.fileName = `${sanitizeBaseName(session.fileName)}-timeline.mp4`
+        session.duration += appendedDuration
+        session.nextSegmentId += 1
+        session.segments = relabelEditorSegments([...session.segments, nextSegment])
+        session.selectedSegmentId = nextSegment.id
+
+        if (previousFilePath !== combinedOutputPath) {
+          await rm(previousFilePath, { force: true }).catch(() => undefined)
+        }
+
+        sendJson(response, 200, serializeEditorSession(session))
+      } finally {
+        await rm(appendedInputPath, { force: true }).catch(() => undefined)
+      }
       return
     }
 
