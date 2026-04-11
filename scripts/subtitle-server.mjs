@@ -15,13 +15,30 @@ const LOCAL_WINDOWS_PYTHON_BIN = fileURLToPath(
 const LOCAL_UNIX_PYTHON_BIN = fileURLToPath(
   new URL('../.venv/bin/python', import.meta.url),
 )
-const PYTHON_BIN =
-  process.env.FASTER_WHISPER_PYTHON ||
-  (existsSync(LOCAL_UNIX_PYTHON_BIN)
-    ? LOCAL_UNIX_PYTHON_BIN
-    : existsSync(LOCAL_WINDOWS_PYTHON_BIN)
-      ? LOCAL_WINDOWS_PYTHON_BIN
-      : 'python3')
+
+function resolvePythonCommand() {
+  const configured = process.env.FASTER_WHISPER_PYTHON?.trim()
+  if (configured) {
+    return { command: configured, args: [] }
+  }
+
+  if (existsSync(LOCAL_UNIX_PYTHON_BIN)) {
+    return { command: LOCAL_UNIX_PYTHON_BIN, args: [] }
+  }
+
+  if (existsSync(LOCAL_WINDOWS_PYTHON_BIN)) {
+    return { command: LOCAL_WINDOWS_PYTHON_BIN, args: [] }
+  }
+
+  if (process.platform === 'win32') {
+    return { command: 'python', args: [] }
+  }
+
+  return { command: 'python3', args: [] }
+}
+
+const PYTHON_COMMAND = resolvePythonCommand()
+const PYTHON_BIN = PYTHON_COMMAND.command
 const WORKER_PATH = fileURLToPath(
   new URL('./faster_whisper_transcribe.py', import.meta.url),
 )
@@ -260,7 +277,7 @@ function getEditorSession(sessionId) {
 
 function runPythonWorker(workerPath, args) {
   return new Promise((resolve, reject) => {
-    const child = spawn(PYTHON_BIN, [workerPath, ...args], {
+    const child = spawn(PYTHON_COMMAND.command, [...PYTHON_COMMAND.args, workerPath, ...args], {
       stdio: ['ignore', 'pipe', 'pipe'],
     })
 
@@ -273,7 +290,18 @@ function runPythonWorker(workerPath, args) {
     child.stderr.on('data', (chunk) => {
       stderr += chunk.toString()
     })
-    child.on('error', reject)
+    child.on('error', (error) => {
+      if (isMissingBinaryError(error)) {
+        reject(
+          new Error(
+            `Python is not installed or not available at ${PYTHON_COMMAND.command}. ` +
+              'Set FASTER_WHISPER_PYTHON to your Python executable or activate the project virtual environment.',
+          ),
+        )
+        return
+      }
+      reject(error)
+    })
     child.on('close', (code) => {
       if (code !== 0) {
         reject(

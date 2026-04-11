@@ -76,6 +76,23 @@ Before running the app locally, make sure you have:
 - FFmpeg installed
 - FFprobe available
 
+The backend will use these in this order:
+
+- `FASTER_WHISPER_PYTHON` if you set it
+- the project virtual environment
+  - Windows: `.venv\Scripts\python.exe`
+  - macOS/Linux: `.venv/bin/python`
+- a system Python fallback
+  - Windows: `python`
+  - macOS/Linux: `python3`
+
+For FFmpeg, the backend will use:
+
+- `VIDVERSITY_FFMPEG_BIN` if you set it
+- `VIDVERSITY_FFPROBE_BIN` if you set it
+- Homebrew defaults on macOS when available
+- otherwise `ffmpeg` and `ffprobe` from PATH
+
 On this machine, the backend is already wired to prefer:
 
 ```bash
@@ -96,10 +113,31 @@ Python environment and dependencies:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-faster-whisper.txt
 ```
 
 If your environment is already set up, you do not need to recreate it every time.
+
+### Windows setup
+
+On Windows PowerShell:
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements-faster-whisper.txt
+npm install
+```
+
+If FFmpeg is not on PATH, set the paths before starting the backend:
+
+```powershell
+$env:FASTER_WHISPER_PYTHON="$PWD\.venv\Scripts\python.exe"
+$env:VIDVERSITY_FFMPEG_BIN="C:\ffmpeg\bin\ffmpeg.exe"
+$env:VIDVERSITY_FFPROBE_BIN="C:\ffmpeg\bin\ffprobe.exe"
+```
+
+You can use [`.env.example`](/Users/nigelrodrigo/Desktop/VidVersity/.env.example) as a reference for the supported variables.
 
 ## Start the Full App
 
@@ -127,7 +165,7 @@ The exact port can vary, so use the URL printed in the terminal.
 In a second terminal:
 
 ```bash
-node scripts/subtitle-server.mjs
+npm run subtitles:server
 ```
 
 This starts the local API on:
@@ -196,7 +234,7 @@ npm run dev
 Start backend:
 
 ```bash
-node scripts/subtitle-server.mjs
+npm run subtitles:server
 ```
 
 Build production bundle:
@@ -225,6 +263,16 @@ The editor now uses a backend session model for split editing and export. The UI
 ### Multi-video append
 
 `Add Video` appends a newly uploaded video to the end of the current timeline and rebuilds the working editor source. Because this changes the underlying media timeline, subtitle and silence analysis should be regenerated afterward if you want them to include the new content.
+
+### Windows note
+
+If another developer is running this on Windows, do the local compatibility pass first before Docker:
+
+- make sure the Python virtual environment exists
+- make sure FFmpeg and FFprobe are installed
+- set `FASTER_WHISPER_PYTHON`, `VIDVERSITY_FFMPEG_BIN`, and `VIDVERSITY_FFPROBE_BIN` if they are not discoverable automatically
+
+Docker may still be useful later, but the current stack should be able to run on Windows without fully containerizing the app.
 
 ## Next Likely Backend Work
 
