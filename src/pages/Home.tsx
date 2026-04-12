@@ -116,7 +116,10 @@ type ExportStatus = 'idle' | 'processing' | 'error'
 type AppendStatus = 'idle' | 'processing'
 type SubtitleTimingField = 'start' | 'end'
 type SubtitleEntryStatus = 'idle' | 'uploading' | 'generating' | 'success'
-type RightPanelView = 'ai' | 'silence' | 'subtitles' | 'scenes'
+type RightPanelView = 'ai' | 'silence' | 'subtitles' | 'scenes' | 'cut'
+type CutHandle = 'start' | 'end'
+
+const CUT_RANGE_MIN_GAP = 0.1
 
 interface ToolbarButtonProps {
   label: string
@@ -237,6 +240,20 @@ function parseEditableTimestamp(value: string): number | null {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
+}
+
+function getTimelineTimestampStyle(ratio: number): React.CSSProperties {
+  const safeRatio = clamp(ratio, 0, 1)
+
+  if (safeRatio <= 0.06) {
+    return { left: '8px', transform: 'none' }
+  }
+
+  if (safeRatio >= 0.94) {
+    return { left: 'calc(100% - 8px)', transform: 'translateX(-100%)' }
+  }
+
+  return { left: `${safeRatio * 100}%`, transform: 'translateX(-50%)' }
 }
 
 function ToolbarButton({
@@ -657,6 +674,61 @@ async function createFileFromVideoUrl(videoUrl: string): Promise<File> {
   })
 }
 
+function normalizeCutRange(
+  start: number,
+  end: number,
+  editedDuration: number,
+): { start: number; end: number } {
+  const safeDuration = Math.max(editedDuration, CUT_RANGE_MIN_GAP)
+  const clampedStart = clamp(
+    start,
+    0,
+    Math.max(0, safeDuration - CUT_RANGE_MIN_GAP),
+  )
+  const clampedEnd = clamp(end, clampedStart + CUT_RANGE_MIN_GAP, safeDuration)
+  return {
+    start: clampedStart,
+    end: clampedEnd,
+  }
+}
+
+function cutSegmentsToEditedRange(
+  segments: ClipSegment[],
+  cutStart: number,
+  cutEnd: number,
+): ClipSegment[] {
+  if (segments.length === 0) {
+    return []
+  }
+
+  let editedOffset = 0
+  const nextSegments: ClipSegment[] = []
+
+  segments.forEach((segment) => {
+    const segmentDuration = Math.max(0, segment.end - segment.start)
+    const editedSegmentStart = editedOffset
+    const editedSegmentEnd = editedOffset + segmentDuration
+    const overlapStart = Math.max(cutStart, editedSegmentStart)
+    const overlapEnd = Math.min(cutEnd, editedSegmentEnd)
+
+    if (overlapEnd - overlapStart >= CUT_RANGE_MIN_GAP) {
+      const sourceStart = segment.start + (overlapStart - editedSegmentStart)
+      const sourceEnd = segment.start + (overlapEnd - editedSegmentStart)
+
+      nextSegments.push({
+        id: nextSegments.length + 1,
+        label: `Clip ${nextSegments.length + 1}`,
+        start: sourceStart,
+        end: sourceEnd,
+      })
+    }
+
+    editedOffset = editedSegmentEnd
+  })
+
+  return nextSegments
+}
+
 function getSegmentTimelineFrames(
   thumbnails: TimelineThumbnail[],
   segment: ClipSegment,
@@ -744,8 +816,13 @@ export default function HomePage(): JSX.Element {
   const [waveformSamples, setWaveformSamples] = useState<number[]>([])
   const [timelineMediaReady, setTimelineMediaReady] = useState(false)
   const [isTimelineDragging, setIsTimelineDragging] = useState(false)
+  const [activeCutHandle, setActiveCutHandle] = useState<CutHandle | null>(null)
   const [timelineZoom, setTimelineZoom] = useState(1)
   const [history, setHistory] = useState<EditorHistoryEntry[]>([])
+  const [cutRange, setCutRange] = useState<{ start: number; end: number }>({
+    start: 0,
+    end: 180,
+  })
 
   const videoPreviewRef = useRef<VideoPreviewHandle | null>(null)
   const timelineTrackRef = useRef<HTMLDivElement | null>(null)
@@ -786,6 +863,10 @@ export default function HomePage(): JSX.Element {
     setSilenceStatus('idle')
     setSilenceError(null)
     setSilenceNotice(null)
+    setCutRange({
+      start: 0,
+      end: 180,
+    })
   }, [preloadedVideoUrl])
 
   useEffect(() => {
@@ -866,6 +947,42 @@ export default function HomePage(): JSX.Element {
     0,
     segments.reduce((sum, segment) => sum + (segment.end - segment.start), 0),
   )
+  const normalizedCutRange = normalizeCutRange(
+    cutRange.start,
+    cutRange.end,
+    editedDuration,
+  )
+  const cutRangeStartRatio =
+    editedDuration > 0 ? normalizedCutRange.start / editedDuration : 0
+  const cutRangeEndRatio =
+    editedDuration > 0 ? normalizedCutRange.end / editedDuration : 1
+  const timelinePlayheadSegmentIndex = segments.findIndex(
+    (segment) => currentTime >= segment.start && currentTime <= segment.end,
+  )
+  const activeTimelineSegmentIndex =
+    timelinePlayheadSegmentIndex >= 0 ? timelinePlayheadSegmentIndex : selectedIndex
+  const activeTimelineSegment =
+    activeTimelineSegmentIndex >= 0 ? segments[activeTimelineSegmentIndex] : null
+  const activeTimelineSegmentOffset =
+    activeTimelineSegmentIndex > 0
+      ? segments
+          .slice(0, activeTimelineSegmentIndex)
+          .reduce((sum, segment) => sum + (segment.end - segment.start), 0)
+      : 0
+  const timelinePlayheadEditedTime = activeTimelineSegment
+    ? clamp(
+        activeTimelineSegmentOffset +
+          clamp(
+            currentTime - activeTimelineSegment.start,
+            0,
+            Math.max(activeTimelineSegment.end - activeTimelineSegment.start, 0),
+          ),
+        0,
+        editedDuration,
+      )
+    : 0
+  const timelinePlayheadRatio =
+    editedDuration > 0 ? clamp(timelinePlayheadEditedTime / editedDuration, 0, 1) : 0
 
   const silenceReviewItems = silenceSegments.map((segment, index) => ({
     ...segment,
@@ -950,6 +1067,10 @@ export default function HomePage(): JSX.Element {
     setSilenceNotice(null)
     setRightPanelView('ai')
     setHistory([])
+    setCutRange({
+      start: 0,
+      end: Math.max(CUT_RANGE_MIN_GAP, editedDuration || videoDuration || 180),
+    })
   }
 
   const handleUndo = async () => {
@@ -996,26 +1117,50 @@ export default function HomePage(): JSX.Element {
     setCurrentTime(safeTime)
   }
 
-  const seekTimelineFromClientX = (clientX: number) => {
-    if (!timelineTrackRef.current || totalDuration <= 0) return
-    const bounds = timelineTrackRef.current.getBoundingClientRect()
-    const ratio = clamp((clientX - bounds.left) / bounds.width, 0, 1)
-    handleSeek(ratio * totalDuration)
+  const seekEditedTimelineToTime = (editedTime: number) => {
+    if (segments.length === 0 || editedDuration <= 0) {
+      handleSeek(editedTime)
+      return
+    }
+
+    const safeEditedTime = clamp(editedTime, 0, editedDuration)
+    let consumedDuration = 0
+
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index]
+      const segmentDuration = Math.max(segment.end - segment.start, 0)
+      const nextConsumedDuration = consumedDuration + segmentDuration
+
+      if (safeEditedTime <= nextConsumedDuration || index === segments.length - 1) {
+        const nextTime =
+          segment.start +
+          clamp(safeEditedTime - consumedDuration, 0, Math.max(segmentDuration, 0))
+        handleSeek(nextTime)
+        return
+      }
+
+      consumedDuration = nextConsumedDuration
+    }
   }
 
-  const handleTrimIntro = () => {
-    if (segments.length === 0) return
-    const introClip = segments[0]
-    const nextStart = Math.min(introClip.end - 1, 10)
-    pushHistory()
+  const seekTimelineFromClientX = (clientX: number) => {
+    if (!timelineTrackRef.current) return
+    const bounds = timelineTrackRef.current.getBoundingClientRect()
+    const ratio = clamp((clientX - bounds.left) / bounds.width, 0, 1)
 
-    setSegments((prev) =>
-      prev.map((segment, index) =>
-        index === 0 ? { ...segment, start: nextStart } : segment,
-      ),
-    )
-    setSelectedId(introClip.id)
-    handleSeek(nextStart)
+    if (segments.length === 0 || editedDuration <= 0) {
+      handleSeek(ratio * totalDuration)
+      return
+    }
+
+    seekEditedTimelineToTime(ratio * editedDuration)
+  }
+
+  const handleOpenCutPanel = () => {
+    setRightPanelView('cut')
+    setIsRightPanelCollapsed(false)
+    setEditorError(null)
+    setCutRange(normalizedCutRange)
   }
 
   const handleGenerateSubtitles = async (): Promise<boolean> => {
@@ -1147,6 +1292,90 @@ export default function HomePage(): JSX.Element {
         selectedSilenceSegmentKeys.length === 1 ? '' : 's'
       } staged for future backend removal. This does not edit playback or media yet.`,
     )
+  }
+
+  const updateCutHandle = (handle: CutHandle, editedTime: number) => {
+    setCutRange((prev) => {
+      const currentRange = normalizeCutRange(prev.start, prev.end, editedDuration)
+
+      if (handle === 'start') {
+        return {
+          start: clamp(
+            editedTime,
+            0,
+            Math.max(0, currentRange.end - CUT_RANGE_MIN_GAP),
+          ),
+          end: currentRange.end,
+        }
+      }
+
+      return {
+        start: currentRange.start,
+        end: clamp(
+          editedTime,
+          currentRange.start + CUT_RANGE_MIN_GAP,
+          Math.max(editedDuration, CUT_RANGE_MIN_GAP),
+        ),
+      }
+    })
+  }
+
+  const updateCutHandleFromClientX = (handle: CutHandle, clientX: number) => {
+    if (!timelineTrackRef.current || editedDuration <= 0) return
+
+    const bounds = timelineTrackRef.current.getBoundingClientRect()
+    const ratio = clamp((clientX - bounds.left) / bounds.width, 0, 1)
+    updateCutHandle(handle, ratio * editedDuration)
+  }
+
+  const beginCutTimelineInteraction = (clientX: number) => {
+    if (!timelineTrackRef.current || editedDuration <= 0) return
+
+    const bounds = timelineTrackRef.current.getBoundingClientRect()
+    const ratio = clamp((clientX - bounds.left) / bounds.width, 0, 1)
+    const editedTime = ratio * editedDuration
+    const nextHandle: CutHandle =
+      Math.abs(editedTime - normalizedCutRange.start) <=
+      Math.abs(editedTime - normalizedCutRange.end)
+        ? 'start'
+        : 'end'
+
+    setActiveCutHandle(nextHandle)
+    updateCutHandle(nextHandle, editedTime)
+  }
+
+  const handleCutVideo = () => {
+    if (segments.length === 0) {
+      setEditorError('Upload a video before cutting the timeline.')
+      return
+    }
+
+    const nextSegments = cutSegmentsToEditedRange(
+      segments,
+      normalizedCutRange.start,
+      normalizedCutRange.end,
+    )
+
+    if (nextSegments.length === 0) {
+      setEditorError(
+        'Move the cut handles so the kept range includes part of the timeline.',
+      )
+      return
+    }
+
+    pushHistory()
+    setEditorError(null)
+    setSegments(nextSegments)
+    setSelectedId(nextSegments[0].id)
+    setCutRange({
+      start: 0,
+      end: nextSegments.reduce(
+        (sum, segment) => sum + (segment.end - segment.start),
+        0,
+      ),
+    })
+    videoPreviewRef.current?.seekTo(nextSegments[0].start)
+    setCurrentTime(nextSegments[0].start)
   }
 
   const ensureEditorSession = async (): Promise<EditorSessionState | null> => {
@@ -1500,6 +1729,10 @@ export default function HomePage(): JSX.Element {
       setSelectedVideoFile(combinedFile)
       setVideoSourceUrl(combinedUrl)
       setVideoDuration(nextSession.duration)
+      setCutRange({
+        start: 0,
+        end: Math.max(CUT_RANGE_MIN_GAP, nextSession.duration),
+      })
       setCurrentTime(0)
       setSegments(nextSession.segments)
       setSelectedId(
@@ -1674,6 +1907,30 @@ export default function HomePage(): JSX.Element {
       window.removeEventListener('pointerup', handlePointerUp)
     }
   }, [isTimelineDragging, totalDuration])
+
+  useEffect(() => {
+    if (!activeCutHandle) return
+
+    const handlePointerMove = (event: PointerEvent) => {
+      updateCutHandleFromClientX(activeCutHandle, event.clientX)
+    }
+
+    const handlePointerUp = () => {
+      setActiveCutHandle(null)
+    }
+
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', handlePointerUp)
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', handlePointerUp)
+    }
+  }, [activeCutHandle, editedDuration])
+
+  useEffect(() => {
+    setCutRange((prev) => normalizeCutRange(prev.start, prev.end, editedDuration))
+  }, [editedDuration])
 
   const progress = totalDuration > 0 ? currentTime / totalDuration : 0
   const navLinkClass = ({ isActive }: { isActive: boolean }) =>
@@ -2007,7 +2264,13 @@ export default function HomePage(): JSX.Element {
                 ref={videoPreviewRef}
                 videoUrl={videoSourceUrl ?? preloadedVideoUrl}
                 subtitles={subtitleSegments}
-                onLoadedMetadata={setVideoDuration}
+                onLoadedMetadata={(duration) => {
+                  setVideoDuration(duration)
+                  setCutRange({
+                    start: 0,
+                    end: Math.max(CUT_RANGE_MIN_GAP, duration),
+                  })
+                }}
                 onPlaybackStateChange={setIsPlaying}
                 onTimeUpdate={setCurrentTime}
                 onVideoSourceChange={setVideoSourceUrl}
@@ -2128,11 +2391,11 @@ export default function HomePage(): JSX.Element {
 
                     <div className="flex flex-wrap items-center justify-center gap-1.5">
                       <ToolbarButton
-                        label="Trim"
-                        tooltip="Trim the selected clip to the current playhead."
+                        label="Cut"
+                        tooltip="Open cut mode to keep only the region between two timeline playheads."
                         guidedMode={guidedMode}
                         isDark={isDark}
-                        onClick={handleTrimIntro}
+                        onClick={handleOpenCutPanel}
                         icon={Scissors}
                         tone="editor"
                       />
@@ -2309,12 +2572,13 @@ export default function HomePage(): JSX.Element {
                             ref={timelineTrackRef}
                             className="relative"
                             onPointerDown={(event) => {
+                              if (rightPanelView === 'cut') return
                               seekTimelineFromClientX(event.clientX)
                               setIsTimelineDragging(true)
                             }}
                           >
                             <div
-                              className={`relative flex min-h-[84px] items-stretch gap-1 overflow-hidden rounded-2xl border p-2 ${
+                              className={`relative flex min-h-[84px] items-stretch overflow-hidden rounded-2xl border ${
                                 isDark
                                   ? 'border-[#2b3950] bg-[#1a2435]'
                                   : 'border-[#dfe5ec] bg-[#eff3f8]'
@@ -2323,17 +2587,6 @@ export default function HomePage(): JSX.Element {
                               {segments.map((segment) => {
                                 const duration = Math.max(0.1, segment.end - segment.start)
                                 const isSelected = selectedId === segment.id
-                                const containsPlayhead =
-                                  currentTime >= segment.start &&
-                                  currentTime <= segment.end
-                                const playheadRatio = containsPlayhead
-                                  ? clamp(
-                                      (currentTime - segment.start) /
-                                        Math.max(segment.end - segment.start, 0.001),
-                                      0,
-                                      1,
-                                    )
-                                  : 0
                                 const segmentFrames = getSegmentTimelineFrames(
                                   timelineThumbnails,
                                   segment,
@@ -2344,6 +2597,12 @@ export default function HomePage(): JSX.Element {
                                     key={segment.id}
                                     type="button"
                                     onPointerDown={(event) => {
+                                      if (rightPanelView === 'cut') {
+                                        event.preventDefault()
+                                        event.stopPropagation()
+                                        return
+                                      }
+
                                       event.stopPropagation()
                                       const bounds =
                                         event.currentTarget.getBoundingClientRect()
@@ -2357,9 +2616,10 @@ export default function HomePage(): JSX.Element {
                                         (segment.end - segment.start) * ratio
                                       setSelectedId(segment.id)
                                       handleSeek(nextTime)
+                                      setIsTimelineDragging(true)
                                     }}
-                                    style={{ flexGrow: duration }}
-                                    className={`relative flex min-w-[110px] flex-1 flex-col justify-end overflow-hidden rounded-xl border text-left transition ${
+                                    style={{ flexGrow: duration, flexBasis: 0 }}
+                                    className={`relative flex min-w-0 flex-1 flex-col justify-end overflow-hidden rounded-xl border text-left transition ${
                                       isSelected
                                         ? isDark
                                           ? 'border-[#8bb8ff] bg-[#1f4da0] text-white'
@@ -2369,19 +2629,6 @@ export default function HomePage(): JSX.Element {
                                           : 'border-[#c9d5e8] bg-white text-[#233147] hover:border-[#1a56db]'
                                     }`}
                                   >
-                                    {containsPlayhead ? (
-                                      <>
-                                        <span
-                                          className="absolute inset-y-1 z-20 w-0.5 -translate-x-1/2 bg-[#de34ab]"
-                                          style={{ left: `${playheadRatio * 100}%` }}
-                                        />
-                                        <span
-                                          className="absolute top-1 z-20 h-0 w-0 -translate-x-1/2 border-x-[6px] border-b-[8px] border-x-transparent border-b-[#de34ab]"
-                                          style={{ left: `${playheadRatio * 100}%` }}
-                                        />
-                                      </>
-                                    ) : null}
-
                                     <div className="absolute inset-0">
                                       {timelineMediaReady && segmentFrames.length > 0 ? (
                                         <div className="flex h-full w-full">
@@ -2429,6 +2676,93 @@ export default function HomePage(): JSX.Element {
                                   </button>
                                 )
                               })}
+                              {rightPanelView !== 'cut' &&
+                              editedDuration > 0 &&
+                              activeTimelineSegment ? (
+                                <div className="pointer-events-none absolute inset-0 z-20">
+                                  <span
+                                    className="absolute inset-y-1 w-0.5 -translate-x-1/2 bg-[#de34ab]"
+                                    style={{ left: `${timelinePlayheadRatio * 100}%` }}
+                                  />
+                                  <span
+                                    className="absolute top-1 h-0 w-0 -translate-x-1/2 border-x-[6px] border-b-[8px] border-x-transparent border-b-[#de34ab]"
+                                    style={{ left: `${timelinePlayheadRatio * 100}%` }}
+                                  />
+                                  <span
+                                    className="absolute bottom-7 rounded-full bg-[#111827] px-2 py-0.5 text-[9px] font-mono text-white shadow-sm"
+                                    style={getTimelineTimestampStyle(timelinePlayheadRatio)}
+                                  >
+                                    {formatEditableTimestamp(timelinePlayheadEditedTime)}
+                                  </span>
+                                </div>
+                              ) : null}
+                              {rightPanelView === 'cut' && editedDuration > 0 ? (
+                                <div
+                                  className="absolute inset-0 z-30"
+                                  onPointerDown={(event) => {
+                                    event.preventDefault()
+                                    event.stopPropagation()
+                                    beginCutTimelineInteraction(event.clientX)
+                                  }}
+                                >
+                                  <div
+                                    className="absolute inset-y-0 left-0 bg-[#0b1220]/30"
+                                    style={{ width: `${cutRangeStartRatio * 100}%` }}
+                                  />
+                                  <div
+                                    className="absolute inset-y-0 bg-[#de34ab]/14"
+                                    style={{
+                                      left: `${cutRangeStartRatio * 100}%`,
+                                      width: `${Math.max(
+                                        0,
+                                        (cutRangeEndRatio - cutRangeStartRatio) * 100,
+                                      )}%`,
+                                    }}
+                                  />
+                                  <div
+                                    className="absolute inset-y-0 right-0 bg-[#0b1220]/30"
+                                    style={{
+                                      width: `${Math.max(0, (1 - cutRangeEndRatio) * 100)}%`,
+                                    }}
+                                  />
+
+                                  {(
+                                    [
+                                      ['start', normalizedCutRange.start],
+                                      ['end', normalizedCutRange.end],
+                                    ] as const
+                                  ).map(([handle, value]) => {
+                                    const handleRatio =
+                                      handle === 'start' ? cutRangeStartRatio : cutRangeEndRatio
+
+                                    return (
+                                      <React.Fragment key={handle}>
+                                        <button
+                                          type="button"
+                                          onPointerDown={(event) => {
+                                            event.preventDefault()
+                                            event.stopPropagation()
+                                            setActiveCutHandle(handle)
+                                            updateCutHandleFromClientX(handle, event.clientX)
+                                          }}
+                                          className="absolute inset-y-0 z-40 -translate-x-1/2 cursor-ew-resize"
+                                          style={{ left: `${handleRatio * 100}%` }}
+                                          aria-label={`${handle} cut playhead`}
+                                        >
+                                          <span className="absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 bg-[#de34ab]" />
+                                          <span className="absolute bottom-1 left-1/2 flex h-4 w-4 -translate-x-1/2 items-center justify-center rounded-full border-2 border-white bg-[#de34ab] shadow-[0_8px_20px_rgba(222,52,171,0.24)]" />
+                                        </button>
+                                        <span
+                                          className="pointer-events-none absolute bottom-7 z-40 rounded-full bg-[#111827] px-2 py-0.5 text-[9px] font-mono text-white shadow-sm"
+                                          style={getTimelineTimestampStyle(handleRatio)}
+                                        >
+                                          {formatEditableTimestamp(value)}
+                                        </span>
+                                      </React.Fragment>
+                                    )
+                                  })}
+                                </div>
+                              ) : null}
                             </div>
                           </div>
                         </div>
@@ -2489,7 +2823,9 @@ export default function HomePage(): JSX.Element {
           <div className="mb-3 flex items-center justify-between gap-2">
             {!isRightPanelCollapsed ? (
               <div className="flex items-center gap-2">
-                {rightPanelView === 'silence' ? (
+                {rightPanelView === 'cut' ? (
+                  <Scissors className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
+                ) : rightPanelView === 'silence' ? (
                   <Mic className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
                 ) : rightPanelView === 'scenes' ? (
                   <Clapperboard className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
@@ -2503,7 +2839,9 @@ export default function HomePage(): JSX.Element {
                     isDark ? 'text-[#c6d3eb]' : 'text-[#515f74]'
                   }`}
                 >
-                  {rightPanelView === 'silence'
+                  {rightPanelView === 'cut'
+                    ? 'Cut Workspace'
+                    : rightPanelView === 'silence'
                     ? 'Silence Review'
                     : rightPanelView === 'scenes'
                       ? 'Scene Review'
@@ -2544,7 +2882,9 @@ export default function HomePage(): JSX.Element {
                     isDark ? 'text-[#8fa2c2]' : 'text-[#737686]'
                   }`}
                 >
-                  {rightPanelView === 'silence'
+                  {rightPanelView === 'cut'
+                    ? 'Cut Workspace'
+                    : rightPanelView === 'silence'
                     ? 'Silence Review'
                     : rightPanelView === 'scenes'
                       ? 'Scene Review'
@@ -2554,7 +2894,9 @@ export default function HomePage(): JSX.Element {
                 </span>
               </div>
               <div className="space-y-2">
-                {(rightPanelView === 'silence'
+                {(rightPanelView === 'cut'
+                  ? ['Cut', 'Keep', 'Range']
+                  : rightPanelView === 'silence'
                   ? ['Silence', 'Review', 'Timeline']
                   : rightPanelView === 'scenes'
                     ? ['Scenes', 'Review', 'Split']
@@ -2583,7 +2925,102 @@ export default function HomePage(): JSX.Element {
                   : 'border-[#d9dde5] bg-[linear-gradient(180deg,#ffffff_0%,#f7f9fb_100%)]'
               }`}
             >
-                {rightPanelView === 'silence' ? (
+                {rightPanelView === 'cut' ? (
+                  <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                    <div
+                      className={`mb-4 rounded-2xl border p-2 ${
+                        isDark
+                          ? 'border-[#243149] bg-[#111827]'
+                          : 'border-[#e3e7ee] bg-[#fbfcfd]'
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={handleCutVideo}
+                        disabled={segments.length === 0 || editedDuration <= CUT_RANGE_MIN_GAP}
+                        className="flex h-9 w-full items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Cut Video
+                      </button>
+                    </div>
+
+                    <div
+                      className={`mb-4 rounded-2xl border px-4 py-3 text-[12px] leading-5 ${
+                        isDark
+                          ? 'border-[#243149] bg-[#111827] text-[#9fb0ca]'
+                          : 'border-[#e3e7ee] bg-[#fbfcfd] text-[#57657a]'
+                      }`}
+                    >
+                      Drag the two playheads on the timeline to keep only the section
+                      between them. Everything outside that range will be removed from
+                      the edit.
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div
+                        className={`rounded-2xl border px-4 py-3 ${
+                          isDark
+                            ? 'border-[#243149] bg-[#111827]'
+                            : 'border-[#e3e7ee] bg-[#fbfcfd]'
+                        }`}
+                      >
+                        <span
+                          className={`block text-[9px] font-bold uppercase tracking-[0.14em] ${
+                            isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
+                          }`}
+                        >
+                          Keep From
+                        </span>
+                        <span
+                          className={`mt-2 block text-[14px] font-semibold ${
+                            isDark ? 'text-[#e5edf9]' : 'text-[#233147]'
+                          }`}
+                        >
+                          {formatEditableTimestamp(normalizedCutRange.start)}
+                        </span>
+                      </div>
+
+                      <div
+                        className={`rounded-2xl border px-4 py-3 ${
+                          isDark
+                            ? 'border-[#243149] bg-[#111827]'
+                            : 'border-[#e3e7ee] bg-[#fbfcfd]'
+                        }`}
+                      >
+                        <span
+                          className={`block text-[9px] font-bold uppercase tracking-[0.14em] ${
+                            isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
+                          }`}
+                        >
+                          Keep To
+                        </span>
+                        <span
+                          className={`mt-2 block text-[14px] font-semibold ${
+                            isDark ? 'text-[#e5edf9]' : 'text-[#233147]'
+                          }`}
+                        >
+                          {formatEditableTimestamp(normalizedCutRange.end)}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div
+                      className={`mt-4 rounded-2xl border border-dashed px-5 py-5 text-[12px] leading-6 ${
+                        isDark
+                          ? 'border-[#31415a] bg-[#111827] text-[#8fa2c2]'
+                          : 'border-[#c3c5d7] bg-[#fbfcfd] text-[#737686]'
+                      }`}
+                    >
+                      Remaining edited length:{' '}
+                      {formatEditableTimestamp(
+                        Math.max(
+                          CUT_RANGE_MIN_GAP,
+                          normalizedCutRange.end - normalizedCutRange.start,
+                        ),
+                      )}
+                    </div>
+                  </div>
+                ) : rightPanelView === 'silence' ? (
                   <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
                   <div
                     className={`mb-4 rounded-2xl border p-2 ${
