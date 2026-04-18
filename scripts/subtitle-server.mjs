@@ -56,6 +56,7 @@ const FFPROBE_BIN =
 const TEMP_DIR = join(tmpdir(), 'vidversity-faster-whisper')
 const EDITOR_SESSION_DIR = join(TEMP_DIR, 'editor-sessions')
 const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
+const CUT_RANGE_MIN_GAP = 0.1
 const editorSessions = new Map()
 
 function sendJson(response, statusCode, payload) {
@@ -184,6 +185,177 @@ function relabelEditorSegments(segments) {
     ...segment,
     label: `Clip ${index + 1}`,
   }))
+}
+
+function cutEditorSegmentsToRange(segments, cutStart, cutEnd) {
+  if (!Array.isArray(segments) || segments.length === 0) {
+    return []
+  }
+
+  let editedOffset = 0
+  const nextSegments = []
+
+  segments.forEach((segment) => {
+    const segmentDuration = Math.max(0, segment.end - segment.start)
+    const editedSegmentStart = editedOffset
+    const editedSegmentEnd = editedOffset + segmentDuration
+    const overlapStart = Math.max(cutStart, editedSegmentStart)
+    const overlapEnd = Math.min(cutEnd, editedSegmentEnd)
+
+    if (overlapEnd - overlapStart >= CUT_RANGE_MIN_GAP) {
+      const sourceStart = segment.start + (overlapStart - editedSegmentStart)
+      const sourceEnd = segment.start + (overlapEnd - editedSegmentStart)
+
+      nextSegments.push({
+        id: segment.id,
+        label: segment.label,
+        start: sourceStart,
+        end: sourceEnd,
+      })
+    }
+
+    editedOffset = editedSegmentEnd
+  })
+
+  return relabelEditorSegments(nextSegments)
+}
+
+function getEditorSegmentSelection(session, segmentIds) {
+  const requestedIds = Array.isArray(segmentIds)
+    ? segmentIds
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value) && value > 0)
+    : []
+  const uniqueIds = [...new Set(requestedIds)]
+  const selectedSegments =
+    uniqueIds.length > 0
+      ? session.segments.filter((segment) => uniqueIds.includes(segment.id))
+      : session.segments.filter((segment) => segment.id === session.selectedSegmentId)
+
+  if (selectedSegments.length === 0) {
+    throw new Error('Select at least one timeline clip before running silence detection.')
+  }
+
+  return selectedSegments
+}
+
+function remapDetectedSegmentsToSourceTimeline(selectedSegments, detectedSegments) {
+  if (!Array.isArray(detectedSegments) || detectedSegments.length === 0) {
+    return []
+  }
+
+  let analysisOffset = 0
+  const remapped = []
+
+  selectedSegments.forEach((segment) => {
+    const segmentDuration = Math.max(0, segment.end - segment.start)
+    const analysisSegmentStart = analysisOffset
+    const analysisSegmentEnd = analysisOffset + segmentDuration
+
+    detectedSegments.forEach((detectedSegment, index) => {
+      const detectedStart = Number(detectedSegment?.start_time)
+      const detectedEnd = Number(detectedSegment?.end_time)
+
+      if (!Number.isFinite(detectedStart) || !Number.isFinite(detectedEnd)) {
+        return
+      }
+
+      const overlapStart = Math.max(detectedStart, analysisSegmentStart)
+      const overlapEnd = Math.min(detectedEnd, analysisSegmentEnd)
+
+      if (overlapEnd <= overlapStart) {
+        return
+      }
+
+      remapped.push({
+        start_time: segment.start + (overlapStart - analysisSegmentStart),
+        end_time: segment.start + (overlapEnd - analysisSegmentStart),
+        label:
+          typeof detectedSegment?.label === 'string' && detectedSegment.label.trim().length > 0
+            ? detectedSegment.label.trim()
+            : `segment-${index + 1}`,
+        confidence:
+          detectedSegment?.confidence == null ? null : Number(detectedSegment.confidence),
+      })
+    })
+
+    analysisOffset = analysisSegmentEnd
+  })
+
+  return remapped.filter(
+    (segment) =>
+      Number.isFinite(segment.start_time) &&
+      Number.isFinite(segment.end_time) &&
+      segment.end_time - segment.start_time >= CUT_RANGE_MIN_GAP,
+  )
+}
+
+function removeSilenceRangesFromEditorSegments(segments, silenceRanges, nextSegmentId) {
+  const normalizedRanges = Array.isArray(silenceRanges)
+    ? silenceRanges
+        .map((segment) => ({
+          start: Number(segment?.start),
+          end: Number(segment?.end),
+        }))
+        .filter(
+          (segment) =>
+            Number.isFinite(segment.start) &&
+            Number.isFinite(segment.end) &&
+            segment.end - segment.start >= CUT_RANGE_MIN_GAP,
+        )
+        .sort((left, right) => left.start - right.start)
+    : []
+
+  if (normalizedRanges.length === 0) {
+    throw new Error('Select at least one detected silence range to delete.')
+  }
+
+  let cursorId = Number.isFinite(nextSegmentId) ? nextSegmentId : 1
+  const nextSegments = []
+
+  segments.forEach((segment) => {
+    let keepCursor = segment.start
+
+    normalizedRanges.forEach((range) => {
+      const overlapStart = Math.max(segment.start, range.start)
+      const overlapEnd = Math.min(segment.end, range.end)
+
+      if (overlapEnd <= overlapStart) {
+        return
+      }
+
+      if (overlapStart - keepCursor >= CUT_RANGE_MIN_GAP) {
+        nextSegments.push({
+          id: cursorId,
+          label: segment.label,
+          start: keepCursor,
+          end: overlapStart,
+        })
+        cursorId += 1
+      }
+
+      keepCursor = Math.max(keepCursor, overlapEnd)
+    })
+
+    if (segment.end - keepCursor >= CUT_RANGE_MIN_GAP) {
+      nextSegments.push({
+        id: cursorId,
+        label: segment.label,
+        start: keepCursor,
+        end: segment.end,
+      })
+      cursorId += 1
+    }
+  })
+
+  if (nextSegments.length === 0) {
+    throw new Error('Deleting those silence ranges would remove the entire edit.')
+  }
+
+  return {
+    segments: relabelEditorSegments(nextSegments),
+    nextSegmentId: cursorId,
+  }
 }
 
 function serializeEditorSession(session) {
@@ -533,18 +705,16 @@ async function appendEditorMedia(existingFilePath, appendedFilePath, outputPath)
   }
 }
 
-async function renderEditorSession(session, subtitles = []) {
-  const { hasVideo, hasAudio } = await inspectMediaStreams(session.filePath)
+async function renderEditorSegmentsToFile(filePath, segments, outputPath) {
+  const { hasVideo, hasAudio } = await inspectMediaStreams(filePath)
   if (!hasVideo) {
     throw new Error('The uploaded file does not contain a video stream.')
   }
 
-  const baseOutputPath = join(EDITOR_SESSION_DIR, `${session.id}-export-base.mp4`)
-  const outputPath = join(EDITOR_SESSION_DIR, `${session.id}-export.mp4`)
   const filterParts = []
   const concatInputs = []
 
-  session.segments.forEach((segment, index) => {
+  segments.forEach((segment, index) => {
     filterParts.push(
       `[0:v]trim=start=${segment.start}:end=${segment.end},setpts=PTS-STARTPTS[v${index}]`,
     )
@@ -559,15 +729,15 @@ async function renderEditorSession(session, subtitles = []) {
   })
 
   filterParts.push(
-    `${concatInputs.join('')}concat=n=${session.segments.length}:v=1:a=${
-      hasAudio ? 1 : 0
-    }[vout]${hasAudio ? '[aout]' : ''}`,
+    `${concatInputs.join('')}concat=n=${segments.length}:v=1:a=${hasAudio ? 1 : 0}[vout]${
+      hasAudio ? '[aout]' : ''
+    }`,
   )
 
   const args = [
     '-y',
     '-i',
-    session.filePath,
+    filePath,
     '-filter_complex',
     filterParts.join(';'),
     '-map',
@@ -593,7 +763,7 @@ async function renderEditorSession(session, subtitles = []) {
     args.push('-an')
   }
 
-  args.push(baseOutputPath)
+  args.push(outputPath)
 
   try {
     await runCommand(FFMPEG_BIN, args)
@@ -603,6 +773,12 @@ async function renderEditorSession(session, subtitles = []) {
     }
     throw error
   }
+}
+
+async function renderEditorSession(session, subtitles = []) {
+  const baseOutputPath = join(EDITOR_SESSION_DIR, `${session.id}-export-base.mp4`)
+  const outputPath = join(EDITOR_SESSION_DIR, `${session.id}-export.mp4`)
+  await renderEditorSegmentsToFile(session.filePath, session.segments, baseOutputPath)
 
   const remappedSubtitles = remapSubtitlesForEditorTimeline(
     session.segments,
@@ -713,11 +889,14 @@ const server = createServer(async (request, response) => {
       health: '/api/health',
       generate: '/api/subtitles/generate',
       detectSilence: '/api/audio/detect-silence',
+      detectEditorSilence: '/api/editor/detect-silence',
       createEditorSession: '/api/editor/session',
       editorSource: '/api/editor/source?sessionId=...',
       replaceEditorSession: '/api/editor/session/replace',
       appendEditorMedia: '/api/editor/append?sessionId=...',
       splitEditorSession: '/api/editor/split',
+      cutEditorSession: '/api/editor/cut',
+      deleteEditorSilence: '/api/editor/delete-silence',
       exportEditorSession: '/api/editor/export',
       python: PYTHON_BIN,
     })
@@ -908,6 +1087,110 @@ const server = createServer(async (request, response) => {
       session.segments.splice(splitIndex, 1, leftSegment, rightSegment)
       session.segments = relabelEditorSegments(session.segments)
       session.selectedSegmentId = rightSegment.id
+
+      sendJson(response, 200, serializeEditorSession(session))
+      return
+    }
+
+    if (url.pathname === '/api/editor/cut') {
+      const payload = parseJsonBody(body)
+      const sessionId =
+        typeof payload?.sessionId === 'string' ? payload.sessionId : ''
+      const rawCutStart = Number(payload?.cutStart ?? 0)
+      const rawCutEnd = Number(payload?.cutEnd ?? 0)
+      const session = getEditorSession(sessionId)
+      const editedDuration = session.segments.reduce(
+        (sum, segment) => sum + Math.max(0, segment.end - segment.start),
+        0,
+      )
+
+      if (editedDuration <= 0) {
+        throw new Error('The current edit does not contain any duration to cut.')
+      }
+
+      const cutStart = Math.min(
+        Math.max(0, rawCutStart),
+        Math.max(0, editedDuration - CUT_RANGE_MIN_GAP),
+      )
+      const cutEnd = Math.min(
+        Math.max(cutStart + CUT_RANGE_MIN_GAP, rawCutEnd),
+        editedDuration,
+      )
+      const nextSegments = cutEditorSegmentsToRange(
+        session.segments,
+        cutStart,
+        cutEnd,
+      )
+
+      if (nextSegments.length === 0) {
+        throw new Error(
+          'Move the cut handles so the kept range includes part of the timeline.',
+        )
+      }
+
+      session.segments = nextSegments
+      session.selectedSegmentId = nextSegments[0]?.id ?? null
+      sendJson(response, 200, serializeEditorSession(session))
+      return
+    }
+
+    if (url.pathname === '/api/editor/detect-silence') {
+      const payload = parseJsonBody(body)
+      const sessionId =
+        typeof payload?.sessionId === 'string' ? payload.sessionId : ''
+      const segmentIds = Array.isArray(payload?.segmentIds) ? payload.segmentIds : []
+      const noiseThresholdDb = Number(payload?.noiseThresholdDb ?? -35)
+      const minSilenceDuration = Number(payload?.minSilenceDuration ?? 0.5)
+      const minSegmentDuration = Number(payload?.minSegmentDuration ?? 0.1)
+      const session = getEditorSession(sessionId)
+      const selectedSegments = getEditorSegmentSelection(session, segmentIds)
+      const analysisFilePath = join(
+        EDITOR_SESSION_DIR,
+        `${session.id}-silence-analysis-${Date.now()}.mp4`,
+      )
+
+      try {
+        await renderEditorSegmentsToFile(session.filePath, selectedSegments, analysisFilePath)
+        const result = await runAudioActivityDetection(analysisFilePath, {
+          noiseThresholdDb,
+          minSilenceDuration,
+          minSegmentDuration,
+        })
+
+        sendJson(response, 200, {
+          audioDuration: selectedSegments.reduce(
+            (sum, segment) => sum + Math.max(0, segment.end - segment.start),
+            0,
+          ),
+          silenceSegments: remapDetectedSegmentsToSourceTimeline(
+            selectedSegments,
+            result?.silence_segments,
+          ),
+          speechSegments: remapDetectedSegmentsToSourceTimeline(
+            selectedSegments,
+            result?.speech_segments,
+          ),
+        })
+      } finally {
+        await rm(analysisFilePath, { force: true }).catch(() => undefined)
+      }
+      return
+    }
+
+    if (url.pathname === '/api/editor/delete-silence') {
+      const payload = parseJsonBody(body)
+      const sessionId =
+        typeof payload?.sessionId === 'string' ? payload.sessionId : ''
+      const session = getEditorSession(sessionId)
+      const nextState = removeSilenceRangesFromEditorSegments(
+        session.segments,
+        payload?.silenceSegments,
+        session.nextSegmentId,
+      )
+
+      session.segments = nextState.segments
+      session.nextSegmentId = nextState.nextSegmentId
+      session.selectedSegmentId = nextState.segments[0]?.id ?? null
 
       sendJson(response, 200, serializeEditorSession(session))
       return

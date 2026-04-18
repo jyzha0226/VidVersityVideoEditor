@@ -269,6 +269,50 @@ export async function detectSilenceFromVideo(
   }
 }
 
+export async function detectSilenceInEditorSession(
+  sessionId: string,
+  segmentIds: number[],
+  options?: {
+    noiseThresholdDb?: number
+    minSilenceDuration?: number
+    minSegmentDuration?: number
+  },
+): Promise<AudioActivityDetectionResult> {
+  const apiBaseUrl = resolveSubtitleApiUrl()
+  const response = await fetch(`${apiBaseUrl}/api/editor/detect-silence`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      sessionId,
+      segmentIds,
+      noiseThresholdDb: options?.noiseThresholdDb,
+      minSilenceDuration: options?.minSilenceDuration,
+      minSegmentDuration: options?.minSegmentDuration,
+    }),
+  })
+
+  const payload = (await response.json().catch(() => null)) as
+    | AudioActivityApiResponse
+    | null
+
+  if (!response.ok) {
+    throw new Error(
+      payload?.error ||
+        'Silence detection failed for the selected timeline clips.',
+    )
+  }
+
+  return {
+    audioDuration: Number(payload?.audioDuration ?? 0),
+    silenceSegments: normalizeAudioActivitySegments(payload?.silenceSegments),
+    speechSegments: normalizeAudioActivitySegments(payload?.speechSegments).map(
+      (segment) => ({ ...segment, label: 'speech' }),
+    ),
+  }
+}
+
 export async function createEditorSessionFromVideo(
   file: File,
 ): Promise<EditorSessionState> {
@@ -357,6 +401,66 @@ export async function splitEditorSessionAtTime(
   if (!response.ok) {
     throw new Error(
       payload?.error || 'Could not split the selected clip.',
+    )
+  }
+
+  return normalizeEditorSession(payload)
+}
+
+export async function cutEditorSessionToRange(
+  sessionId: string,
+  cutStart: number,
+  cutEnd: number,
+): Promise<EditorSessionState> {
+  const apiBaseUrl = resolveSubtitleApiUrl()
+  const response = await fetch(`${apiBaseUrl}/api/editor/cut`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      sessionId,
+      cutStart,
+      cutEnd,
+    }),
+  })
+
+  const payload = (await response.json().catch(() => null)) as
+    | EditorSessionApiResponse
+    | null
+
+  if (!response.ok) {
+    throw new Error(
+      payload?.error || 'Could not cut the selected timeline range.',
+    )
+  }
+
+  return normalizeEditorSession(payload)
+}
+
+export async function deleteSilenceRangesFromEditorSession(
+  sessionId: string,
+  silenceSegments: Array<{ start: number; end: number }>,
+): Promise<EditorSessionState> {
+  const apiBaseUrl = resolveSubtitleApiUrl()
+  const response = await fetch(`${apiBaseUrl}/api/editor/delete-silence`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      sessionId,
+      silenceSegments,
+    }),
+  })
+
+  const payload = (await response.json().catch(() => null)) as
+    | EditorSessionApiResponse
+    | null
+
+  if (!response.ok) {
+    throw new Error(
+      payload?.error || 'Could not delete the selected silence ranges.',
     )
   }
 

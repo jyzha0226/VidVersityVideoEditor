@@ -1,4 +1,4 @@
-import React, {
+﻿import React, {
   forwardRef,
   useEffect,
   useImperativeHandle,
@@ -46,8 +46,11 @@ import {
 import {
   appendVideoToEditorSession,
   type AudioActivityDetectionResult,
+  cutEditorSessionToRange,
   createEditorSessionFromVideo,
+  deleteSilenceRangesFromEditorSession,
   detectSilenceFromVideo,
+  detectSilenceInEditorSession,
   downloadEditorSessionSourceFile,
   type EditorSessionState,
   exportEditorSessionVideo,
@@ -130,6 +133,7 @@ interface ToolbarButtonProps {
   icon: React.ComponentType<{ className?: string }>
   disabled?: boolean
   danger?: boolean
+  active?: boolean
   tone?: 'editor' | 'workspace' | 'global'
 }
 
@@ -265,23 +269,40 @@ function ToolbarButton({
   icon: Icon,
   disabled = false,
   danger = false,
+  active = false,
   tone = 'editor',
 }: ToolbarButtonProps): JSX.Element {
-  const styles = danger
-    ? isDark
-      ? 'text-[#ff8f9a] hover:bg-[#2a1820]'
-      : 'text-[#a23535] hover:bg-[#fff1f1]'
-    : tone === 'workspace'
+  const styles = active
+    ? danger
       ? isDark
-        ? 'text-[#ff7ac8] hover:bg-[#2a1730] hover:text-[#ffb3de]'
-        : 'text-[#c2187a] hover:bg-[#fff0f8] hover:text-[#a20f66]'
-      : tone === 'global'
+        ? 'bg-[#3a1c24] text-[#ffb7c0] shadow-[0_10px_24px_rgba(162,53,53,0.18)]'
+        : 'bg-[#fff0f1] text-[#a23535] shadow-[0_10px_24px_rgba(162,53,53,0.14)]'
+      : tone === 'workspace'
         ? isDark
-          ? 'text-[#d6deec] hover:bg-[#22314a] hover:text-[#f2f6ff]'
-          : 'text-[#5b687c] hover:bg-[#f2f4f6] hover:text-[#37465d]'
-        : isDark
-          ? 'text-[#8bb8ff] hover:bg-[#182238] hover:text-[#cfe3ff]'
-          : 'text-[#003fb1] hover:bg-[#eef3ff] hover:text-[#00308a]'
+          ? 'bg-[#31192e] text-[#ffb3de] shadow-[0_10px_24px_rgba(222,52,171,0.18)]'
+          : 'bg-[#fff0f8] text-[#a20f66] shadow-[0_10px_24px_rgba(194,24,122,0.14)]'
+        : tone === 'global'
+          ? isDark
+            ? 'bg-[#22314a] text-[#f2f6ff] shadow-[0_10px_24px_rgba(34,49,74,0.2)]'
+            : 'bg-[#edf2f7] text-[#37465d] shadow-[0_10px_24px_rgba(91,104,124,0.14)]'
+          : isDark
+            ? 'bg-[#1b3566] text-[#cfe3ff] shadow-[0_10px_24px_rgba(26,86,219,0.22)]'
+            : 'bg-[#e8f0ff] text-[#00308a] shadow-[0_10px_24px_rgba(0,63,177,0.16)]'
+    : danger
+      ? isDark
+        ? 'text-[#ff8f9a] hover:bg-[#2a1820]'
+        : 'text-[#a23535] hover:bg-[#fff1f1]'
+      : tone === 'workspace'
+        ? isDark
+          ? 'text-[#ff7ac8] hover:bg-[#2a1730] hover:text-[#ffb3de]'
+          : 'text-[#c2187a] hover:bg-[#fff0f8] hover:text-[#a20f66]'
+        : tone === 'global'
+          ? isDark
+            ? 'text-[#d6deec] hover:bg-[#22314a] hover:text-[#f2f6ff]'
+            : 'text-[#5b687c] hover:bg-[#f2f4f6] hover:text-[#37465d]'
+          : isDark
+            ? 'text-[#8bb8ff] hover:bg-[#182238] hover:text-[#cfe3ff]'
+            : 'text-[#003fb1] hover:bg-[#eef3ff] hover:text-[#00308a]'
 
   return (
     <button
@@ -615,6 +636,25 @@ function createInitialSegments(duration: number): ClipSegment[] {
   return [{ id: 1, label: 'Clip 1', start: 0, end: safeDuration }]
 }
 
+function isTimelineUnedited(
+  segments: ClipSegment[],
+  videoDuration: number | null,
+): boolean {
+  if (!videoDuration || videoDuration <= 0 || segments.length !== 1) {
+    return false
+  }
+
+  const [segment] = segments
+  if (!segment) {
+    return false
+  }
+
+  return (
+    Math.abs(segment.start) < 0.001 &&
+    Math.abs(segment.end - videoDuration) < 0.001
+  )
+}
+
 function makeMockSubtitles(duration: number): SubtitleSegment[] {
   const total = Math.max(24, Math.floor(duration || 120))
   const slices = 4
@@ -629,7 +669,7 @@ function makeMockSubtitles(duration: number): SubtitleSegment[] {
       end,
       text:
         index === 0
-          ? 'Welcome to today’s research walkthrough.'
+          ? 'Welcome to todayâ€™s research walkthrough.'
           : index === 1
             ? 'Here we compare footage, evidence, and structure.'
             : index === 2
@@ -654,6 +694,23 @@ function createSpeechSegmentsFromDetection(
     start: segment.start,
     end: segment.end,
   }))
+}
+
+function silenceSegmentsFromKeys(
+  items: Array<{ key: string; start: number; end: number }>,
+  keys: string[],
+): Array<{ start: number; end: number }> {
+  if (keys.length === 0) {
+    return []
+  }
+
+  const selected = new Set(keys)
+  return items
+    .filter((segment) => selected.has(segment.key))
+    .map((segment) => ({
+      start: segment.start,
+      end: segment.end,
+    }))
 }
 
 function createSilenceSegmentKey(start: number, end: number, index: number): string {
@@ -823,11 +880,13 @@ export default function HomePage(): JSX.Element {
     start: 0,
     end: 180,
   })
+  const [isCutModeEnabled, setIsCutModeEnabled] = useState(false)
 
   const videoPreviewRef = useRef<VideoPreviewHandle | null>(null)
   const timelineTrackRef = useRef<HTMLDivElement | null>(null)
   const subtitleUploadInputRef = useRef<HTMLInputElement | null>(null)
   const appendVideoInputRef = useRef<HTMLInputElement | null>(null)
+  const previousWorkspaceViewRef = useRef<Exclude<RightPanelView, 'cut'>>('ai')
 
   useEffect(() => {
     if (!videoDuration || videoDuration <= 0) return
@@ -1065,7 +1124,10 @@ export default function HomePage(): JSX.Element {
     setSelectedSilenceSegmentKeys([])
     setStagedSilenceSegmentKeys([])
     setSilenceNotice(null)
+    previousWorkspaceViewRef.current = 'ai'
     setRightPanelView('ai')
+    setIsCutModeEnabled(false)
+    setActiveCutHandle(null)
     setHistory([])
     setCutRange({
       start: 0,
@@ -1157,10 +1219,25 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleOpenCutPanel = () => {
+    if (rightPanelView !== 'cut') {
+      previousWorkspaceViewRef.current = rightPanelView
+    }
     setRightPanelView('cut')
+    setIsCutModeEnabled(true)
     setIsRightPanelCollapsed(false)
     setEditorError(null)
     setCutRange(normalizedCutRange)
+  }
+
+  const handleToggleCutMode = () => {
+    if (isCutModeEnabled) {
+      setIsCutModeEnabled(false)
+      setActiveCutHandle(null)
+      setRightPanelView(previousWorkspaceViewRef.current)
+      return
+    }
+
+    handleOpenCutPanel()
   }
 
   const handleGenerateSubtitles = async (): Promise<boolean> => {
@@ -1183,7 +1260,9 @@ export default function HomePage(): JSX.Element {
       setSubtitleSegments(generated)
       setSubtitleTimingDrafts({})
       setSubtitleStatus('success')
+      previousWorkspaceViewRef.current = 'subtitles'
       setRightPanelView('subtitles')
+      setIsCutModeEnabled(false)
       setIsRightPanelCollapsed(false)
       return true
     } catch (error) {
@@ -1198,11 +1277,64 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleRemoveSilence = async () => {
+    previousWorkspaceViewRef.current = 'silence'
     setRightPanelView('silence')
+    setIsCutModeEnabled(false)
+    setActiveCutHandle(null)
     setIsRightPanelCollapsed(false)
 
-    const videoFile = await ensureVideoFile()
-    if (!videoFile) {
+    const isUneditedTimeline = isTimelineUnedited(segments, videoDuration)
+    const silenceDetectionOptions = {
+      noiseThresholdDb: -35,
+      minSilenceDuration: 0.6,
+      minSegmentDuration: 0.25,
+    }
+
+    if (isUneditedTimeline) {
+      const videoFile = await ensureVideoFile()
+      if (!videoFile) {
+        setSilenceStatus('error')
+        setSilenceError(
+          'Upload a local video file before running silence detection.',
+        )
+        return
+      }
+
+      setSilenceStatus('processing')
+      setSilenceError(null)
+      setSilenceNotice(null)
+
+      try {
+        const detection = await detectSilenceFromVideo(
+          videoFile,
+          silenceDetectionOptions,
+        )
+        const nextSilenceSegments = detection.silenceSegments
+        setSilenceSegments(nextSilenceSegments)
+        setSelectedSilenceSegmentKeys(
+          nextSilenceSegments.map((segment, index) =>
+            createSilenceSegmentKey(segment.start, segment.end, index),
+          ),
+        )
+        setStagedSilenceSegmentKeys([])
+        setSilenceStatus('success')
+        setSilenceNotice(
+          nextSilenceSegments.length > 0
+            ? 'Review the detected silence ranges across the full video, then delete the highlighted ones you want removed from the edit.'
+            : 'No long silence ranges were detected across the full video.',
+        )
+      } catch (error) {
+        setSilenceStatus('error')
+        setSilenceError(
+          error instanceof Error
+            ? error.message
+            : 'Silence detection failed unexpectedly.',
+        )
+      }
+      return
+    }
+
+    if (segments.length === 0) {
       setSilenceStatus('error')
       setSilenceError(
         'Upload a local video file before running silence detection.',
@@ -1210,16 +1342,19 @@ export default function HomePage(): JSX.Element {
       return
     }
 
+    const session = await ensureEditorSession()
+    if (!session) return
+
     setSilenceStatus('processing')
     setSilenceError(null)
     setSilenceNotice(null)
 
     try {
-      const detection = await detectSilenceFromVideo(videoFile, {
-        noiseThresholdDb: -35,
-        minSilenceDuration: 0.6,
-        minSegmentDuration: 0.25,
-      })
+      const detection = await detectSilenceInEditorSession(
+        session.sessionId,
+        segments.map((segment) => segment.id),
+        silenceDetectionOptions,
+      )
       const nextSilenceSegments = detection.silenceSegments
       setSilenceSegments(nextSilenceSegments)
       setSelectedSilenceSegmentKeys(
@@ -1231,8 +1366,8 @@ export default function HomePage(): JSX.Element {
       setSilenceStatus('success')
       setSilenceNotice(
         nextSilenceSegments.length > 0
-          ? 'Review the detected silence ranges, then stage the ones you want the backend editor to remove later.'
-          : 'No long silence ranges were detected in this pass.',
+          ? 'Review the detected silence ranges across the current edit, then delete the highlighted ones you want removed from the edit.'
+          : 'No long silence ranges were detected across the current edit.',
       )
     } catch (error) {
       setSilenceStatus('error')
@@ -1245,18 +1380,27 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleOpenAIPanel = () => {
+    previousWorkspaceViewRef.current = 'ai'
     setRightPanelView('ai')
+    setIsCutModeEnabled(false)
+    setActiveCutHandle(null)
     setIsRightPanelCollapsed(false)
   }
 
   const handleOpenSubtitlesPanel = () => {
+    previousWorkspaceViewRef.current = 'subtitles'
     setRightPanelView('subtitles')
+    setIsCutModeEnabled(false)
+    setActiveCutHandle(null)
     setIsRightPanelCollapsed(false)
     setSubtitleError(null)
   }
 
   const handleOpenScenesPanel = () => {
+    previousWorkspaceViewRef.current = 'scenes'
     setRightPanelView('scenes')
+    setIsCutModeEnabled(false)
+    setActiveCutHandle(null)
     setIsRightPanelCollapsed(false)
     setSceneStatus('pending')
   }
@@ -1277,21 +1421,56 @@ export default function HomePage(): JSX.Element {
     setSilenceError(null)
   }
 
-  const handleApplySelectedSilences = () => {
+  const handleDeleteSelectedSilences = async () => {
     if (selectedSilenceSegmentKeys.length === 0) {
       setSilenceError(
-        'Select at least one silence range to stage it for backend removal.',
+        'Select at least one silence range to delete it from the edit.',
       )
       return
     }
 
-    setSilenceError(null)
-    setStagedSilenceSegmentKeys([...selectedSilenceSegmentKeys])
-    setSilenceNotice(
-      `${selectedSilenceSegmentKeys.length} silence range${
-        selectedSilenceSegmentKeys.length === 1 ? '' : 's'
-      } staged for future backend removal. This does not edit playback or media yet.`,
+    const session = await ensureEditorSession()
+    if (!session) return
+
+    const selectedSilences = silenceSegmentsFromKeys(
+      silenceReviewItems,
+      selectedSilenceSegmentKeys,
     )
+
+    try {
+      setEditorStatus('syncing')
+      const previousState = captureEditorState()
+      const nextSession = await deleteSilenceRangesFromEditorSession(
+        session.sessionId,
+        selectedSilences,
+      )
+
+      setHistory((prev) => [...prev.slice(-29), previousState])
+      setSegments(nextSession.segments)
+      setSelectedId(nextSession.selectedSegmentId ?? nextSession.segments[0]?.id ?? 1)
+      setEditorStatus('ready')
+      setEditorError(null)
+      setSilenceError(null)
+      setSilenceSegments([])
+      setSelectedSilenceSegmentKeys([])
+      setStagedSilenceSegmentKeys([])
+      setSilenceStatus('idle')
+      setSilenceNotice(
+        `${selectedSilences.length} silence range${
+          selectedSilences.length === 1 ? '' : 's'
+        } deleted from the current edit.`,
+      )
+      const nextSeekTime = nextSession.segments[0]?.start ?? 0
+      videoPreviewRef.current?.seekTo(nextSeekTime)
+      setCurrentTime(nextSeekTime)
+    } catch (error) {
+      setEditorStatus('error')
+      setSilenceError(
+        error instanceof Error
+          ? error.message
+          : 'Could not delete the selected silence ranges.',
+      )
+    }
   }
 
   const updateCutHandle = (handle: CutHandle, editedTime: number) => {
@@ -1344,38 +1523,48 @@ export default function HomePage(): JSX.Element {
     updateCutHandle(nextHandle, editedTime)
   }
 
-  const handleCutVideo = () => {
+  const handleCutVideo = async () => {
     if (segments.length === 0) {
       setEditorError('Upload a video before cutting the timeline.')
       return
     }
 
-    const nextSegments = cutSegmentsToEditedRange(
-      segments,
-      normalizedCutRange.start,
-      normalizedCutRange.end,
-    )
+    const session = await ensureEditorSession()
+    if (!session) return
 
-    if (nextSegments.length === 0) {
-      setEditorError(
-        'Move the cut handles so the kept range includes part of the timeline.',
+    try {
+      setEditorStatus('syncing')
+      const previousState = captureEditorState()
+      const nextSession = await cutEditorSessionToRange(
+        session.sessionId,
+        normalizedCutRange.start,
+        normalizedCutRange.end,
       )
-      return
-    }
 
-    pushHistory()
-    setEditorError(null)
-    setSegments(nextSegments)
-    setSelectedId(nextSegments[0].id)
-    setCutRange({
-      start: 0,
-      end: nextSegments.reduce(
-        (sum, segment) => sum + (segment.end - segment.start),
-        0,
-      ),
-    })
-    videoPreviewRef.current?.seekTo(nextSegments[0].start)
-    setCurrentTime(nextSegments[0].start)
+      setHistory((prev) => [...prev.slice(-29), previousState])
+      setEditorError(null)
+      setSegments(nextSession.segments)
+      setSelectedId(nextSession.selectedSegmentId ?? nextSession.segments[0]?.id ?? 1)
+      setCutRange({
+        start: 0,
+        end: nextSession.segments.reduce(
+          (sum, segment) => sum + (segment.end - segment.start),
+          0,
+        ),
+      })
+
+      const nextSeekTime = nextSession.segments[0]?.start ?? 0
+      videoPreviewRef.current?.seekTo(nextSeekTime)
+      setCurrentTime(nextSeekTime)
+      setEditorStatus('ready')
+    } catch (error) {
+      setEditorStatus('error')
+      setEditorError(
+        error instanceof Error
+          ? error.message
+          : 'Could not cut the selected timeline range.',
+      )
+    }
   }
 
   const ensureEditorSession = async (): Promise<EditorSessionState | null> => {
@@ -1754,7 +1943,9 @@ export default function HomePage(): JSX.Element {
       setSilenceNotice(
         `${file.name} was added to the end of the current timeline. Regenerate subtitles or silence detection if you want those tools to include the new clip.`,
       )
+      previousWorkspaceViewRef.current = 'ai'
       setRightPanelView('ai')
+      setIsCutModeEnabled(false)
       videoPreviewRef.current?.pause()
       videoPreviewRef.current?.seekTo(0)
     } catch (error) {
@@ -1786,7 +1977,9 @@ export default function HomePage(): JSX.Element {
       setSubtitleStatus('success')
       setSubtitleTimingDrafts({})
       setSubtitleEntryStatus('success')
+      previousWorkspaceViewRef.current = 'subtitles'
       setRightPanelView('subtitles')
+      setIsCutModeEnabled(false)
       setIsRightPanelCollapsed(false)
       window.setTimeout(() => {
         setSubtitleEntryStatus('idle')
@@ -2395,8 +2588,9 @@ export default function HomePage(): JSX.Element {
                         tooltip="Open cut mode to keep only the region between two timeline playheads."
                         guidedMode={guidedMode}
                         isDark={isDark}
-                        onClick={handleOpenCutPanel}
+                        onClick={handleToggleCutMode}
                         icon={Scissors}
+                        active={isCutModeEnabled}
                         tone="editor"
                       />
                       <ToolbarButton
@@ -2572,7 +2766,7 @@ export default function HomePage(): JSX.Element {
                             ref={timelineTrackRef}
                             className="relative"
                             onPointerDown={(event) => {
-                              if (rightPanelView === 'cut') return
+                              if (isCutModeEnabled) return
                               seekTimelineFromClientX(event.clientX)
                               setIsTimelineDragging(true)
                             }}
@@ -2597,7 +2791,7 @@ export default function HomePage(): JSX.Element {
                                     key={segment.id}
                                     type="button"
                                     onPointerDown={(event) => {
-                                      if (rightPanelView === 'cut') {
+                                      if (isCutModeEnabled) {
                                         event.preventDefault()
                                         event.stopPropagation()
                                         return
@@ -2676,7 +2870,7 @@ export default function HomePage(): JSX.Element {
                                   </button>
                                 )
                               })}
-                              {rightPanelView !== 'cut' &&
+                              {!isCutModeEnabled &&
                               editedDuration > 0 &&
                               activeTimelineSegment ? (
                                 <div className="pointer-events-none absolute inset-0 z-20">
@@ -2696,7 +2890,7 @@ export default function HomePage(): JSX.Element {
                                   </span>
                                 </div>
                               ) : null}
-                              {rightPanelView === 'cut' && editedDuration > 0 ? (
+                              {isCutModeEnabled && editedDuration > 0 ? (
                                 <div
                                   className="absolute inset-0 z-30"
                                   onPointerDown={(event) => {
@@ -2936,7 +3130,9 @@ export default function HomePage(): JSX.Element {
                     >
                       <button
                         type="button"
-                        onClick={handleCutVideo}
+                        onClick={() => {
+                          void handleCutVideo()
+                        }}
                         disabled={segments.length === 0 || editedDuration <= CUT_RANGE_MIN_GAP}
                         className="flex h-9 w-full items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
                       >
@@ -3058,11 +3254,13 @@ export default function HomePage(): JSX.Element {
                       </button>
                       <button
                         type="button"
-                        onClick={handleApplySelectedSilences}
+                        onClick={() => {
+                          void handleDeleteSelectedSilences()
+                        }}
                         disabled={selectedSilenceSegmentKeys.length === 0}
                         className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
                       >
-                        Apply
+                        Delete
                       </button>
                     </div>
                   </div>
@@ -3098,8 +3296,9 @@ export default function HomePage(): JSX.Element {
                             : 'border-[#c3c5d7] bg-[#fbfcfd] text-[#737686]'
                         }`}
                       >
-                        No silence ranges to review yet. Upload a local video and
-                        run Remove silence to populate this panel.
+                        No silence ranges to review yet. Run Silencer to inspect
+                        the full video when untouched, or all clips in the
+                        current edit after you make timeline changes.
                       </div>
                     ) : (
                       <div className="space-y-3 overflow-y-auto pr-1">
@@ -3115,17 +3314,15 @@ export default function HomePage(): JSX.Element {
                               {selectedSilenceCount} of {silenceReviewItems.length} selected
                             </span>
                             <span>
-                              {stagedSilenceCount > 0
-                                ? `${stagedSilenceCount} staged for future removal`
-                                : 'Analysis only, not applied yet'}
+                              {selectedSilenceCount > 0
+                                ? `${selectedSilenceCount} ready to delete`
+                                : 'Select one or more silence ranges to delete'}
                             </span>
                           </div>
                         </div>
 
                         {silenceReviewItems.map((segment) => {
                           const isSelected = selectedSilenceSegmentKeys.includes(segment.key)
-                          const isStaged = stagedSilenceSegmentKeys.includes(segment.key)
-
                           return (
                           <div
                             key={segment.key}
@@ -3161,17 +3358,6 @@ export default function HomePage(): JSX.Element {
                                   >
                                     Silence {segment.index + 1}
                                   </span>
-                                  {isStaged ? (
-                                    <span
-                                      className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.14em] ${
-                                        isDark
-                                          ? 'bg-[#1b3566] text-[#9ec5ff]'
-                                          : 'bg-[#eef3ff] text-[#003fb1]'
-                                      }`}
-                                    >
-                                      Staged
-                                    </span>
-                                  ) : null}
                                 </div>
                                 <p
                                   className={`mt-2 text-[12px] leading-5 ${
@@ -3181,8 +3367,8 @@ export default function HomePage(): JSX.Element {
                                   Duration: {(segment.end - segment.start).toFixed(1)}s
                                   {' · '}
                                   {isSelected
-                                    ? 'Selected for future removal'
-                                    : 'Excluded from the staged set'}
+                                    ? 'Selected for deletion'
+                                    : 'Not selected for deletion'}
                                 </p>
                               </div>
 
@@ -3633,3 +3819,4 @@ export default function HomePage(): JSX.Element {
     </div>
   )
 }
+
