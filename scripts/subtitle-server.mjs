@@ -220,25 +220,6 @@ function cutEditorSegmentsToRange(segments, cutStart, cutEnd) {
   return relabelEditorSegments(nextSegments)
 }
 
-function getEditorSegmentSelection(session, segmentIds) {
-  const requestedIds = Array.isArray(segmentIds)
-    ? segmentIds
-        .map((value) => Number(value))
-        .filter((value) => Number.isFinite(value) && value > 0)
-    : []
-  const uniqueIds = [...new Set(requestedIds)]
-  const selectedSegments =
-    uniqueIds.length > 0
-      ? session.segments.filter((segment) => uniqueIds.includes(segment.id))
-      : session.segments.filter((segment) => segment.id === session.selectedSegmentId)
-
-  if (selectedSegments.length === 0) {
-    throw new Error('Select at least one timeline clip before running silence detection.')
-  }
-
-  return selectedSegments
-}
-
 function remapDetectedSegmentsToSourceTimeline(selectedSegments, detectedSegments) {
   if (!Array.isArray(detectedSegments) || detectedSegments.length === 0) {
     return []
@@ -367,8 +348,10 @@ function serializeEditorSession(session) {
   }
 }
 
-function buildEditorExportName(session) {
-  return `${sanitizeBaseName(session.fileName || 'vidversity-export')}-edited.mp4`
+function buildEditorExportName(session, fileNameSuffix = 'edited') {
+  return `${sanitizeBaseName(session.fileName || 'vidversity-export')}-${sanitizeBaseName(
+    fileNameSuffix,
+  )}.mp4`
 }
 
 function buildEditorSourceName(session) {
@@ -775,13 +758,19 @@ async function renderEditorSegmentsToFile(filePath, segments, outputPath) {
   }
 }
 
-async function renderEditorSession(session, subtitles = []) {
-  const baseOutputPath = join(EDITOR_SESSION_DIR, `${session.id}-export-base.mp4`)
-  const outputPath = join(EDITOR_SESSION_DIR, `${session.id}-export.mp4`)
-  await renderEditorSegmentsToFile(session.filePath, session.segments, baseOutputPath)
+async function renderEditorSession(
+  session,
+  { segments = session.segments, subtitles = [], outputKey = 'export' } = {},
+) {
+  const baseOutputPath = join(
+    EDITOR_SESSION_DIR,
+    `${session.id}-${outputKey}-base.mp4`,
+  )
+  const outputPath = join(EDITOR_SESSION_DIR, `${session.id}-${outputKey}.mp4`)
+  await renderEditorSegmentsToFile(session.filePath, segments, baseOutputPath)
 
   const remappedSubtitles = remapSubtitlesForEditorTimeline(
-    session.segments,
+    segments,
     subtitles,
   )
 
@@ -792,7 +781,7 @@ async function renderEditorSession(session, subtitles = []) {
     return outputPath
   }
 
-  const subtitlePath = join(EDITOR_SESSION_DIR, `${session.id}-export.srt`)
+  const subtitlePath = join(EDITOR_SESSION_DIR, `${session.id}-${outputKey}.srt`)
 
   try {
     await ensureSubtitleBurnSupport()
@@ -1138,19 +1127,28 @@ const server = createServer(async (request, response) => {
       const payload = parseJsonBody(body)
       const sessionId =
         typeof payload?.sessionId === 'string' ? payload.sessionId : ''
-      const segmentIds = Array.isArray(payload?.segmentIds) ? payload.segmentIds : []
       const noiseThresholdDb = Number(payload?.noiseThresholdDb ?? -35)
       const minSilenceDuration = Number(payload?.minSilenceDuration ?? 0.5)
       const minSegmentDuration = Number(payload?.minSegmentDuration ?? 0.1)
       const session = getEditorSession(sessionId)
-      const selectedSegments = getEditorSegmentSelection(session, segmentIds)
+      const timelineSegments = session.segments.filter(
+        (segment) => segment.end - segment.start >= CUT_RANGE_MIN_GAP,
+      )
+
+      if (timelineSegments.length === 0) {
+        throw new Error('The current timeline does not contain any clips to analyze.')
+      }
       const analysisFilePath = join(
         EDITOR_SESSION_DIR,
         `${session.id}-silence-analysis-${Date.now()}.mp4`,
       )
 
       try {
-        await renderEditorSegmentsToFile(session.filePath, selectedSegments, analysisFilePath)
+        await renderEditorSegmentsToFile(
+          session.filePath,
+          timelineSegments,
+          analysisFilePath,
+        )
         const result = await runAudioActivityDetection(analysisFilePath, {
           noiseThresholdDb,
           minSilenceDuration,
@@ -1158,16 +1156,16 @@ const server = createServer(async (request, response) => {
         })
 
         sendJson(response, 200, {
-          audioDuration: selectedSegments.reduce(
+          audioDuration: timelineSegments.reduce(
             (sum, segment) => sum + Math.max(0, segment.end - segment.start),
             0,
           ),
           silenceSegments: remapDetectedSegmentsToSourceTimeline(
-            selectedSegments,
+            timelineSegments,
             result?.silence_segments,
           ),
           speechSegments: remapDetectedSegmentsToSourceTimeline(
-            selectedSegments,
+            timelineSegments,
             result?.speech_segments,
           ),
         })
@@ -1201,8 +1199,21 @@ const server = createServer(async (request, response) => {
       const sessionId =
         typeof payload?.sessionId === 'string' ? payload.sessionId : ''
       const session = getEditorSession(sessionId)
+      const exportSegments = Array.isArray(payload?.segments)
+        ? sanitizeEditorSegments(payload.segments)
+        : session.segments
       const subtitles = sanitizeSubtitleSegments(payload?.subtitles)
-      const outputPath = await renderEditorSession(session, subtitles)
+      const fileNameSuffix =
+        typeof payload?.fileNameSuffix === 'string' && payload.fileNameSuffix.trim().length > 0
+          ? payload.fileNameSuffix.trim()
+          : exportSegments.length === 1
+            ? exportSegments[0].label || 'clip'
+            : 'edited'
+      const outputPath = await renderEditorSession(session, {
+        segments: exportSegments,
+        subtitles,
+        outputKey: `export-${Date.now()}`,
+      })
 
       try {
         const data = await readFile(outputPath)
@@ -1211,7 +1222,7 @@ const server = createServer(async (request, response) => {
           200,
           data,
           'video/mp4',
-          buildEditorExportName(session),
+          buildEditorExportName(session, fileNameSuffix),
         )
       } finally {
         await rm(outputPath, { force: true }).catch(() => undefined)

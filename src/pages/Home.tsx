@@ -116,6 +116,7 @@ type SubtitleStatus = 'idle' | 'processing' | 'success' | 'error'
 type SilenceStatus = 'idle' | 'processing' | 'success' | 'error'
 type EditorStatus = 'idle' | 'syncing' | 'ready' | 'error'
 type ExportStatus = 'idle' | 'processing' | 'error'
+type ExportKind = 'clip' | 'video'
 type AppendStatus = 'idle' | 'processing'
 type SubtitleTimingField = 'start' | 'end'
 type SubtitleEntryStatus = 'idle' | 'uploading' | 'generating' | 'success'
@@ -867,6 +868,7 @@ export default function HomePage(): JSX.Element {
   const [editorStatus, setEditorStatus] = useState<EditorStatus>('idle')
   const [editorError, setEditorError] = useState<string | null>(null)
   const [exportStatus, setExportStatus] = useState<ExportStatus>('idle')
+  const [activeExportKind, setActiveExportKind] = useState<ExportKind | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
   const [appendStatus, setAppendStatus] = useState<AppendStatus>('idle')
   const [timelineThumbnails, setTimelineThumbnails] = useState<TimelineThumbnail[]>([])
@@ -896,6 +898,7 @@ export default function HomePage(): JSX.Element {
     setHistory([])
     setEditorError(null)
     setExportStatus('idle')
+    setActiveExportKind(null)
     setExportError(null)
     setSilenceStatus('idle')
     setSilenceError(null)
@@ -915,6 +918,7 @@ export default function HomePage(): JSX.Element {
     setEditorStatus('idle')
     setEditorError(null)
     setExportStatus('idle')
+    setActiveExportKind(null)
     setExportError(null)
     setSilenceSegments([])
     setSelectedSilenceSegmentKeys([])
@@ -1311,16 +1315,12 @@ export default function HomePage(): JSX.Element {
         )
         const nextSilenceSegments = detection.silenceSegments
         setSilenceSegments(nextSilenceSegments)
-        setSelectedSilenceSegmentKeys(
-          nextSilenceSegments.map((segment, index) =>
-            createSilenceSegmentKey(segment.start, segment.end, index),
-          ),
-        )
+        setSelectedSilenceSegmentKeys([])
         setStagedSilenceSegmentKeys([])
         setSilenceStatus('success')
         setSilenceNotice(
           nextSilenceSegments.length > 0
-            ? 'Review the detected silence ranges across the full video, then delete the highlighted ones you want removed from the edit.'
+            ? 'Review the detected silence ranges across the full video, then select the ones you want removed from the edit.'
             : 'No long silence ranges were detected across the full video.',
         )
       } catch (error) {
@@ -1350,23 +1350,23 @@ export default function HomePage(): JSX.Element {
     setSilenceNotice(null)
 
     try {
-      const detection = await detectSilenceInEditorSession(
+      const syncedSession = await replaceEditorSessionSegments(
         session.sessionId,
-        segments.map((segment) => segment.id),
+        segments,
+        selectedId,
+      )
+      const detection = await detectSilenceInEditorSession(
+        syncedSession.sessionId,
         silenceDetectionOptions,
       )
       const nextSilenceSegments = detection.silenceSegments
       setSilenceSegments(nextSilenceSegments)
-      setSelectedSilenceSegmentKeys(
-        nextSilenceSegments.map((segment, index) =>
-          createSilenceSegmentKey(segment.start, segment.end, index),
-        ),
-      )
+      setSelectedSilenceSegmentKeys([])
       setStagedSilenceSegmentKeys([])
       setSilenceStatus('success')
       setSilenceNotice(
         nextSilenceSegments.length > 0
-          ? 'Review the detected silence ranges across the current edit, then delete the highlighted ones you want removed from the edit.'
+          ? 'Review the detected silence ranges across the current edit, then select the ones you want removed from the edit.'
           : 'No long silence ranges were detected across the current edit.',
       )
     } catch (error) {
@@ -1432,10 +1432,14 @@ export default function HomePage(): JSX.Element {
     const session = await ensureEditorSession()
     if (!session) return
 
+    const selectedSilenceKeySet = new Set(selectedSilenceSegmentKeys)
     const selectedSilences = silenceSegmentsFromKeys(
       silenceReviewItems,
       selectedSilenceSegmentKeys,
     )
+    const remainingSilences = silenceReviewItems
+      .filter((segment) => !selectedSilenceKeySet.has(segment.key))
+      .map(({ key: _key, index: _index, ...segment }) => segment)
 
     try {
       setEditorStatus('syncing')
@@ -1451,14 +1455,20 @@ export default function HomePage(): JSX.Element {
       setEditorStatus('ready')
       setEditorError(null)
       setSilenceError(null)
-      setSilenceSegments([])
+      setSilenceSegments(remainingSilences)
       setSelectedSilenceSegmentKeys([])
       setStagedSilenceSegmentKeys([])
-      setSilenceStatus('idle')
+      setSilenceStatus(remainingSilences.length > 0 ? 'success' : 'idle')
       setSilenceNotice(
-        `${selectedSilences.length} silence range${
-          selectedSilences.length === 1 ? '' : 's'
-        } deleted from the current edit.`,
+        remainingSilences.length > 0
+          ? `${selectedSilences.length} silence range${
+              selectedSilences.length === 1 ? '' : 's'
+            } deleted. ${remainingSilences.length} silence range${
+              remainingSilences.length === 1 ? '' : 's'
+            } still available to review.`
+          : `${selectedSilences.length} silence range${
+              selectedSilences.length === 1 ? '' : 's'
+            } deleted from the current edit.`,
       )
       const nextSeekTime = nextSession.segments[0]?.start ?? 0
       videoPreviewRef.current?.seekTo(nextSeekTime)
@@ -1825,6 +1835,17 @@ export default function HomePage(): JSX.Element {
     downloadSubtitleFile(subtitleSegments, baseName, format)
   }
 
+  const downloadRenderedVideo = (rendered: { blob: Blob; fileName: string }) => {
+    const url = URL.createObjectURL(rendered.blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = rendered.fileName
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+  }
+
   const handleRemoveSubtitles = () => {
     pushHistory()
     setSubtitleSegments([])
@@ -1847,30 +1868,65 @@ export default function HomePage(): JSX.Element {
     }
   }
 
+  const handleExportSelectedClip = async () => {
+    if (!selectedSegment) {
+      setExportError('Select a clip in the timeline before exporting it.')
+      return
+    }
+
+    const session = await ensureEditorSession()
+    if (!session) return
+
+    try {
+      setExportStatus('processing')
+      setActiveExportKind('clip')
+      setExportError(null)
+
+      const syncedSession = await replaceEditorSessionSegments(
+        session.sessionId,
+        segments,
+        selectedId,
+      )
+      const rendered = await exportEditorSessionVideo(syncedSession.sessionId, {
+        segments: [selectedSegment],
+        fileNameSuffix: selectedSegment.label || 'clip',
+      })
+      downloadRenderedVideo(rendered)
+      setExportStatus('idle')
+      setActiveExportKind(null)
+    } catch (error) {
+      setExportStatus('error')
+      setActiveExportKind(null)
+      setExportError(
+        error instanceof Error
+          ? error.message
+          : 'Could not export the selected clip.',
+      )
+    }
+  }
+
   const handleExportVideo = async () => {
     const session = await ensureEditorSession()
     if (!session) return
 
     try {
       setExportStatus('processing')
+      setActiveExportKind('video')
       setExportError(null)
 
-      await replaceEditorSessionSegments(session.sessionId, segments, selectedId)
+      const syncedSession = await replaceEditorSessionSegments(
+        session.sessionId,
+        segments,
+        selectedId,
+      )
 
-      const rendered = await exportEditorSessionVideo(session.sessionId)
-      const url = URL.createObjectURL(rendered.blob)
-      const link = document.createElement('a')
-      link.href = url
-      link.download = rendered.fileName
-      document.body.appendChild(link)
-      link.click()
-      document.body.removeChild(link)
-      URL.revokeObjectURL(url)
+      const rendered = await exportEditorSessionVideo(syncedSession.sessionId)
+      downloadRenderedVideo(rendered)
 
       if (subtitleSegments.length > 0) {
         const remappedSubtitles = remapSubtitlesToEditedTimeline(
           subtitleSegments,
-          segments,
+          syncedSession.segments,
         )
         if (remappedSubtitles.length > 0) {
           const baseName = rendered.fileName.replace(/\.mp4$/i, '')
@@ -1879,8 +1935,10 @@ export default function HomePage(): JSX.Element {
       }
 
       setExportStatus('idle')
+      setActiveExportKind(null)
     } catch (error) {
       setExportStatus('error')
+      setActiveExportKind(null)
       setExportError(
         error instanceof Error
           ? error.message
@@ -2144,6 +2202,12 @@ export default function HomePage(): JSX.Element {
       ),
     [editedDuration],
   )
+  const exportDialogTitle =
+    activeExportKind === 'clip' ? 'Rendering Clip' : 'Rendering Video'
+  const exportDialogDescription =
+    activeExportKind === 'clip'
+      ? 'VidVersity is processing the selected timeline clip. Your download will start automatically when the render finishes.'
+      : 'VidVersity is merging your current timeline into a continuous video. Your download will start automatically when the render finishes.'
 
   return (
     <div
@@ -2168,15 +2232,14 @@ export default function HomePage(): JSX.Element {
                 isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
               }`}
             >
-              Rendering Video
+              {exportDialogTitle}
             </h2>
             <p
               className={`mt-3 text-sm leading-6 ${
                 isDark ? 'text-[#c6d3eb]' : 'text-[#515f74]'
               }`}
             >
-              VidVersity is processing your current clip timeline. Your download
-              will start automatically when the render finishes.
+              {exportDialogDescription}
             </p>
           </div>
         </div>
@@ -2426,6 +2489,28 @@ export default function HomePage(): JSX.Element {
             <button
               type="button"
               onClick={() => {
+                void handleExportSelectedClip()
+              }}
+              disabled={
+                exportStatus === 'processing' ||
+                editorStatus === 'syncing' ||
+                !selectedSegment ||
+                (!selectedVideoFile && !editorSessionId)
+              }
+              className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                isDark
+                  ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
+                  : 'border border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb] hover:text-[#003fb1]'
+              }`}
+            >
+              <Video className="h-4 w-4" />
+              {exportStatus === 'processing' && activeExportKind === 'clip'
+                ? 'Rendering Clip...'
+                : 'Export Clip'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
                 void handleExportVideo()
               }}
               disabled={
@@ -2435,7 +2520,9 @@ export default function HomePage(): JSX.Element {
               }
               className="w-full rounded-xl bg-gradient-to-r from-[#003fb1] to-[#1a56db] px-4 py-3 text-sm font-semibold text-white shadow-[0_12px_30px_rgba(0,63,177,0.22)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {exportStatus === 'processing' ? 'Rendering...' : 'Export Video'}
+              {exportStatus === 'processing' && activeExportKind === 'video'
+                ? 'Rendering Video...'
+                : 'Export Video'}
             </button>
           </div>
         </aside>

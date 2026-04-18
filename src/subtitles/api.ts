@@ -271,7 +271,6 @@ export async function detectSilenceFromVideo(
 
 export async function detectSilenceInEditorSession(
   sessionId: string,
-  segmentIds: number[],
   options?: {
     noiseThresholdDb?: number
     minSilenceDuration?: number
@@ -286,7 +285,6 @@ export async function detectSilenceInEditorSession(
     },
     body: JSON.stringify({
       sessionId,
-      segmentIds,
       noiseThresholdDb: options?.noiseThresholdDb,
       minSilenceDuration: options?.minSilenceDuration,
       minSegmentDuration: options?.minSegmentDuration,
@@ -300,7 +298,7 @@ export async function detectSilenceInEditorSession(
   if (!response.ok) {
     throw new Error(
       payload?.error ||
-        'Silence detection failed for the selected timeline clips.',
+        'Silence detection failed for the current timeline.',
     )
   }
 
@@ -469,6 +467,10 @@ export async function deleteSilenceRangesFromEditorSession(
 
 export async function exportEditorSessionVideo(
   sessionId: string,
+  options?: {
+    segments?: EditorClipSegment[]
+    fileNameSuffix?: string
+  },
 ): Promise<RenderedEditorVideo> {
   const apiBaseUrl = resolveSubtitleApiUrl()
   const response = await fetch(`${apiBaseUrl}/api/editor/export`, {
@@ -476,7 +478,11 @@ export async function exportEditorSessionVideo(
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ sessionId }),
+    body: JSON.stringify({
+      sessionId,
+      segments: options?.segments,
+      fileNameSuffix: options?.fileNameSuffix,
+    }),
   })
 
   if (!response.ok) {

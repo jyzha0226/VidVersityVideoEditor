@@ -118,7 +118,9 @@ class FFmpegAudioActivityDetector:
         except ValueError as exc:
             raise RuntimeError("Unable to parse audio duration from ffprobe output.") from exc
 
-    def detect_silence_segments(self, standard_audio_path: str) -> List[AudioSegment]:
+    def detect_silence_segments(
+        self, standard_audio_path: str, audio_duration: float
+    ) -> List[AudioSegment]:
         command = [
             self.ffmpeg_bin,
             "-i",
@@ -150,7 +152,7 @@ class FFmpegAudioActivityDetector:
                 f"ffmpeg is not installed or not available at {self.ffmpeg_bin}."
             ) from exc
 
-        silence_segments = self._parse_silencedetect_output(ffmpeg_output)
+        silence_segments = self._parse_silencedetect_output(ffmpeg_output, audio_duration)
         return self._filter_short_segments(silence_segments)
 
     def detect_speech_segments(
@@ -184,7 +186,7 @@ class FFmpegAudioActivityDetector:
     def process(self, audio_path: str) -> DetectionResult:
         standard_audio_path = self.load_audio(audio_path)
         audio_duration = self.get_audio_duration(standard_audio_path)
-        silence_segments = self.detect_silence_segments(standard_audio_path)
+        silence_segments = self.detect_silence_segments(standard_audio_path, audio_duration)
         speech_segments = self.detect_speech_segments(silence_segments, audio_duration)
         return DetectionResult(
             speech_segments=speech_segments,
@@ -192,7 +194,9 @@ class FFmpegAudioActivityDetector:
             audio_duration=audio_duration,
         )
 
-    def _parse_silencedetect_output(self, ffmpeg_output: str) -> List[AudioSegment]:
+    def _parse_silencedetect_output(
+        self, ffmpeg_output: str, audio_duration: float
+    ) -> List[AudioSegment]:
         silence_starts: List[float] = []
         silence_ends: List[float] = []
 
@@ -210,6 +214,11 @@ class FFmpegAudioActivityDetector:
             end_match = end_pattern.search(line)
             if end_match:
                 silence_ends.append(float(end_match.group(1)))
+
+        if len(silence_starts) > len(silence_ends):
+            trailing_start = silence_starts[len(silence_ends)]
+            if audio_duration > trailing_start:
+                silence_ends.append(audio_duration)
 
         silence_segments: List[AudioSegment] = []
         for index in range(min(len(silence_starts), len(silence_ends))):
