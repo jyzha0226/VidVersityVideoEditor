@@ -226,6 +226,12 @@ The editor now uses a backend session model for split editing and export. The UI
 
 `Add Video` appends a newly uploaded video to the end of the current timeline and rebuilds the working editor source. Because this changes the underlying media timeline, subtitle and silence analysis should be regenerated afterward if you want them to include the new content.
 
+### Python: `FFmpegAudioActivityDetector.py`
+
+Standalone reference implementation for FFmpeg + **Silero VAD** speech segments and silence as the complement within the audio duration. Data types: `AudioSegment`, `DetectionResult`; entry point: `FFmpegAudioActivityDetector.process(audio_path)`. Requires FFmpeg/ffprobe on `PATH` and Python deps from `requirements.txt`.
+
+中文：该文件提供基于 Silero VAD 的语音段检测，静音段由语音段在全长上的补集得到；接口与局限见源码内中英文注释。
+
 ## Next Likely Backend Work
 
 - real trim operations on the backend session model
