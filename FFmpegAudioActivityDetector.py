@@ -536,6 +536,121 @@ class FFmpegAudioActivityDetector:
 
 
 # =========================================================
+# Post-processing: merge & clean segments
+# 后处理：合并相邻片段、剔除过短片段
+# =========================================================
+
+def _merge_confidence(
+    a: Optional[float],
+    b: Optional[float],
+) -> Optional[float]:
+    if a is None and b is None:
+        return None
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)
+
+
+def merge_close_speech_segments(
+    segments: List[AudioSegment],
+    max_gap_sec: float,
+) -> List[AudioSegment]:
+    """
+    Merge adjacent speech segments when the gap between them is at most max_gap_sec
+    (also merges overlaps: gap < 0).
+
+    将间隔不超过 max_gap_sec 的相邻 speech 合并（重叠区间也会合并）
+    """
+    speech = [s for s in segments if s.label == "speech"]
+    if len(speech) <= 1:
+        return sorted(speech, key=lambda s: s.start_time)
+
+    ordered = sorted(speech, key=lambda s: s.start_time)
+    merged: List[AudioSegment] = [ordered[0]]
+    for seg in ordered[1:]:
+        last = merged[-1]
+        gap = seg.start_time - last.end_time
+        if gap <= max_gap_sec:
+            merged[-1] = AudioSegment(
+                start_time=last.start_time,
+                end_time=max(last.end_time, seg.end_time),
+                label="speech",
+                confidence=_merge_confidence(last.confidence, seg.confidence),
+            )
+        else:
+            merged.append(seg)
+    return merged
+
+
+def merge_close_silence_segments(
+    segments: List[AudioSegment],
+    max_gap_sec: float,
+) -> List[AudioSegment]:
+    """
+    Merge adjacent silence segments when the gap between them is at most max_gap_sec.
+
+    将间隔不超过 max_gap_sec 的相邻 silence 合并
+    """
+    silence = [s for s in segments if s.label == "silence"]
+    if len(silence) <= 1:
+        return sorted(silence, key=lambda s: s.start_time)
+
+    ordered = sorted(silence, key=lambda s: s.start_time)
+    merged: List[AudioSegment] = [ordered[0]]
+    for seg in ordered[1:]:
+        last = merged[-1]
+        gap = seg.start_time - last.end_time
+        if gap <= max_gap_sec:
+            merged[-1] = AudioSegment(
+                start_time=last.start_time,
+                end_time=max(last.end_time, seg.end_time),
+                label="silence",
+                confidence=_merge_confidence(last.confidence, seg.confidence),
+            )
+        else:
+            merged.append(seg)
+    return merged
+
+
+def remove_short_speech_segments(
+    segments: List[AudioSegment],
+    min_duration_sec: float,
+) -> List[AudioSegment]:
+    """
+    Drop speech segments shorter than min_duration_sec.
+
+    移除时长小于 min_duration_sec 的 speech 片段
+    """
+    out: List[AudioSegment] = []
+    for seg in segments:
+        if seg.label != "speech":
+            continue
+        if (seg.end_time - seg.start_time) >= min_duration_sec:
+            out.append(seg)
+    return out
+
+
+def remove_short_silence_segments(
+    segments: List[AudioSegment],
+    min_duration_sec: float,
+) -> List[AudioSegment]:
+    """
+    Drop silence segments shorter than min_duration_sec.
+
+    移除时长小于 min_duration_sec 的 silence 片段
+    """
+    out: List[AudioSegment] = []
+    for seg in segments:
+        if seg.label != "silence":
+            continue
+        if (seg.end_time - seg.start_time) >= min_duration_sec:
+            out.append(seg)
+    return out
+
+
+# =========================================================
 # Example usage / 示例用法
 # =========================================================
 
