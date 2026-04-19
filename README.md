@@ -228,9 +228,20 @@ The editor now uses a backend session model for split editing and export. The UI
 
 ### Python: `FFmpegAudioActivityDetector.py`
 
-Standalone reference implementation for FFmpeg + **Silero VAD** speech segments and silence as the complement within the audio duration. Data types: `AudioSegment`, `DetectionResult`; entry point: `FFmpegAudioActivityDetector.process(audio_path)`. Requires FFmpeg/ffprobe on `PATH` and Python deps from `requirements.txt`.
+**FFmpeg** 将输入统一为单声道 WAV（默认 16 kHz）；**Silero VAD**（`torch.hub.load("snakers4/silero-vad", ...)`）在标准化音频上检测 **`speech`** 段；**`silence`** 为 `[0, 总时长]` 上相对语音段的间隙（补集），不再使用 FFmpeg `silencedetect`。对外推荐 **`process(audio_path)`**。
 
-中文：该文件提供基于 Silero VAD 的语音段检测，静音段由语音段在全长上的补集得到；接口与局限见源码内中英文注释。
+English: **FFmpeg** normalizes audio; **Silero VAD** finds speech segments; **`silence`** is the complement over the full duration. Types: `AudioSegment`, `DetectionResult`; entry: `FFmpegAudioActivityDetector.process(audio_path)`.
+
+- **Dependencies**: FFmpeg/ffprobe on `PATH`; Python 3.8+; `pip install -r requirements.txt` (**torch**, **torchaudio** for hub loading).
+- **First run / network**: `torch.hub.load` may download `snakers4/silero-vad` into the PyTorch Hub cache (e.g. `%USERPROFILE%\.cache\torch\hub\` on Windows). Later runs usually use the cache. Air-gapped setups need a local cache or JIT weights instead of first-time download.
+- **Limitations**: VAD can still mis-trigger on music, speech-like noise, or singing; tune `vad_threshold`, `min_speech_duration_ms`, etc.
+
+Quick try:
+
+```bash
+pip install -r requirements.txt
+python FFmpegAudioActivityDetector.py
+```
 
 ## Next Likely Backend Work
 

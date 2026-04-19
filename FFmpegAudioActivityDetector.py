@@ -1,8 +1,8 @@
 import os
-import re
 import subprocess
+import wave
 from dataclasses import dataclass
-from typing import List, Optional, Protocol
+from typing import List, Optional, Protocol, Tuple
 
 
 # =========================================================
@@ -57,18 +57,21 @@ class AudioActivityDetector(Protocol):
         """
         ...
 
-    def detect_silence_segments(self, standard_audio_path: str) -> List[AudioSegment]:
+    def detect_silence_segments(
+        self,
+        speech_segments: List[AudioSegment],
+        audio_duration: float
+    ) -> List[AudioSegment]:
         """
-        Detect silence segments from standard audio.
+        Infer silence segments from speech complement (gaps vs total duration).
 
-        从标准化后的音频中检测静音片段
+        由语音片段在全时长上的补集得到静音片段
         """
         ...
 
     def detect_speech_segments(
         self,
         standard_audio_path: str,
-        silence_segments: List[AudioSegment],
         audio_duration: float
     ) -> List[AudioSegment]:
         """
@@ -93,39 +96,35 @@ class AudioActivityDetector(Protocol):
 
 class FFmpegAudioActivityDetector:
     """
-    Audio activity detector based on ffmpeg.
+    Audio activity detector: ffmpeg preprocessing + Silero VAD.
 
-    基于 ffmpeg 的音频活动检测器
+    音频活动检测：ffmpeg 预处理 + Silero VAD
 
     Current design / 当前设计：
     1. load_audio()
        -> Use ffmpeg to standardize audio into mono 16kHz WAV
        -> 使用 ffmpeg 将音频统一转换为单声道、16kHz 的 WAV
 
-    2. detect_silence_segments()
-       -> Use ffmpeg silencedetect filter
-       -> 使用 ffmpeg 的 silencedetect 检测静音区间
+    2. detect_speech_segments()
+       -> Silero VAD (via torch.hub)
+       -> Silero 语音端点检测
 
-    3. detect_speech_segments()
-       -> Infer speech segments from non-silence intervals
-       -> 通过“非静音区间”反推 speech segments
+    3. detect_silence_segments()
+       -> Gaps between speech segments vs total duration (complement)
+       -> 由 speech 在全时长上的补集得到静音区间
 
     4. process()
        -> Main pipeline interface for teammates / 提供给组员调用的主入口
-
-    Important note / 重要说明：
-    This version does NOT use a true speech model.
-    It treats non-silence as speech-like activity.
-    当前版本不使用真实的人声模型，
-    而是把“非静音区间”近似看作 speech activity。
     """
 
     def __init__(
         self,
         sample_rate: int = 16000,
         temp_dir: str = "temp_audio",
-        silence_noise_threshold_db: int = -35,
-        silence_min_duration: float = 0.5,
+        vad_threshold: float = 0.5,
+        min_speech_duration_ms: int = 250,
+        min_silence_duration_ms: int = 100,
+        speech_pad_ms: int = 30,
         min_segment_duration: float = 0.1
     ):
         """
@@ -135,30 +134,26 @@ class FFmpegAudioActivityDetector:
 
         Parameters / 参数说明：
         - sample_rate:
-          target sample rate / 目标采样率
-
+          target sample rate (Silero 支持 8000 / 16000，默认 16000)
         - temp_dir:
           folder to store converted WAV files / 存放转换后 WAV 文件的目录
-
-        - silence_noise_threshold_db:
-          threshold for ffmpeg silencedetect, e.g. -35 dB
-          ffmpeg 静音检测阈值，例如 -35dB
-          数值越高（如 -30）越容易判为静音
-          数值越低（如 -45）越不容易判为静音
-
-        - silence_min_duration:
-          minimum silence length in seconds
-          判定为静音所需的最短持续时间（秒）
-
+        - vad_threshold:
+          Silero VAD 概率阈值，越大越“保守”（更少判为语音）
+        - min_speech_duration_ms / min_silence_duration_ms / speech_pad_ms:
+          传给 Silero get_speech_timestamps 的合并与边界参数
         - min_segment_duration:
-          remove tiny segments shorter than this value
-          过滤太短的片段（秒）
+          输出前过滤过短的 speech / silence 片段（秒）
         """
         self.sample_rate = sample_rate
         self.temp_dir = temp_dir
-        self.silence_noise_threshold_db = silence_noise_threshold_db
-        self.silence_min_duration = silence_min_duration
+        self.vad_threshold = vad_threshold
+        self.min_speech_duration_ms = min_speech_duration_ms
+        self.min_silence_duration_ms = min_silence_duration_ms
+        self.speech_pad_ms = speech_pad_ms
         self.min_segment_duration = min_segment_duration
+
+        self._silero_model = None
+        self._silero_get_speech_timestamps = None
 
         os.makedirs(self.temp_dir, exist_ok=True)
 
@@ -280,69 +275,34 @@ class FFmpegAudioActivityDetector:
             raise RuntimeError("Unable to parse audio duration from ffprobe output.")
 
     # ---------------------------------------------------------
-    # Interface 2: silence detection
-    # 接口2：静音检测
+    # Interface 2: silence detection (complement of speech)
+    # 接口2：静音检测（由语音补集得到）
     # ---------------------------------------------------------
-    def detect_silence_segments(self, standard_audio_path: str) -> List[AudioSegment]:
+    def detect_silence_segments(
+        self,
+        speech_segments: List[AudioSegment],
+        audio_duration: float
+    ) -> List[AudioSegment]:
         """
         [Interface for silence detection / 静音检测接口]
 
         Purpose / 作用：
-        Detect silence segments such as pauses, gaps,
-        or parts with no meaningful audio.
+        Build silence segments as the complement of speech within [0, audio_duration].
 
-        检测静音片段，例如：
-        - pauses / 停顿
-        - gaps / 间隙
-        - no meaningful audio / 无有效声音
+        在 [0, audio_duration] 上，用 speech 片段的补集构造静音片段。
 
         Input / 输入：
-        - standard_audio_path: path of standard WAV file / 标准 WAV 文件路径
+        - speech_segments: VAD 得到的语音片段
+        - audio_duration: 总时长（秒）
 
         Output / 输出：
         - List[AudioSegment], label="silence"
 
         Used by / 调用方：
         - process()
-
-        Internal method / 内部实现：
-        - ffmpeg silencedetect filter
-
-        Notes / 备注：
-        Later this function can be replaced by another silence detector
-        without changing other modules.
-        后续可替换为别的方法，其他模块无需改动。
         """
-        command = [
-            "ffmpeg",
-            "-i", standard_audio_path,
-            "-af",
-            f"silencedetect=noise={self.silence_noise_threshold_db}dB:d={self.silence_min_duration}",
-            "-f", "null",
-            "-"
-        ]
-
-        try:
-            result = subprocess.run(
-                command,
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            ffmpeg_output = result.stderr
-        except subprocess.CalledProcessError as e:
-            # silencedetect output is usually printed in stderr
-            ffmpeg_output = e.stderr
-        except FileNotFoundError:
-            raise RuntimeError(
-                "ffmpeg is not installed or not added to PATH. "
-                "Please install ffmpeg first."
-            )
-
-        silence_segments = self._parse_silencedetect_output(ffmpeg_output)
-        silence_segments = self._filter_short_segments(silence_segments)
-        return silence_segments
+        silence_segments = self._silence_complement(speech_segments, audio_duration)
+        return self._filter_short_segments(silence_segments)
 
     # ---------------------------------------------------------
     # Interface 3: speech detection
@@ -351,29 +311,19 @@ class FFmpegAudioActivityDetector:
     def detect_speech_segments(
         self,
         standard_audio_path: str,
-        silence_segments: List[AudioSegment],
         audio_duration: float
     ) -> List[AudioSegment]:
         """
         [Interface for speech activity detection / 语音活动检测接口]
 
         Purpose / 作用：
-        Detect speech activity segments.
+        Detect speech activity with Silero VAD.
 
-        检测 speech activity segments（语音活动片段）
+        使用 Silero VAD 检测语音活动片段。
 
         Input / 输入：
-        - standard_audio_path:
-          path of standardized WAV audio
-          标准化 WAV 音频路径
-
-        - silence_segments:
-          silence segments already detected
-          已检测到的静音片段
-
-        - audio_duration:
-          total duration of audio
-          音频总时长
+        - standard_audio_path: 标准化后的单声道 16kHz WAV
+        - audio_duration: ffprobe 得到的总时长，用于裁剪边界
 
         Output / 输出：
         - List[AudioSegment], label="speech"
@@ -381,52 +331,39 @@ class FFmpegAudioActivityDetector:
         Used by / 调用方：
         - process()
 
-        Important note / 重要说明：
-        This version does NOT use a true speech model.
-        Current logic infers speech from the complement of silence.
-
-        当前版本不使用真实人声模型，
-        而是把“静音以外的区间”近似看作 speech segments。
-
-        Why keep this interface / 为什么保留这个接口：
-        In the future, you can replace the internal logic with:
-        - WebRTC VAD
-        - Silero VAD
-        - energy-based detector
-        - other custom algorithms
-
-        以后你们可以只替换这个函数内部实现，
-        而不用改外部调用方式。
+        Dependencies / 依赖：
+        - torch, torchaudio（torch.hub 加载 silero-vad 时需要）
+        - 首次运行需联网以下载 hub 模型
         """
-        _ = standard_audio_path  # reserved for future real detector / 为后续真实检测器预留
+        model, get_speech_timestamps = self._ensure_silero_vad()
+        wav = self._read_standard_wav_tensor(standard_audio_path)
 
-        speech_segments = []
-        current_start = 0.0
+        timestamps = get_speech_timestamps(
+            wav,
+            model,
+            threshold=self.vad_threshold,
+            sampling_rate=self.sample_rate,
+            min_speech_duration_ms=self.min_speech_duration_ms,
+            min_silence_duration_ms=self.min_silence_duration_ms,
+            speech_pad_ms=self.speech_pad_ms,
+            return_seconds=True,
+        )
 
-        for silence in silence_segments:
-            if silence.start_time > current_start:
+        speech_segments: List[AudioSegment] = []
+        for t in timestamps:
+            start = max(0.0, float(t["start"]))
+            end = min(audio_duration, float(t["end"]))
+            if end > start:
                 speech_segments.append(
                     AudioSegment(
-                        start_time=current_start,
-                        end_time=silence.start_time,
+                        start_time=start,
+                        end_time=end,
                         label="speech",
-                        confidence=None
+                        confidence=None,
                     )
                 )
-            current_start = silence.end_time
 
-        if current_start < audio_duration:
-            speech_segments.append(
-                AudioSegment(
-                    start_time=current_start,
-                    end_time=audio_duration,
-                    label="speech",
-                    confidence=None
-                )
-            )
-
-        speech_segments = self._filter_short_segments(speech_segments)
-        return speech_segments
+        return self._filter_short_segments(speech_segments)
 
     # ---------------------------------------------------------
     # Interface 4: main pipeline
@@ -444,14 +381,14 @@ class FFmpegAudioActivityDetector:
         Pipeline / 流程：
         1. Convert raw input audio using ffmpeg
         2. Get total audio duration
-        3. Detect silence segments
-        4. Infer speech segments
+        3. Silero VAD -> speech segments
+        4. Complement -> silence segments
         5. Return DetectionResult
 
         1. 使用 ffmpeg 预处理音频
         2. 获取音频总时长
-        3. 检测静音片段
-        4. 反推出语音片段
+        3. Silero VAD 检测语音片段
+        4. 由补集得到静音片段
         5. 返回最终结果
 
         Input / 输入：
@@ -475,11 +412,13 @@ class FFmpegAudioActivityDetector:
         """
         standard_audio_path = self.load_audio(audio_path)
         audio_duration = self.get_audio_duration(standard_audio_path)
-        silence_segments = self.detect_silence_segments(standard_audio_path)
         speech_segments = self.detect_speech_segments(
             standard_audio_path=standard_audio_path,
-            silence_segments=silence_segments,
-            audio_duration=audio_duration
+            audio_duration=audio_duration,
+        )
+        silence_segments = self.detect_silence_segments(
+            speech_segments=speech_segments,
+            audio_duration=audio_duration,
         )
 
         return DetectionResult(
@@ -492,55 +431,96 @@ class FFmpegAudioActivityDetector:
     # Internal Helpers / 内部辅助函数
     # =========================================================
 
-    def _parse_silencedetect_output(self, ffmpeg_output: str) -> List[AudioSegment]:
+    def _ensure_silero_vad(self) -> Tuple[object, object]:
+        if self._silero_model is not None and self._silero_get_speech_timestamps is not None:
+            return self._silero_model, self._silero_get_speech_timestamps
+
+        import torch
+
+        model, utils = torch.hub.load(
+            repo_or_dir="snakers4/silero-vad",
+            model="silero_vad",
+            trust_repo=True,
+        )
+        get_speech_timestamps = utils[0]
+        self._silero_model = model
+        self._silero_get_speech_timestamps = get_speech_timestamps
+        return model, get_speech_timestamps
+
+    def _read_standard_wav_tensor(self, standard_audio_path: str):
         """
-        Parse ffmpeg silencedetect logs.
-
-        解析 ffmpeg silencedetect 输出日志
-
-        ffmpeg usually prints lines like:
-        ffmpeg 通常输出类似：
-        silence_start: 0
-        silence_end: 1.234 | silence_duration: 1.234
-
-        We pair silence_start and silence_end to build AudioSegment.
-
-        通过配对 silence_start 和 silence_end 构建 AudioSegment。
+        Load mono 16-bit PCM WAV as float32 tensor in [-1, 1] for Silero.
+        使用标准库读取 WAV，避免依赖 torchaudio.load 的后端差异。
         """
-        silence_starts = []
-        silence_ends = []
+        import torch
 
-        start_pattern = re.compile(r"silence_start:\s*([0-9.]+)")
-        end_pattern = re.compile(r"silence_end:\s*([0-9.]+)\s*\|\s*silence_duration:\s*([0-9.]+)")
+        with wave.open(standard_audio_path, "rb") as wf:
+            if wf.getnchannels() != 1:
+                raise ValueError(
+                    f"Expected mono WAV after load_audio: {standard_audio_path}"
+                )
+            if wf.getsampwidth() != 2:
+                raise ValueError(
+                    f"Expected 16-bit PCM WAV after load_audio: {standard_audio_path}"
+                )
+            if wf.getframerate() != self.sample_rate:
+                raise ValueError(
+                    f"Expected {self.sample_rate} Hz WAV, got {wf.getframerate()}: "
+                    f"{standard_audio_path}"
+                )
+            nframes = wf.getnframes()
+            raw = wf.readframes(nframes)
 
-        for line in ffmpeg_output.splitlines():
-            start_match = start_pattern.search(line)
-            if start_match:
-                silence_starts.append(float(start_match.group(1)))
-                continue
+        # frombuffer 需要可写缓冲区以便部分 torch 版本安全使用
+        pcm = torch.frombuffer(bytearray(raw), dtype=torch.int16)
+        return pcm.float() / 32768.0
 
-            end_match = end_pattern.search(line)
-            if end_match:
-                silence_ends.append(float(end_match.group(1)))
+    def _silence_complement(
+        self,
+        speech_segments: List[AudioSegment],
+        audio_duration: float,
+    ) -> List[AudioSegment]:
+        """Gaps between sorted speech intervals within [0, audio_duration]."""
+        if audio_duration <= 0:
+            return []
 
-        silence_segments = []
-        pair_count = min(len(silence_starts), len(silence_ends))
+        if not speech_segments:
+            return [
+                AudioSegment(
+                    start_time=0.0,
+                    end_time=audio_duration,
+                    label="silence",
+                    confidence=None,
+                )
+            ]
 
-        for i in range(pair_count):
-            start_time = silence_starts[i]
-            end_time = silence_ends[i]
+        ordered = sorted(speech_segments, key=lambda s: s.start_time)
+        silence: List[AudioSegment] = []
+        cursor = 0.0
 
-            if end_time > start_time:
-                silence_segments.append(
+        for seg in ordered:
+            if seg.start_time > cursor:
+                silence.append(
                     AudioSegment(
-                        start_time=start_time,
-                        end_time=end_time,
+                        start_time=cursor,
+                        end_time=seg.start_time,
                         label="silence",
-                        confidence=None
+                        confidence=None,
                     )
                 )
+            cursor = max(cursor, seg.end_time)
 
-        return silence_segments
+        if cursor < audio_duration:
+            silence.append(
+                AudioSegment(
+                    start_time=cursor,
+                    end_time=audio_duration,
+                    label="silence",
+                    confidence=None,
+                )
+            )
+
+        return silence
 
     def _filter_short_segments(self, segments: List[AudioSegment]) -> List[AudioSegment]:
         """
@@ -585,9 +565,11 @@ if __name__ == "__main__":
     detector = FFmpegAudioActivityDetector(
         sample_rate=16000,
         temp_dir="temp_audio",
-        silence_noise_threshold_db=-35,   # try -30 / -35 / -40 based on audio
-        silence_min_duration=0.5,         # minimum silence length in seconds
-        min_segment_duration=0.1
+        vad_threshold=0.5,
+        min_speech_duration_ms=250,
+        min_silence_duration_ms=100,
+        speech_pad_ms=30,
+        min_segment_duration=0.1,
     )
 
     # Replace this with your actual file path
