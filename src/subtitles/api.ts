@@ -405,6 +405,35 @@ export async function splitEditorSessionAtTime(
   return normalizeEditorSession(payload)
 }
 
+export async function mergeEditorSessionSegments(
+  sessionId: string,
+  segmentIds: number[],
+): Promise<EditorSessionState> {
+  const apiBaseUrl = resolveSubtitleApiUrl()
+  const response = await fetch(`${apiBaseUrl}/api/editor/merge`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      sessionId,
+      segmentIds,
+    }),
+  })
+
+  const payload = (await response.json().catch(() => null)) as
+    | EditorSessionApiResponse
+    | null
+
+  if (!response.ok) {
+    throw new Error(
+      payload?.error || 'Could not merge the selected clips.',
+    )
+  }
+
+  return normalizeEditorSession(payload)
+}
+
 export async function cutEditorSessionToRange(
   sessionId: string,
   cutStart: number,

@@ -54,6 +54,7 @@ import {
   downloadEditorSessionSourceFile,
   type EditorSessionState,
   exportEditorSessionVideo,
+  mergeEditorSessionSegments,
   replaceEditorSessionSegments,
   splitEditorSessionAtTime,
   generateSubtitlesFromVideo,
@@ -102,7 +103,8 @@ interface TimelineThumbnail {
 
 interface EditorHistoryEntry {
   segments: ClipSegment[]
-  selectedId: number
+  selectedId: number | null
+  selectedIds: number[]
   subtitleSegments: SubtitleSegment[]
 }
 
@@ -177,6 +179,37 @@ function formatClock(seconds: number): string {
   return `${minutes.toString().padStart(2, '0')}:${secs
     .toString()
     .padStart(2, '0')}`
+}
+
+function orderClipSelectionIds(
+  segments: ClipSegment[],
+  segmentIds: number[],
+): number[] {
+  if (segmentIds.length === 0) {
+    return []
+  }
+
+  const selectedIdSet = new Set(segmentIds)
+  return segments
+    .filter((segment) => selectedIdSet.has(segment.id))
+    .map((segment) => segment.id)
+}
+
+function getClipSelectionRangeIds(
+  segments: ClipSegment[],
+  anchorId: number,
+  targetId: number,
+): number[] {
+  const anchorIndex = segments.findIndex((segment) => segment.id === anchorId)
+  const targetIndex = segments.findIndex((segment) => segment.id === targetId)
+
+  if (anchorIndex < 0 || targetIndex < 0) {
+    return [targetId]
+  }
+
+  const startIndex = Math.min(anchorIndex, targetIndex)
+  const endIndex = Math.max(anchorIndex, targetIndex)
+  return segments.slice(startIndex, endIndex + 1).map((segment) => segment.id)
 }
 
 function formatTransportClock(seconds: number): string {
@@ -863,7 +896,8 @@ export default function HomePage(): JSX.Element {
   >({})
   const [sceneStatus, setSceneStatus] = useState<'idle' | 'pending'>('idle')
   const [segments, setSegments] = useState<ClipSegment[]>(createInitialSegments(180))
-  const [selectedId, setSelectedId] = useState<number>(1)
+  const [selectedId, setSelectedId] = useState<number | null>(1)
+  const [selectedSegmentIds, setSelectedSegmentIds] = useState<number[]>([1])
   const [editorSessionId, setEditorSessionId] = useState<string | null>(null)
   const [editorStatus, setEditorStatus] = useState<EditorStatus>('idle')
   const [editorError, setEditorError] = useState<string | null>(null)
@@ -890,11 +924,45 @@ export default function HomePage(): JSX.Element {
   const appendVideoInputRef = useRef<HTMLInputElement | null>(null)
   const previousWorkspaceViewRef = useRef<Exclude<RightPanelView, 'cut'>>('ai')
 
+  const applyClipSelection = (
+    nextSegments: ClipSegment[],
+    nextSelectedIds: number[],
+    nextActiveId: number | null,
+  ) => {
+    const orderedSelection = orderClipSelectionIds(nextSegments, nextSelectedIds)
+    const resolvedActiveId =
+      nextActiveId != null && orderedSelection.includes(nextActiveId)
+        ? nextActiveId
+        : orderedSelection[0] ?? nextSegments[0]?.id ?? null
+    const normalizedSelection =
+      orderedSelection.length > 0
+        ? orderedSelection
+        : resolvedActiveId != null
+          ? [resolvedActiveId]
+          : []
+
+    setSelectedSegmentIds(normalizedSelection)
+    setSelectedId(resolvedActiveId)
+  }
+
+  const selectSingleClip = (
+    segmentId: number | null,
+    nextSegments: ClipSegment[] = segments,
+  ) => {
+    applyClipSelection(
+      nextSegments,
+      segmentId != null ? [segmentId] : [],
+      segmentId,
+    )
+  }
+
   useEffect(() => {
     if (!videoDuration || videoDuration <= 0) return
     if (editorSessionId) return
-    setSegments(createInitialSegments(videoDuration))
-    setSelectedId(1)
+    const initialSegments = createInitialSegments(videoDuration)
+    setSegments(initialSegments)
+    setSelectedId(initialSegments[0]?.id ?? null)
+    setSelectedSegmentIds(initialSegments[0] ? [initialSegments[0].id] : [])
     setHistory([])
     setEditorError(null)
     setExportStatus('idle')
@@ -992,13 +1060,36 @@ export default function HomePage(): JSX.Element {
     }
   }, [editorSessionId, segments, selectedId])
 
+  const orderedSelectedSegmentIds = orderClipSelectionIds(
+    segments,
+    selectedSegmentIds,
+  )
+  const selectedSegmentIdSet = new Set(orderedSelectedSegmentIds)
+  const selectedSegments = segments.filter((segment) =>
+    selectedSegmentIdSet.has(segment.id),
+  )
   const selectedSegment =
-    segments.find((segment) => segment.id === selectedId) ?? segments[0] ?? null
+    (selectedId != null
+      ? segments.find((segment) => segment.id === selectedId) ?? null
+      : null) ??
+    selectedSegments[0] ??
+    null
   const selectedIndex = selectedSegment
     ? segments.findIndex((segment) => segment.id === selectedSegment.id)
     : -1
-  const canMergeWithNext =
-    selectedIndex >= 0 && selectedIndex < segments.length - 1
+  const selectedSegmentIndices = segments.reduce<number[]>((indices, segment, index) => {
+    if (selectedSegmentIdSet.has(segment.id)) {
+      indices.push(index)
+    }
+    return indices
+  }, [])
+  const hasSingleSelectedSegment = selectedSegments.length === 1
+  const canMergeSelectedSegments =
+    selectedSegmentIndices.length >= 2 &&
+    selectedSegmentIndices[selectedSegmentIndices.length - 1] -
+      selectedSegmentIndices[0] +
+      1 ===
+      selectedSegmentIndices.length
 
   const totalDuration =
     videoDuration && videoDuration > 0
@@ -1071,6 +1162,7 @@ export default function HomePage(): JSX.Element {
   const captureEditorState = (): EditorHistoryEntry => ({
     segments: segments.map((segment) => ({ ...segment })),
     selectedId,
+    selectedIds: [...orderedSelectedSegmentIds],
     subtitleSegments: subtitleSegments.map((segment) => ({ ...segment })),
   })
 
@@ -1118,6 +1210,8 @@ export default function HomePage(): JSX.Element {
     setEditorSessionId(null)
     setEditorStatus('idle')
     setEditorError(null)
+    setSelectedId(null)
+    setSelectedSegmentIds([])
     setSubtitleSegments([])
     setSubtitleStatus('idle')
     setSubtitleError(null)
@@ -1145,7 +1239,11 @@ export default function HomePage(): JSX.Element {
     const previous = history[history.length - 1]
     setHistory((prev) => prev.slice(0, -1))
     setSegments(previous.segments)
-    setSelectedId(previous.selectedId)
+    applyClipSelection(
+      previous.segments,
+      previous.selectedIds,
+      previous.selectedId,
+    )
     setSubtitleSegments(previous.subtitleSegments)
 
     if (!editorSessionId) return
@@ -1158,7 +1256,13 @@ export default function HomePage(): JSX.Element {
         previous.selectedId,
       )
       setSegments(session.segments)
-      setSelectedId(session.selectedSegmentId ?? previous.selectedId)
+      applyClipSelection(
+        session.segments,
+        session.selectedSegmentId != null
+          ? [session.selectedSegmentId]
+          : previous.selectedIds,
+        session.selectedSegmentId ?? previous.selectedId,
+      )
       setEditorStatus('ready')
       setEditorError(null)
     } catch (error) {
@@ -1178,6 +1282,11 @@ export default function HomePage(): JSX.Element {
     )
     if (containingSegment) {
       setSelectedId(containingSegment.id)
+      setSelectedSegmentIds((prev) =>
+        prev.includes(containingSegment.id) && prev.length > 1
+          ? prev
+          : [containingSegment.id],
+      )
     }
     videoPreviewRef.current?.seekTo(safeTime)
     setCurrentTime(safeTime)
@@ -1451,7 +1560,13 @@ export default function HomePage(): JSX.Element {
 
       setHistory((prev) => [...prev.slice(-29), previousState])
       setSegments(nextSession.segments)
-      setSelectedId(nextSession.selectedSegmentId ?? nextSession.segments[0]?.id ?? 1)
+      applyClipSelection(
+        nextSession.segments,
+        nextSession.selectedSegmentId != null
+          ? [nextSession.selectedSegmentId]
+          : [],
+        nextSession.selectedSegmentId ?? nextSession.segments[0]?.id ?? null,
+      )
       setEditorStatus('ready')
       setEditorError(null)
       setSilenceError(null)
@@ -1554,7 +1669,13 @@ export default function HomePage(): JSX.Element {
       setHistory((prev) => [...prev.slice(-29), previousState])
       setEditorError(null)
       setSegments(nextSession.segments)
-      setSelectedId(nextSession.selectedSegmentId ?? nextSession.segments[0]?.id ?? 1)
+      applyClipSelection(
+        nextSession.segments,
+        nextSession.selectedSegmentId != null
+          ? [nextSession.selectedSegmentId]
+          : [],
+        nextSession.selectedSegmentId ?? nextSession.segments[0]?.id ?? null,
+      )
       setCutRange({
         start: 0,
         end: nextSession.segments.reduce(
@@ -1599,7 +1720,11 @@ export default function HomePage(): JSX.Element {
       const session = await createEditorSessionFromVideo(videoFile)
       setEditorSessionId(session.sessionId)
       setSegments(session.segments)
-      setSelectedId(session.selectedSegmentId ?? session.segments[0]?.id ?? 1)
+      applyClipSelection(
+        session.segments,
+        session.selectedSegmentId != null ? [session.selectedSegmentId] : [],
+        session.selectedSegmentId ?? session.segments[0]?.id ?? null,
+      )
       setEditorStatus('ready')
       setEditorError(null)
       return session
@@ -1615,7 +1740,7 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleSplitAtPlayhead = async () => {
-    if (!selectedSegment) return
+    if (!selectedSegment || !hasSingleSelectedSegment) return
     const playhead = currentTime
     const minGap = 1
 
@@ -1640,8 +1765,14 @@ export default function HomePage(): JSX.Element {
 
       setHistory((prev) => [...prev.slice(-29), previousState])
       setSegments(nextSession.segments)
-      setSelectedId(
-        nextSession.selectedSegmentId ?? nextSession.segments[0]?.id ?? selectedSegment.id,
+      applyClipSelection(
+        nextSession.segments,
+        nextSession.selectedSegmentId != null
+          ? [nextSession.selectedSegmentId]
+          : [],
+        nextSession.selectedSegmentId ??
+          nextSession.segments[0]?.id ??
+          selectedSegment.id,
       )
       setEditorStatus('ready')
       setEditorError(null)
@@ -1657,7 +1788,7 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleTrimStart = () => {
-    if (!selectedSegment) return
+    if (!selectedSegment || !hasSingleSelectedSegment) return
     const playhead = currentTime
     if (playhead <= selectedSegment.start || playhead >= selectedSegment.end - 1) {
       return
@@ -1676,7 +1807,7 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleTrimEnd = () => {
-    if (!selectedSegment) return
+    if (!selectedSegment || !hasSingleSelectedSegment) return
     const playhead = currentTime
     if (playhead >= selectedSegment.end || playhead <= selectedSegment.start + 1) {
       return
@@ -1692,50 +1823,138 @@ export default function HomePage(): JSX.Element {
     handleSeek(playhead)
   }
 
-  const handleMergeWithNext = () => {
-    if (!selectedSegment || !canMergeWithNext) return
-    pushHistory()
+  const handleMergeSelectedClips = async () => {
+    if (!canMergeSelectedSegments) return
 
-    setSegments((prev) => {
-      const index = prev.findIndex((segment) => segment.id === selectedSegment.id)
-      if (index < 0 || index >= prev.length - 1) return prev
+    const session = await ensureEditorSession()
+    if (!session) return
 
-      const currentSegment = prev[index]
-      const nextSegment = prev[index + 1]
-      const mergedSegment: ClipSegment = {
-        id: Date.now(),
-        label: `${currentSegment.label} + ${nextSegment.label}`,
-        start: currentSegment.start,
-        end: nextSegment.end,
+    try {
+      setEditorStatus('syncing')
+      setEditorError(null)
+
+      const nextSession = await mergeEditorSessionSegments(
+        session.sessionId,
+        orderedSelectedSegmentIds,
+      )
+      const mergedSourceFile = await downloadEditorSessionSourceFile(
+        nextSession.sessionId,
+      )
+      const mergedSourceUrl = URL.createObjectURL(mergedSourceFile)
+      const remappedSubtitles =
+        subtitleSegments.length > 0
+          ? remapSubtitlesToEditedTimeline(subtitleSegments, session.segments)
+          : []
+      const nextSelectedSegment =
+        (nextSession.selectedSegmentId != null
+          ? nextSession.segments.find(
+              (segment) => segment.id === nextSession.selectedSegmentId,
+            ) ?? null
+          : null) ?? nextSession.segments[0] ?? null
+
+      setSelectedVideoFile(mergedSourceFile)
+      setVideoSourceUrl(mergedSourceUrl)
+      setVideoDuration(nextSession.duration)
+      setSegments(nextSession.segments)
+      applyClipSelection(
+        nextSession.segments,
+        nextSelectedSegment ? [nextSelectedSegment.id] : [],
+        nextSelectedSegment?.id ?? null,
+      )
+      setCurrentTime(nextSelectedSegment?.start ?? 0)
+      setHistory([])
+      setEditorStatus('ready')
+      setIsPlaying(false)
+      setSilenceStatus('idle')
+      setSilenceError(null)
+      setSilenceSegments([])
+      setSelectedSilenceSegmentKeys([])
+      setStagedSilenceSegmentKeys([])
+      setSilenceNotice(
+        'The merge rebuilt the working source media. Run silence detection again if you want to review the merged timeline.',
+      )
+      if (subtitleSegments.length > 0) {
+        setSubtitleSegments(remappedSubtitles)
+        setSubtitleTimingDrafts({})
       }
-
-      const copy = [...prev]
-      copy.splice(index, 2, mergedSegment)
-      setSelectedId(mergedSegment.id)
-      return copy
-    })
-
-    handleSeek(selectedSegment.start)
+    } catch (error) {
+      setEditorStatus('error')
+      setEditorError(
+        error instanceof Error
+          ? error.message
+          : 'Could not merge the selected clips.',
+      )
+    }
   }
 
   const handleDeleteSelectedClip = () => {
-    if (!selectedSegment) return
+    if (!selectedSegment || !hasSingleSelectedSegment) return
     pushHistory()
 
+    let nextSelection: number | null = selectedSegment.id
     setSegments((prev) => {
       const index = prev.findIndex((segment) => segment.id === selectedSegment.id)
       const filtered = prev.filter((segment) => segment.id !== selectedSegment.id)
       if (filtered.length === 0) {
-        setSelectedId(0)
+        nextSelection = null
         return []
       }
 
       const nextIndex = Math.min(index, filtered.length - 1)
       const nextSegment = filtered[nextIndex]
-      setSelectedId(nextSegment.id)
-      handleSeek(nextSegment.start)
+      nextSelection = nextSegment.id
       return filtered
     })
+
+    if (nextSelection != null) {
+      selectSingleClip(nextSelection)
+      const nextSegment = segments.find((segment) => segment.id === nextSelection)
+      if (nextSegment) {
+        handleSeek(nextSegment.start)
+      }
+      return
+    }
+
+    applyClipSelection([], [], null)
+  }
+
+  const handleTimelineClipSelection = (
+    segmentId: number,
+    options: { extendSelection?: boolean; toggleSelection?: boolean } = {},
+  ) => {
+    const anchorId =
+      selectedId ??
+      orderedSelectedSegmentIds[orderedSelectedSegmentIds.length - 1] ??
+      segmentId
+
+    let nextSelectedIds: number[]
+
+    if (options.extendSelection) {
+      const rangeIds = getClipSelectionRangeIds(segments, anchorId, segmentId)
+      if (options.toggleSelection) {
+        nextSelectedIds = orderClipSelectionIds(segments, [
+          ...orderedSelectedSegmentIds,
+          ...rangeIds,
+        ])
+      } else {
+        nextSelectedIds = rangeIds
+      }
+    } else if (options.toggleSelection) {
+      const nextSelectedIdSet = new Set(orderedSelectedSegmentIds)
+      if (nextSelectedIdSet.has(segmentId) && nextSelectedIdSet.size > 1) {
+        nextSelectedIdSet.delete(segmentId)
+      } else {
+        nextSelectedIdSet.add(segmentId)
+      }
+      nextSelectedIds = orderClipSelectionIds(
+        segments,
+        Array.from(nextSelectedIdSet),
+      )
+    } else {
+      nextSelectedIds = [segmentId]
+    }
+
+    applyClipSelection(segments, nextSelectedIds, segmentId)
   }
 
   const handleUpdateSubtitle = (updated: SubtitleSegment) => {
@@ -1869,8 +2088,12 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleExportSelectedClip = async () => {
-    if (!selectedSegment) {
-      setExportError('Select a clip in the timeline before exporting it.')
+    if (!selectedSegment || !hasSingleSelectedSegment) {
+      setExportError(
+        selectedSegments.length > 1
+          ? 'Select a single clip before exporting it.'
+          : 'Select a clip in the timeline before exporting it.',
+      )
       return
     }
 
@@ -1982,8 +2205,16 @@ export default function HomePage(): JSX.Element {
       })
       setCurrentTime(0)
       setSegments(nextSession.segments)
-      setSelectedId(
-        nextSession.selectedSegmentId ?? nextSession.segments.at(-1)?.id ?? selectedId,
+      applyClipSelection(
+        nextSession.segments,
+        nextSession.selectedSegmentId != null
+          ? [nextSession.selectedSegmentId]
+          : nextSession.segments.at(-1)?.id != null
+            ? [nextSession.segments.at(-1)!.id]
+            : [],
+        nextSession.selectedSegmentId ??
+          nextSession.segments.at(-1)?.id ??
+          selectedId,
       )
       setEditorSessionId(nextSession.sessionId)
       setEditorStatus('ready')
@@ -2495,6 +2726,7 @@ export default function HomePage(): JSX.Element {
                 exportStatus === 'processing' ||
                 editorStatus === 'syncing' ||
                 !selectedSegment ||
+                !hasSingleSelectedSegment ||
                 (!selectedVideoFile && !editorSessionId)
               }
               className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
@@ -2687,6 +2919,7 @@ export default function HomePage(): JSX.Element {
                         isDark={isDark}
                         onClick={handleSplitAtPlayhead}
                         icon={Split}
+                        disabled={!selectedSegment || !hasSingleSelectedSegment}
                         tone="editor"
                       />
                       <ToolbarButton
@@ -2694,9 +2927,11 @@ export default function HomePage(): JSX.Element {
                         tooltip="Merge the selected clips into a single clip."
                         guidedMode={guidedMode}
                         isDark={isDark}
-                        onClick={handleMergeWithNext}
+                        onClick={() => {
+                          void handleMergeSelectedClips()
+                        }}
                         icon={Clapperboard}
-                        disabled={!canMergeWithNext}
+                        disabled={!canMergeSelectedSegments}
                         tone="editor"
                       />
                       <ToolbarButton
@@ -2706,7 +2941,7 @@ export default function HomePage(): JSX.Element {
                         isDark={isDark}
                         onClick={handleDeleteSelectedClip}
                         icon={Trash2}
-                        disabled={!selectedSegment}
+                        disabled={!selectedSegment || !hasSingleSelectedSegment}
                         danger
                       />
                       <div className="mx-1 h-8 w-px rounded-full bg-[#d9dde5] dark:bg-[#31415a]" />
@@ -2867,7 +3102,8 @@ export default function HomePage(): JSX.Element {
                             >
                               {segments.map((segment) => {
                                 const duration = Math.max(0.1, segment.end - segment.start)
-                                const isSelected = selectedId === segment.id
+                                const isPrimarySelected = selectedId === segment.id
+                                const isSelected = selectedSegmentIdSet.has(segment.id)
                                 const segmentFrames = getSegmentTimelineFrames(
                                   timelineThumbnails,
                                   segment,
@@ -2884,7 +3120,29 @@ export default function HomePage(): JSX.Element {
                                         return
                                       }
 
+                                      if (
+                                        event.pointerType === 'mouse' &&
+                                        event.button !== 0
+                                      ) {
+                                        return
+                                      }
+
                                       event.stopPropagation()
+                                      const isModifierSelection =
+                                        event.shiftKey ||
+                                        event.ctrlKey ||
+                                        event.metaKey
+
+                                      if (isModifierSelection) {
+                                        event.preventDefault()
+                                        handleTimelineClipSelection(segment.id, {
+                                          extendSelection: event.shiftKey,
+                                          toggleSelection:
+                                            event.ctrlKey || event.metaKey,
+                                        })
+                                        return
+                                      }
+
                                       const bounds =
                                         event.currentTarget.getBoundingClientRect()
                                       const ratio = clamp(
@@ -2895,16 +3153,20 @@ export default function HomePage(): JSX.Element {
                                       const nextTime =
                                         segment.start +
                                         (segment.end - segment.start) * ratio
-                                      setSelectedId(segment.id)
+                                      selectSingleClip(segment.id)
                                       handleSeek(nextTime)
                                       setIsTimelineDragging(true)
                                     }}
                                     style={{ flexGrow: duration, flexBasis: 0 }}
                                     className={`relative flex min-w-0 flex-1 flex-col justify-end overflow-hidden rounded-xl border text-left transition ${
-                                      isSelected
+                                      isPrimarySelected
                                         ? isDark
                                           ? 'border-[#8bb8ff] bg-[#1f4da0] text-white'
                                           : 'border-[#003fb1] bg-[#1a56db] text-white'
+                                        : isSelected
+                                          ? isDark
+                                            ? 'border-[#6f8fbf] bg-[#182238] text-[#edf2ff]'
+                                            : 'border-[#7aa4ff] bg-[#eef3ff] text-[#003fb1]'
                                         : isDark
                                           ? 'border-[#344561] bg-[#101a2a] text-[#d6deec] hover:border-[#8bb8ff]'
                                           : 'border-[#c9d5e8] bg-white text-[#233147] hover:border-[#1a56db]'
@@ -2945,7 +3207,11 @@ export default function HomePage(): JSX.Element {
                                       <span
                                         className={`block pl-2 text-[11px] ${
                                           isSelected
-                                            ? 'text-white/90'
+                                            ? isPrimarySelected
+                                              ? 'text-white/90'
+                                              : isDark
+                                                ? 'text-[#d6deec]'
+                                                : 'text-[#31527f]'
                                             : isDark
                                               ? 'text-[#d6deec]'
                                               : 'text-white/95'
@@ -3056,6 +3322,9 @@ export default function HomePage(): JSX.Element {
                           >
                             <span>
                               {segments.length} clip{segments.length === 1 ? '' : 's'}
+                              {selectedSegments.length > 1
+                                ? ` · ${selectedSegments.length} selected`
+                                : ''}
                             </span>
                             <span>
                               {editorStatus === 'syncing'

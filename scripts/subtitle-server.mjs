@@ -187,6 +187,91 @@ function relabelEditorSegments(segments) {
   }))
 }
 
+function getEditorTimelineDuration(segments) {
+  return segments.reduce(
+    (sum, segment) => sum + Math.max(0, segment.end - segment.start),
+    0,
+  )
+}
+
+function sanitizeSelectedSegmentIds(segmentIds) {
+  const normalizedIds = Array.isArray(segmentIds)
+    ? [...new Set(segmentIds.map((segmentId) => Number(segmentId)))]
+        .filter((segmentId) => Number.isFinite(segmentId) && segmentId > 0)
+    : []
+
+  if (normalizedIds.length < 2) {
+    throw new Error('Select at least two clips to merge.')
+  }
+
+  return normalizedIds
+}
+
+function flattenMergedEditorSegments(segments, segmentIds) {
+  const selectedSegmentIds = sanitizeSelectedSegmentIds(segmentIds)
+  const selectedSegmentIdSet = new Set(selectedSegmentIds)
+  const selectedIndices = []
+
+  segments.forEach((segment, index) => {
+    if (selectedSegmentIdSet.has(segment.id)) {
+      selectedIndices.push(index)
+    }
+  })
+
+  if (selectedIndices.length !== selectedSegmentIds.length) {
+    throw new Error('One or more selected clips were not found in the editor session.')
+  }
+
+  const firstSelectedIndex = selectedIndices[0]
+  const lastSelectedIndex = selectedIndices[selectedIndices.length - 1]
+  if (lastSelectedIndex - firstSelectedIndex + 1 !== selectedIndices.length) {
+    throw new Error('Select adjacent clips to merge them into a single clip.')
+  }
+
+  const nextSegments = []
+  let mergedSegmentId = null
+  let nextSegmentId = 1
+  let nextStart = 0
+
+  for (let index = 0; index < segments.length; index += 1) {
+    if (index === firstSelectedIndex) {
+      const mergedDuration = getEditorTimelineDuration(
+        segments.slice(firstSelectedIndex, lastSelectedIndex + 1),
+      )
+
+      nextSegments.push({
+        id: nextSegmentId,
+        label: `Clip ${nextSegmentId}`,
+        start: nextStart,
+        end: nextStart + mergedDuration,
+      })
+      mergedSegmentId = nextSegmentId
+      nextSegmentId += 1
+      nextStart += mergedDuration
+      index = lastSelectedIndex
+      continue
+    }
+
+    const segment = segments[index]
+    const segmentDuration = Math.max(0, segment.end - segment.start)
+
+    nextSegments.push({
+      id: nextSegmentId,
+      label: `Clip ${nextSegmentId}`,
+      start: nextStart,
+      end: nextStart + segmentDuration,
+    })
+    nextSegmentId += 1
+    nextStart += segmentDuration
+  }
+
+  return {
+    segments: relabelEditorSegments(nextSegments),
+    selectedSegmentId: mergedSegmentId,
+    duration: nextStart,
+  }
+}
+
 function cutEditorSegmentsToRange(segments, cutStart, cutEnd) {
   if (!Array.isArray(segments) || segments.length === 0) {
     return []
@@ -884,6 +969,7 @@ const server = createServer(async (request, response) => {
       replaceEditorSession: '/api/editor/session/replace',
       appendEditorMedia: '/api/editor/append?sessionId=...',
       splitEditorSession: '/api/editor/split',
+      mergeEditorSession: '/api/editor/merge',
       cutEditorSession: '/api/editor/cut',
       deleteEditorSilence: '/api/editor/delete-silence',
       exportEditorSession: '/api/editor/export',
@@ -1078,6 +1164,49 @@ const server = createServer(async (request, response) => {
       session.selectedSegmentId = rightSegment.id
 
       sendJson(response, 200, serializeEditorSession(session))
+      return
+    }
+
+    if (url.pathname === '/api/editor/merge') {
+      const payload = parseJsonBody(body)
+      const sessionId =
+        typeof payload?.sessionId === 'string' ? payload.sessionId : ''
+      const session = getEditorSession(sessionId)
+      const nextState = flattenMergedEditorSegments(
+        session.segments,
+        payload?.segmentIds,
+      )
+      const mergedOutputPath = join(
+        EDITOR_SESSION_DIR,
+        `${session.id}-timeline-merge-${Date.now()}.mp4`,
+      )
+      let didReplaceSource = false
+
+      try {
+        await renderEditorSegmentsToFile(
+          session.filePath,
+          session.segments,
+          mergedOutputPath,
+        )
+
+        const previousFilePath = session.filePath
+        session.filePath = mergedOutputPath
+        session.duration = nextState.duration
+        session.segments = nextState.segments
+        session.selectedSegmentId = nextState.selectedSegmentId
+        session.nextSegmentId = Math.max(1, nextState.segments.length + 1)
+        didReplaceSource = true
+
+        if (previousFilePath !== mergedOutputPath) {
+          await rm(previousFilePath, { force: true }).catch(() => undefined)
+        }
+
+        sendJson(response, 200, serializeEditorSession(session))
+      } finally {
+        if (!didReplaceSource) {
+          await rm(mergedOutputPath, { force: true }).catch(() => undefined)
+        }
+      }
       return
     }
 
