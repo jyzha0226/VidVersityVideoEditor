@@ -226,6 +226,23 @@ The editor now uses a backend session model for split editing and export. The UI
 
 `Add Video` appends a newly uploaded video to the end of the current timeline and rebuilds the working editor source. Because this changes the underlying media timeline, subtitle and silence analysis should be regenerated afterward if you want them to include the new content.
 
+### Python: `FFmpegAudioActivityDetector.py`
+
+**FFmpeg** 将输入统一为单声道 WAV（默认 16 kHz）；**Silero VAD**（`torch.hub.load("snakers4/silero-vad", ...)`）在标准化音频上检测 **`speech`** 段；**`silence`** 为 `[0, 总时长]` 上相对语音段的间隙（补集），不再使用 FFmpeg `silencedetect`。对外推荐 **`process(audio_path)`**。
+
+English: **FFmpeg** normalizes audio; **Silero VAD** finds speech segments; **`silence`** is the complement over the full duration. Types: `AudioSegment`, `DetectionResult`; entry: `FFmpegAudioActivityDetector.process(audio_path)`.
+
+- **Dependencies**: FFmpeg/ffprobe on `PATH`; Python 3.8+; `pip install -r requirements.txt` (**torch**, **torchaudio** for hub loading).
+- **First run / network**: `torch.hub.load` may download `snakers4/silero-vad` into the PyTorch Hub cache (e.g. `%USERPROFILE%\.cache\torch\hub\` on Windows). Later runs usually use the cache. Air-gapped setups need a local cache or JIT weights instead of first-time download.
+- **Limitations**: VAD can still mis-trigger on music, speech-like noise, or singing; tune `vad_threshold`, `min_speech_duration_ms`, etc.
+
+Quick try:
+
+```bash
+pip install -r requirements.txt
+python FFmpegAudioActivityDetector.py
+```
+
 ## Next Likely Backend Work
 
 - real trim operations on the backend session model
