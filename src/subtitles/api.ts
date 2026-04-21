@@ -144,7 +144,9 @@ function normalizeEditorSegments(
   return segments
     .map((segment, index) => ({
       id: Number(segment.id ?? index + 1),
-      label: segment.label?.trim() || `Clip ${index + 1}`,
+      label:
+        segment.label?.trim().replace(/^Clip\s+\d+$/i, `Chapter ${index + 1}`) ||
+        `Chapter ${index + 1}`,
       start: Number(segment.start ?? 0),
       end: Number(segment.end ?? 0),
     }))

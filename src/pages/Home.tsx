@@ -9,6 +9,7 @@
 import {
   Bell,
   BookOpen,
+  Brush,
   Clapperboard,
   Files,
   FolderArchive,
@@ -122,7 +123,7 @@ type ExportKind = 'clip' | 'video'
 type AppendStatus = 'idle' | 'processing'
 type SubtitleTimingField = 'start' | 'end'
 type SubtitleEntryStatus = 'idle' | 'uploading' | 'generating' | 'success'
-type RightPanelView = 'ai' | 'silence' | 'subtitles' | 'scenes' | 'cut'
+type RightPanelView = 'ai' | 'silence' | 'subtitles' | 'chapters' | 'clean'
 type CutHandle = 'start' | 'end'
 
 const CUT_RANGE_MIN_GAP = 0.1
@@ -343,7 +344,7 @@ function ToolbarButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`group relative flex flex-col items-center gap-0.5 rounded-lg px-2.5 py-1.5 transition disabled:cursor-not-allowed disabled:opacity-40 ${styles}`}
+      className={`group relative flex flex-col items-center gap-0.5 overflow-visible rounded-lg px-2.5 py-1.5 transition disabled:cursor-not-allowed disabled:opacity-40 ${styles}`}
     >
       <Icon className="h-3.5 w-3.5" />
       <span className="text-[8px] font-bold uppercase tracking-[0.18em]">
@@ -351,7 +352,7 @@ function ToolbarButton({
       </span>
       {guidedMode && (
         <div
-          className={`pointer-events-none absolute -top-[102px] left-1/2 z-20 hidden w-44 -translate-x-1/2 rounded-2xl border p-3 text-left shadow-xl group-hover:block ${
+          className={`pointer-events-none absolute left-1/2 top-full z-[120] mt-2 hidden w-44 -translate-x-1/2 rounded-2xl border p-3 text-left shadow-xl group-hover:block ${
             isDark
               ? 'border-[#31415a] bg-[#111827]'
               : 'border-[#d4dcff] bg-white'
@@ -667,7 +668,35 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
 
 function createInitialSegments(duration: number): ClipSegment[] {
   const safeDuration = Math.max(1, duration || 180)
-  return [{ id: 1, label: 'Clip 1', start: 0, end: safeDuration }]
+  return [{ id: 1, label: 'Chapter 1', start: 0, end: safeDuration }]
+}
+
+function getDefaultChapterLabel(index: number): string {
+  return `Chapter ${index + 1}`
+}
+
+function normalizeSegmentLabel(label: string | null | undefined, index: number): string {
+  const trimmed = label?.trim()
+  if (!trimmed) {
+    return getDefaultChapterLabel(index)
+  }
+
+  if (
+    /^clip\s+\d+$/i.test(trimmed) ||
+    /^chapter\s+\d+$/i.test(trimmed) ||
+    /^full video$/i.test(trimmed)
+  ) {
+    return getDefaultChapterLabel(index)
+  }
+
+  return trimmed
+}
+
+function relabelSegmentsForChapters(segments: ClipSegment[]): ClipSegment[] {
+  return segments.map((segment, index) => ({
+    ...segment,
+    label: normalizeSegmentLabel(segment.label, index),
+  }))
 }
 
 function isTimelineUnedited(
@@ -808,7 +837,7 @@ function cutSegmentsToEditedRange(
 
       nextSegments.push({
         id: nextSegments.length + 1,
-        label: `Clip ${nextSegments.length + 1}`,
+        label: getDefaultChapterLabel(nextSegments.length),
         start: sourceStart,
         end: sourceEnd,
       })
@@ -894,8 +923,11 @@ export default function HomePage(): JSX.Element {
   const [subtitleTimingDrafts, setSubtitleTimingDrafts] = useState<
     Record<string, string>
   >({})
+  const [chapterNameDrafts, setChapterNameDrafts] = useState<Record<number, string>>({})
   const [sceneStatus, setSceneStatus] = useState<'idle' | 'pending'>('idle')
-  const [segments, setSegments] = useState<ClipSegment[]>(createInitialSegments(180))
+  const [segments, setSegments] = useState<ClipSegment[]>(
+    relabelSegmentsForChapters(createInitialSegments(180)),
+  )
   const [selectedId, setSelectedId] = useState<number | null>(1)
   const [selectedSegmentIds, setSelectedSegmentIds] = useState<number[]>([1])
   const [editorSessionId, setEditorSessionId] = useState<string | null>(null)
@@ -922,7 +954,7 @@ export default function HomePage(): JSX.Element {
   const timelineTrackRef = useRef<HTMLDivElement | null>(null)
   const subtitleUploadInputRef = useRef<HTMLInputElement | null>(null)
   const appendVideoInputRef = useRef<HTMLInputElement | null>(null)
-  const previousWorkspaceViewRef = useRef<Exclude<RightPanelView, 'cut'>>('ai')
+  const previousWorkspaceViewRef = useRef<Exclude<RightPanelView, 'clean'>>('ai')
 
   const applyClipSelection = (
     nextSegments: ClipSegment[],
@@ -959,7 +991,9 @@ export default function HomePage(): JSX.Element {
   useEffect(() => {
     if (!videoDuration || videoDuration <= 0) return
     if (editorSessionId) return
-    const initialSegments = createInitialSegments(videoDuration)
+    const initialSegments = relabelSegmentsForChapters(
+      createInitialSegments(videoDuration),
+    )
     setSegments(initialSegments)
     setSelectedId(initialSegments[0]?.id ?? null)
     setSelectedSegmentIds(initialSegments[0] ? [initialSegments[0].id] : [])
@@ -1216,6 +1250,7 @@ export default function HomePage(): JSX.Element {
     setSubtitleStatus('idle')
     setSubtitleError(null)
     setSubtitleTimingDrafts({})
+    setChapterNameDrafts({})
     setSilenceStatus('idle')
     setSilenceError(null)
     setSilenceSegments([])
@@ -1238,9 +1273,9 @@ export default function HomePage(): JSX.Element {
 
     const previous = history[history.length - 1]
     setHistory((prev) => prev.slice(0, -1))
-    setSegments(previous.segments)
+    setSegments(relabelSegmentsForChapters(previous.segments))
     applyClipSelection(
-      previous.segments,
+      relabelSegmentsForChapters(previous.segments),
       previous.selectedIds,
       previous.selectedId,
     )
@@ -1255,9 +1290,10 @@ export default function HomePage(): JSX.Element {
         previous.segments,
         previous.selectedId,
       )
-      setSegments(session.segments)
+      const nextSegments = relabelSegmentsForChapters(session.segments)
+      setSegments(nextSegments)
       applyClipSelection(
-        session.segments,
+        nextSegments,
         session.selectedSegmentId != null
           ? [session.selectedSegmentId]
           : previous.selectedIds,
@@ -1331,26 +1367,29 @@ export default function HomePage(): JSX.Element {
     seekEditedTimelineToTime(ratio * editedDuration)
   }
 
-  const handleOpenCutPanel = () => {
-    if (rightPanelView !== 'cut') {
+  const handleOpenCleanPanel = () => {
+    if (rightPanelView !== 'clean') {
       previousWorkspaceViewRef.current = rightPanelView
     }
-    setRightPanelView('cut')
-    setIsCutModeEnabled(true)
+    setRightPanelView('clean')
+    setIsCutModeEnabled(false)
+    setActiveCutHandle(null)
     setIsRightPanelCollapsed(false)
     setEditorError(null)
     setCutRange(normalizedCutRange)
   }
 
-  const handleToggleCutMode = () => {
-    if (isCutModeEnabled) {
-      setIsCutModeEnabled(false)
-      setActiveCutHandle(null)
-      setRightPanelView(previousWorkspaceViewRef.current)
-      return
+  const handleActivateCutMode = () => {
+    if (rightPanelView !== 'clean') {
+      previousWorkspaceViewRef.current = rightPanelView
+      setRightPanelView('clean')
     }
 
-    handleOpenCutPanel()
+    setIsRightPanelCollapsed(false)
+    setEditorError(null)
+    setCutRange(normalizedCutRange)
+    setIsCutModeEnabled(true)
+    setActiveCutHandle(null)
   }
 
   const handleGenerateSubtitles = async (): Promise<boolean> => {
@@ -1505,9 +1544,9 @@ export default function HomePage(): JSX.Element {
     setSubtitleError(null)
   }
 
-  const handleOpenScenesPanel = () => {
-    previousWorkspaceViewRef.current = 'scenes'
-    setRightPanelView('scenes')
+  const handleOpenChaptersPanel = () => {
+    previousWorkspaceViewRef.current = 'chapters'
+    setRightPanelView('chapters')
     setIsCutModeEnabled(false)
     setActiveCutHandle(null)
     setIsRightPanelCollapsed(false)
@@ -1558,10 +1597,11 @@ export default function HomePage(): JSX.Element {
         selectedSilences,
       )
 
+      const nextSegments = relabelSegmentsForChapters(nextSession.segments)
       setHistory((prev) => [...prev.slice(-29), previousState])
-      setSegments(nextSession.segments)
+      setSegments(nextSegments)
       applyClipSelection(
-        nextSession.segments,
+        nextSegments,
         nextSession.selectedSegmentId != null
           ? [nextSession.selectedSegmentId]
           : [],
@@ -1569,6 +1609,7 @@ export default function HomePage(): JSX.Element {
       )
       setEditorStatus('ready')
       setEditorError(null)
+      setChapterNameDrafts({})
       setSilenceError(null)
       setSilenceSegments(remainingSilences)
       setSelectedSilenceSegmentKeys([])
@@ -1667,10 +1708,11 @@ export default function HomePage(): JSX.Element {
       )
 
       setHistory((prev) => [...prev.slice(-29), previousState])
+      const nextSegments = relabelSegmentsForChapters(nextSession.segments)
       setEditorError(null)
-      setSegments(nextSession.segments)
+      setSegments(nextSegments)
       applyClipSelection(
-        nextSession.segments,
+        nextSegments,
         nextSession.selectedSegmentId != null
           ? [nextSession.selectedSegmentId]
           : [],
@@ -1678,16 +1720,19 @@ export default function HomePage(): JSX.Element {
       )
       setCutRange({
         start: 0,
-        end: nextSession.segments.reduce(
+        end: nextSegments.reduce(
           (sum, segment) => sum + (segment.end - segment.start),
           0,
         ),
       })
 
-      const nextSeekTime = nextSession.segments[0]?.start ?? 0
+      const nextSeekTime = nextSegments[0]?.start ?? 0
       videoPreviewRef.current?.seekTo(nextSeekTime)
       setCurrentTime(nextSeekTime)
       setEditorStatus('ready')
+      setChapterNameDrafts({})
+      setIsCutModeEnabled(false)
+      setActiveCutHandle(null)
     } catch (error) {
       setEditorStatus('error')
       setEditorError(
@@ -1718,16 +1763,21 @@ export default function HomePage(): JSX.Element {
     try {
       setEditorStatus('syncing')
       const session = await createEditorSessionFromVideo(videoFile)
+      const nextSegments = relabelSegmentsForChapters(session.segments)
       setEditorSessionId(session.sessionId)
-      setSegments(session.segments)
+      setSegments(nextSegments)
       applyClipSelection(
-        session.segments,
+        nextSegments,
         session.selectedSegmentId != null ? [session.selectedSegmentId] : [],
-        session.selectedSegmentId ?? session.segments[0]?.id ?? null,
+        session.selectedSegmentId ?? nextSegments[0]?.id ?? null,
       )
       setEditorStatus('ready')
       setEditorError(null)
-      return session
+      setChapterNameDrafts({})
+      return {
+        ...session,
+        segments: nextSegments,
+      }
     } catch (error) {
       setEditorStatus('error')
       setEditorError(
@@ -1763,26 +1813,28 @@ export default function HomePage(): JSX.Element {
         playhead,
       )
 
+      const nextSegments = relabelSegmentsForChapters(nextSession.segments)
       setHistory((prev) => [...prev.slice(-29), previousState])
-      setSegments(nextSession.segments)
+      setSegments(nextSegments)
       applyClipSelection(
-        nextSession.segments,
+        nextSegments,
         nextSession.selectedSegmentId != null
           ? [nextSession.selectedSegmentId]
           : [],
         nextSession.selectedSegmentId ??
-          nextSession.segments[0]?.id ??
+          nextSegments[0]?.id ??
           selectedSegment.id,
       )
       setEditorStatus('ready')
       setEditorError(null)
+      setChapterNameDrafts({})
       handleSeek(playhead)
     } catch (error) {
       setEditorStatus('error')
       setEditorError(
         error instanceof Error
           ? error.message
-          : 'Could not split the selected clip.',
+          : 'Could not split the selected chapter.',
       )
     }
   }
@@ -1845,19 +1897,20 @@ export default function HomePage(): JSX.Element {
         subtitleSegments.length > 0
           ? remapSubtitlesToEditedTimeline(subtitleSegments, session.segments)
           : []
+      const nextSegments = relabelSegmentsForChapters(nextSession.segments)
       const nextSelectedSegment =
         (nextSession.selectedSegmentId != null
-          ? nextSession.segments.find(
+          ? nextSegments.find(
               (segment) => segment.id === nextSession.selectedSegmentId,
             ) ?? null
-          : null) ?? nextSession.segments[0] ?? null
+          : null) ?? nextSegments[0] ?? null
 
       setSelectedVideoFile(mergedSourceFile)
       setVideoSourceUrl(mergedSourceUrl)
       setVideoDuration(nextSession.duration)
-      setSegments(nextSession.segments)
+      setSegments(nextSegments)
       applyClipSelection(
-        nextSession.segments,
+        nextSegments,
         nextSelectedSegment ? [nextSelectedSegment.id] : [],
         nextSelectedSegment?.id ?? null,
       )
@@ -1877,12 +1930,13 @@ export default function HomePage(): JSX.Element {
         setSubtitleSegments(remappedSubtitles)
         setSubtitleTimingDrafts({})
       }
+      setChapterNameDrafts({})
     } catch (error) {
       setEditorStatus('error')
       setEditorError(
         error instanceof Error
           ? error.message
-          : 'Could not merge the selected clips.',
+          : 'Could not merge the selected chapters.',
       )
     }
   }
@@ -1903,7 +1957,12 @@ export default function HomePage(): JSX.Element {
       const nextIndex = Math.min(index, filtered.length - 1)
       const nextSegment = filtered[nextIndex]
       nextSelection = nextSegment.id
-      return filtered
+      return relabelSegmentsForChapters(filtered)
+    })
+    setChapterNameDrafts((prev) => {
+      const next = { ...prev }
+      delete next[selectedSegment.id]
+      return next
     })
 
     if (nextSelection != null) {
@@ -2047,6 +2106,45 @@ export default function HomePage(): JSX.Element {
     }))
   }
 
+  const getChapterNameDraft = (segment: ClipSegment, index: number): string =>
+    chapterNameDrafts[segment.id] ?? normalizeSegmentLabel(segment.label, index)
+
+  const handleChapterNameDraftChange = (segmentId: number, value: string) => {
+    setChapterNameDrafts((prev) => ({
+      ...prev,
+      [segmentId]: value,
+    }))
+  }
+
+  const handleChapterNameDraftCommit = (segment: ClipSegment, index: number) => {
+    const draft = chapterNameDrafts[segment.id]
+    if (draft == null) {
+      return
+    }
+
+    const nextLabel = draft.trim() || getDefaultChapterLabel(index)
+    if (nextLabel === segment.label) {
+      setChapterNameDrafts((prev) => {
+        const next = { ...prev }
+        delete next[segment.id]
+        return next
+      })
+      return
+    }
+
+    pushHistory()
+    setSegments((prev) =>
+      prev.map((current) =>
+        current.id === segment.id ? { ...current, label: nextLabel } : current,
+      ),
+    )
+    setChapterNameDrafts((prev) => {
+      const next = { ...prev }
+      delete next[segment.id]
+      return next
+    })
+  }
+
   const handleExportSubtitle = (format: 'srt' | 'vtt') => {
     if (subtitleSegments.length === 0) return
 
@@ -2091,8 +2189,8 @@ export default function HomePage(): JSX.Element {
     if (!selectedSegment || !hasSingleSelectedSegment) {
       setExportError(
         selectedSegments.length > 1
-          ? 'Select a single clip before exporting it.'
-          : 'Select a clip in the timeline before exporting it.',
+          ? 'Select a single chapter before exporting it.'
+          : 'Select a chapter in the timeline before exporting it.',
       )
       return
     }
@@ -2112,7 +2210,7 @@ export default function HomePage(): JSX.Element {
       )
       const rendered = await exportEditorSessionVideo(syncedSession.sessionId, {
         segments: [selectedSegment],
-        fileNameSuffix: selectedSegment.label || 'clip',
+        fileNameSuffix: selectedSegment.label || 'chapter',
       })
       downloadRenderedVideo(rendered)
       setExportStatus('idle')
@@ -2123,7 +2221,7 @@ export default function HomePage(): JSX.Element {
       setExportError(
         error instanceof Error
           ? error.message
-          : 'Could not export the selected clip.',
+          : 'Could not export the selected chapter.',
       )
     }
   }
@@ -2204,19 +2302,21 @@ export default function HomePage(): JSX.Element {
         end: Math.max(CUT_RANGE_MIN_GAP, nextSession.duration),
       })
       setCurrentTime(0)
-      setSegments(nextSession.segments)
+      const nextSegments = relabelSegmentsForChapters(nextSession.segments)
+      setSegments(nextSegments)
       applyClipSelection(
-        nextSession.segments,
+        nextSegments,
         nextSession.selectedSegmentId != null
           ? [nextSession.selectedSegmentId]
-          : nextSession.segments.at(-1)?.id != null
-            ? [nextSession.segments.at(-1)!.id]
+          : nextSegments.at(-1)?.id != null
+            ? [nextSegments.at(-1)!.id]
             : [],
         nextSession.selectedSegmentId ??
-          nextSession.segments.at(-1)?.id ??
+          nextSegments.at(-1)?.id ??
           selectedId,
       )
       setEditorSessionId(nextSession.sessionId)
+      setChapterNameDrafts({})
       setEditorStatus('ready')
       setIsPlaying(false)
       setHistory([])
@@ -2230,7 +2330,7 @@ export default function HomePage(): JSX.Element {
       setSelectedSilenceSegmentKeys([])
       setStagedSilenceSegmentKeys([])
       setSilenceNotice(
-        `${file.name} was added to the end of the current timeline. Regenerate subtitles or silence detection if you want those tools to include the new clip.`,
+        `${file.name} was added to the end of the current timeline. Regenerate subtitles or silence detection if you want those tools to include the new section.`,
       )
       previousWorkspaceViewRef.current = 'ai'
       setRightPanelView('ai')
@@ -2434,10 +2534,10 @@ export default function HomePage(): JSX.Element {
     [editedDuration],
   )
   const exportDialogTitle =
-    activeExportKind === 'clip' ? 'Rendering Clip' : 'Rendering Video'
+    activeExportKind === 'clip' ? 'Rendering Chapter' : 'Rendering Video'
   const exportDialogDescription =
     activeExportKind === 'clip'
-      ? 'VidVersity is processing the selected timeline clip. Your download will start automatically when the render finishes.'
+      ? 'VidVersity is processing the selected chapter. Your download will start automatically when the render finishes.'
       : 'VidVersity is merging your current timeline into a continuous video. Your download will start automatically when the render finishes.'
 
   return (
@@ -2566,7 +2666,7 @@ export default function HomePage(): JSX.Element {
       </header>
 
       <div
-        className={`grid h-[calc(100vh-68px)] grid-cols-1 overflow-hidden ${
+        className={`grid h-[calc(100vh-68px)] grid-cols-1 overflow-visible ${
           isRightPanelCollapsed
             ? 'xl:grid-cols-[248px_minmax(0,1fr)_72px]'
             : 'xl:grid-cols-[248px_minmax(0,1fr)_340px]'
@@ -2588,7 +2688,7 @@ export default function HomePage(): JSX.Element {
         />
 
         <aside
-          className={`hidden min-h-0 overflow-hidden border-r px-4 py-4 xl:flex xl:flex-col xl:justify-between ${
+          className={`hidden min-h-0 overflow-visible border-r px-4 py-4 xl:flex xl:flex-col xl:justify-between ${
             isDark
               ? 'border-[#243149] bg-[#121a2b]'
               : 'border-[#d9dde5] bg-[#f2f4f6]'
@@ -2737,8 +2837,8 @@ export default function HomePage(): JSX.Element {
             >
               <Video className="h-4 w-4" />
               {exportStatus === 'processing' && activeExportKind === 'clip'
-                ? 'Rendering Clip...'
-                : 'Export Clip'}
+                ? 'Rendering Chapter...'
+                : 'Export Chapter'}
             </button>
             <button
               type="button"
@@ -2766,7 +2866,7 @@ export default function HomePage(): JSX.Element {
         >
           <div className="mx-auto flex min-h-full w-full max-w-[1120px] flex-col px-3 py-3 xl:px-4 xl:py-4">
             <div
-              className={`flex min-h-0 flex-1 flex-col overflow-hidden rounded-[32px] border shadow-[0_20px_60px_rgba(15,23,42,0.08)] ${
+              className={`flex min-h-0 flex-1 flex-col overflow-visible rounded-[32px] border shadow-[0_20px_60px_rgba(15,23,42,0.08)] ${
                 isDark
                   ? 'border-[#243149] bg-[#111827]'
                   : 'border-[#d9dde5] bg-white'
@@ -2903,46 +3003,14 @@ export default function HomePage(): JSX.Element {
 
                     <div className="flex flex-wrap items-center justify-center gap-1.5">
                       <ToolbarButton
-                        label="Cut"
-                        tooltip="Open cut mode to keep only the region between two timeline playheads."
+                        label="Clean"
+                        tooltip="Open cleaning tools to keep a range, split at the playhead, or delete a selected section."
                         guidedMode={guidedMode}
                         isDark={isDark}
-                        onClick={handleToggleCutMode}
-                        icon={Scissors}
-                        active={isCutModeEnabled}
+                        onClick={handleOpenCleanPanel}
+                        icon={Brush}
+                        active={rightPanelView === 'clean'}
                         tone="editor"
-                      />
-                      <ToolbarButton
-                        label="Split"
-                        tooltip="Split the selected clip at the playhead."
-                        guidedMode={guidedMode}
-                        isDark={isDark}
-                        onClick={handleSplitAtPlayhead}
-                        icon={Split}
-                        disabled={!selectedSegment || !hasSingleSelectedSegment}
-                        tone="editor"
-                      />
-                      <ToolbarButton
-                        label="Merge"
-                        tooltip="Merge the selected clips into a single clip."
-                        guidedMode={guidedMode}
-                        isDark={isDark}
-                        onClick={() => {
-                          void handleMergeSelectedClips()
-                        }}
-                        icon={Clapperboard}
-                        disabled={!canMergeSelectedSegments}
-                        tone="editor"
-                      />
-                      <ToolbarButton
-                        label="Delete"
-                        tooltip="Delete the selected clip from the timeline."
-                        guidedMode={guidedMode}
-                        isDark={isDark}
-                        onClick={handleDeleteSelectedClip}
-                        icon={Trash2}
-                        disabled={!selectedSegment || !hasSingleSelectedSegment}
-                        danger
                       />
                       <div className="mx-1 h-8 w-px rounded-full bg-[#d9dde5] dark:bg-[#31415a]" />
                       <ToolbarButton
@@ -2985,11 +3053,11 @@ export default function HomePage(): JSX.Element {
                         tone="workspace"
                       />
                       <ToolbarButton
-                        label="Scenes"
-                        tooltip="Review scene changes and split points."
+                        label="Chapters"
+                        tooltip="Split the video into chapters and rename each chapter."
                         guidedMode={guidedMode}
                         isDark={isDark}
-                        onClick={handleOpenScenesPanel}
+                        onClick={handleOpenChaptersPanel}
                         icon={Clapperboard}
                         tone="workspace"
                       />
@@ -3321,7 +3389,7 @@ export default function HomePage(): JSX.Element {
                             }`}
                           >
                             <span>
-                              {segments.length} clip{segments.length === 1 ? '' : 's'}
+                              {segments.length} chapter{segments.length === 1 ? '' : 's'}
                               {selectedSegments.length > 1
                                 ? ` · ${selectedSegments.length} selected`
                                 : ''}
@@ -3364,7 +3432,7 @@ export default function HomePage(): JSX.Element {
         </main>
 
         <aside
-          className={`hidden min-h-0 overflow-hidden border-l px-4 py-4 xl:flex xl:flex-col ${
+          className={`hidden min-h-0 overflow-visible border-l px-4 py-4 xl:flex xl:flex-col ${
             isDark
               ? 'border-[#243149] bg-[#121a2b]'
               : 'border-[#d9dde5] bg-white'
@@ -3373,11 +3441,11 @@ export default function HomePage(): JSX.Element {
           <div className="mb-3 flex items-center justify-between gap-2">
             {!isRightPanelCollapsed ? (
               <div className="flex items-center gap-2">
-                {rightPanelView === 'cut' ? (
-                  <Scissors className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
+                {rightPanelView === 'clean' ? (
+                  <Brush className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
                 ) : rightPanelView === 'silence' ? (
                   <Mic className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
-                ) : rightPanelView === 'scenes' ? (
+                ) : rightPanelView === 'chapters' ? (
                   <Clapperboard className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
                 ) : rightPanelView === 'subtitles' ? (
                   <Subtitles className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
@@ -3389,12 +3457,12 @@ export default function HomePage(): JSX.Element {
                     isDark ? 'text-[#c6d3eb]' : 'text-[#515f74]'
                   }`}
                 >
-                  {rightPanelView === 'cut'
-                    ? 'Cut Workspace'
+                  {rightPanelView === 'clean'
+                    ? 'Clean'
                     : rightPanelView === 'silence'
                     ? 'Silence Review'
-                    : rightPanelView === 'scenes'
-                      ? 'Scene Review'
+                    : rightPanelView === 'chapters'
+                      ? 'Chapters'
                     : rightPanelView === 'subtitles'
                       ? 'Subtitles'
                       : 'AI Workspace'}
@@ -3432,24 +3500,24 @@ export default function HomePage(): JSX.Element {
                     isDark ? 'text-[#8fa2c2]' : 'text-[#737686]'
                   }`}
                 >
-                  {rightPanelView === 'cut'
-                    ? 'Cut Workspace'
+                  {rightPanelView === 'clean'
+                    ? 'Clean'
                     : rightPanelView === 'silence'
                     ? 'Silence Review'
-                    : rightPanelView === 'scenes'
-                      ? 'Scene Review'
+                    : rightPanelView === 'chapters'
+                      ? 'Chapters'
                     : rightPanelView === 'subtitles'
                       ? 'Subtitles'
                       : 'AI Workspace'}
                 </span>
               </div>
               <div className="space-y-2">
-                {(rightPanelView === 'cut'
-                  ? ['Cut', 'Keep', 'Range']
+                {(rightPanelView === 'clean'
+                  ? ['Clean', 'Cut', 'Delete']
                   : rightPanelView === 'silence'
                   ? ['Silence', 'Review', 'Timeline']
-                  : rightPanelView === 'scenes'
-                    ? ['Scenes', 'Review', 'Split']
+                  : rightPanelView === 'chapters'
+                    ? ['Chapters', 'Rename', 'Split']
                   : rightPanelView === 'subtitles'
                     ? ['Subtitles', 'Review', 'Export']
                   : ['Chapters', 'Trim', 'Captions']
@@ -3475,8 +3543,8 @@ export default function HomePage(): JSX.Element {
                   : 'border-[#d9dde5] bg-[linear-gradient(180deg,#ffffff_0%,#f7f9fb_100%)]'
               }`}
             >
-                {rightPanelView === 'cut' ? (
-                  <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                {rightPanelView === 'clean' ? (
+                  <div className="flex min-h-0 flex-1 flex-col overflow-visible">
                     <div
                       className={`mb-4 rounded-2xl border p-2 ${
                         isDark
@@ -3484,16 +3552,35 @@ export default function HomePage(): JSX.Element {
                           : 'border-[#e3e7ee] bg-[#fbfcfd]'
                       }`}
                     >
-                      <button
-                        type="button"
-                        onClick={() => {
-                          void handleCutVideo()
-                        }}
-                        disabled={segments.length === 0 || editedDuration <= CUT_RANGE_MIN_GAP}
-                        className="flex h-9 w-full items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        Cut Video
-                      </button>
+                      <div className="grid grid-cols-2 gap-2">
+                        <ToolbarButton
+                          label="Cut"
+                          tooltip="Activate cut mode so you can drag the pink range handles on the timeline."
+                          guidedMode
+                          isDark={isDark}
+                          onClick={handleActivateCutMode}
+                          icon={Scissors}
+                          disabled={segments.length === 0 || editedDuration <= CUT_RANGE_MIN_GAP}
+                          active={isCutModeEnabled}
+                          tone="workspace"
+                        />
+                        <ToolbarButton
+                          label="Apply Cut"
+                          tooltip="Apply the selected cut range and remove everything outside it from the edit."
+                          guidedMode
+                          isDark={isDark}
+                          onClick={() => {
+                            void handleCutVideo()
+                          }}
+                          icon={Scissors}
+                          disabled={
+                            !isCutModeEnabled ||
+                            segments.length === 0 ||
+                            editedDuration <= CUT_RANGE_MIN_GAP
+                          }
+                          tone="workspace"
+                        />
+                      </div>
                     </div>
 
                     <div
@@ -3503,9 +3590,9 @@ export default function HomePage(): JSX.Element {
                           : 'border-[#e3e7ee] bg-[#fbfcfd] text-[#57657a]'
                       }`}
                     >
-                      Drag the two playheads on the timeline to keep only the section
-                      between them. Everything outside that range will be removed from
-                      the edit.
+                      {isCutModeEnabled
+                        ? 'Cut mode is active. Drag the two pink range handles on the timeline to keep one continuous section. Everything outside that range will be removed from the edit.'
+                        : 'Choose Cut to activate the pink range handles on the timeline, then keep the section you want to preserve.'}
                     </div>
 
                     <div className="grid grid-cols-2 gap-3">
@@ -3563,13 +3650,77 @@ export default function HomePage(): JSX.Element {
                           : 'border-[#c3c5d7] bg-[#fbfcfd] text-[#737686]'
                       }`}
                     >
-                      Remaining edited length:{' '}
+                      Remaining cleaned length:{' '}
                       {formatEditableTimestamp(
                         Math.max(
                           CUT_RANGE_MIN_GAP,
                           normalizedCutRange.end - normalizedCutRange.start,
                         ),
                       )}
+                    </div>
+
+                    <div
+                      className={`mt-4 rounded-2xl border px-4 py-3 ${
+                        isDark
+                          ? 'border-[#243149] bg-[#111827]'
+                          : 'border-[#e3e7ee] bg-[#fbfcfd]'
+                      }`}
+                    >
+                      <div className="mb-3">
+                        <p
+                          className={`text-[10px] font-bold uppercase tracking-[0.16em] ${
+                            isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
+                          }`}
+                        >
+                          Remove From The Middle
+                        </p>
+                        <p
+                          className={`mt-2 text-[12px] leading-5 ${
+                            isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'
+                          }`}
+                        >
+                          Split at the start and end of the unwanted part, then
+                          delete the selected section from the timeline.
+                        </p>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-2">
+                        <ToolbarButton
+                          label="Split"
+                          tooltip="Split the selected chapter at the playhead."
+                          guidedMode
+                          isDark={isDark}
+                          onClick={() => {
+                            void handleSplitAtPlayhead()
+                          }}
+                          icon={Split}
+                          disabled={!selectedSegment || !hasSingleSelectedSegment}
+                          tone="workspace"
+                        />
+                        <ToolbarButton
+                          label="Merge"
+                          tooltip="Merge works when two or more adjacent chapters are selected on the timeline. Use Shift-click for a range, or Cmd/Ctrl-click to add chapters to the selection."
+                          guidedMode
+                          isDark={isDark}
+                          onClick={() => {
+                            void handleMergeSelectedClips()
+                          }}
+                          icon={Clapperboard}
+                          disabled={!canMergeSelectedSegments}
+                          tone="workspace"
+                        />
+                        <ToolbarButton
+                          label="Delete"
+                          tooltip="Delete the selected chapter from the timeline."
+                          guidedMode
+                          isDark={isDark}
+                          onClick={handleDeleteSelectedClip}
+                          icon={Trash2}
+                          disabled={!selectedSegment || !hasSingleSelectedSegment}
+                          danger
+                          tone="workspace"
+                        />
+                      </div>
                     </div>
                   </div>
                 ) : rightPanelView === 'silence' ? (
@@ -3582,42 +3733,51 @@ export default function HomePage(): JSX.Element {
                     }`}
                   >
                     <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
+                      <ToolbarButton
+                        label="Detect"
+                        tooltip="Run silence detection again on the current video or edit."
+                        guidedMode={guidedMode}
+                        isDark={isDark}
                         onClick={() => {
                           void handleRemoveSilence()
                         }}
+                        icon={Mic}
                         disabled={silenceStatus === 'processing'}
-                        className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        Detect Again
-                      </button>
-                      <button
-                        type="button"
+                        tone="workspace"
+                      />
+                      <ToolbarButton
+                        label="Select All"
+                        tooltip="Select every detected silence range in the list."
+                        guidedMode={guidedMode}
+                        isDark={isDark}
                         onClick={handleSelectAllSilences}
+                        icon={Files}
                         disabled={silenceReviewItems.length === 0}
-                        className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        Select All
-                      </button>
-                      <button
-                        type="button"
+                        tone="workspace"
+                      />
+                      <ToolbarButton
+                        label="Clear"
+                        tooltip="Clear the current silence selection."
+                        guidedMode={guidedMode}
+                        isDark={isDark}
                         onClick={handleClearSelectedSilences}
+                        icon={RotateCcw}
                         disabled={selectedSilenceSegmentKeys.length === 0}
-                        className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        Clear
-                      </button>
-                      <button
-                        type="button"
+                        tone="workspace"
+                      />
+                      <ToolbarButton
+                        label="Delete"
+                        tooltip="Delete all selected silence ranges from the current edit."
+                        guidedMode={guidedMode}
+                        isDark={isDark}
                         onClick={() => {
                           void handleDeleteSelectedSilences()
                         }}
+                        icon={Trash2}
                         disabled={selectedSilenceSegmentKeys.length === 0}
-                        className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        Delete
-                      </button>
+                        danger
+                        tone="workspace"
+                      />
                     </div>
                   </div>
 
@@ -3760,8 +3920,8 @@ export default function HomePage(): JSX.Element {
                     )}
                   </div>
                 </div>
-              ) : rightPanelView === 'scenes' ? (
-                <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                ) : rightPanelView === 'chapters' ? (
+                  <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
                   <div
                     className={`mb-4 rounded-2xl border p-2 ${
                       isDark
@@ -3770,34 +3930,30 @@ export default function HomePage(): JSX.Element {
                     }`}
                   >
                     <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={handleOpenScenesPanel}
-                        className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition"
-                      >
-                        Detect Scenes
-                      </button>
-                      <button
-                        type="button"
-                        disabled
-                        className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        Add Scene
-                      </button>
-                      <button
-                        type="button"
-                        disabled
-                        className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        Edit Scenes
-                      </button>
-                      <button
-                        type="button"
-                        disabled
-                        className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        Implement
-                      </button>
+                      <ToolbarButton
+                        label="Split"
+                        tooltip="Split the selected chapter at the playhead."
+                        guidedMode={guidedMode}
+                        isDark={isDark}
+                        onClick={() => {
+                          void handleSplitAtPlayhead()
+                        }}
+                        icon={Split}
+                        disabled={!selectedSegment || !hasSingleSelectedSegment}
+                        tone="workspace"
+                      />
+                      <ToolbarButton
+                        label="Merge"
+                        tooltip="Merge the selected adjacent chapters into one chapter."
+                        guidedMode={guidedMode}
+                        isDark={isDark}
+                        onClick={() => {
+                          void handleMergeSelectedClips()
+                        }}
+                        icon={Clapperboard}
+                        disabled={!canMergeSelectedSegments}
+                        tone="workspace"
+                      />
                     </div>
                   </div>
 
@@ -3810,46 +3966,140 @@ export default function HomePage(): JSX.Element {
                       }`}
                     >
                       {sceneStatus === 'pending'
-                        ? 'Scene review UI is ready. Once backend detection is implemented, detected scene timestamps will appear here for review, editing, and split actions.'
-                        : 'Open Detect scenes to start reviewing scene boundaries.'}
+                        ? 'Split the full video into chapters, rename them, and jump to any chapter from this panel.'
+                        : 'Open Chapters to organize the video into named sections.'}
                     </div>
 
-                    <div
-                      className={`rounded-2xl border border-dashed px-5 py-5 text-[12px] leading-6 ${
-                        isDark
-                          ? 'border-[#31415a] bg-[#111827] text-[#8fa2c2]'
-                          : 'border-[#c3c5d7] bg-[#fbfcfd] text-[#737686]'
-                      }`}
-                    >
-                      <p>
-                        No scene timestamps are available yet.
-                      </p>
-                      <p className="mt-3">
-                        This panel will eventually show:
-                      </p>
-                      <div className="mt-3 space-y-3">
-                        {[
-                          'Detected scene time ranges with Go to controls',
-                          'Editable scene labels and boundary timestamps',
-                          'An Implement action to split the video by scene boundaries',
-                        ].map((item) => (
-                          <div
-                            key={item}
-                            className={`rounded-2xl border px-4 py-3 ${
-                              isDark
-                                ? 'border-[#243149] bg-[#0f172a]'
-                                : 'border-[#e3e7ee] bg-white'
-                            }`}
-                          >
-                            {item}
-                          </div>
-                        ))}
+                    {segments.length === 0 ? (
+                      <div
+                        className={`rounded-2xl border border-dashed px-5 py-5 text-[12px] leading-6 ${
+                          isDark
+                            ? 'border-[#31415a] bg-[#111827] text-[#8fa2c2]'
+                            : 'border-[#c3c5d7] bg-[#fbfcfd] text-[#737686]'
+                        }`}
+                      >
+                        Upload a video to start creating chapters.
                       </div>
-                    </div>
+                    ) : (
+                      <div className="space-y-3 overflow-y-auto pr-1">
+                        {segments.map((segment, index) => {
+                          const isSelected = selectedSegmentIdSet.has(segment.id)
+                          return (
+                            <div
+                              key={segment.id}
+                              className={`rounded-2xl border p-4 shadow-sm transition ${
+                                isSelected
+                                  ? isDark
+                                    ? 'border-[#4b6388] bg-[#131f33]'
+                                    : 'border-[#7aa4ff] bg-[#f6f9ff]'
+                                  : isDark
+                                    ? 'border-[#31415a] bg-[#111827]'
+                                : 'border-[#d9dde5] bg-[#fbfcfd]'
+                              }`}
+                            >
+                              <div className="space-y-4">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span
+                                    className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.14em] ${
+                                      isDark
+                                        ? 'bg-[#1e293b] text-[#c6d3eb]'
+                                        : 'bg-[#f2f4f6] text-[#515f74]'
+                                    }`}
+                                  >
+                                    Chapter {index + 1}
+                                  </span>
+                                  <span
+                                    className={`rounded-full px-2.5 py-1 text-[10px] font-mono ${
+                                      isDark
+                                        ? 'bg-[#0f172a] text-[#9fb0ca]'
+                                        : 'bg-white text-[#57657a]'
+                                    }`}
+                                  >
+                                    {formatEditableTimestamp(segment.start)} -{' '}
+                                    {formatEditableTimestamp(segment.end)}
+                                  </span>
+                                </div>
+
+                                <label className="block">
+                                  <span
+                                    className={`mb-1.5 block text-[10px] font-bold uppercase tracking-[0.14em] ${
+                                      isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
+                                    }`}
+                                  >
+                                    Chapter Name
+                                  </span>
+                                  <input
+                                    type="text"
+                                    value={getChapterNameDraft(segment, index)}
+                                    onChange={(event) =>
+                                      handleChapterNameDraftChange(
+                                        segment.id,
+                                        event.target.value,
+                                      )
+                                    }
+                                    onBlur={() =>
+                                      handleChapterNameDraftCommit(segment, index)
+                                    }
+                                    onKeyDown={(event) => {
+                                      if (event.key === 'Enter') {
+                                        event.currentTarget.blur()
+                                      }
+                                    }}
+                                    className={`w-full rounded-2xl border px-4 py-3 text-[13px] outline-none transition ${
+                                      isDark
+                                        ? 'border-[#31415a] bg-[#0f172a] text-[#edf2ff] focus:border-[#60a5fa]'
+                                        : 'border-[#d9dde5] bg-white text-[#191c1e] focus:border-[#1a56db]'
+                                    }`}
+                                  />
+                                </label>
+
+                                <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3 ${
+                                  isDark ? 'border-[#243149]' : 'border-[#e3e7ee]'
+                                }">
+                                  <p
+                                    className={`text-[11px] ${
+                                      isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
+                                    }`}
+                                  >
+                                    {isSelected
+                                      ? 'This chapter is currently selected.'
+                                      : 'Select this chapter to edit or split it.'}
+                                  </p>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => selectSingleClip(segment.id)}
+                                      className={`rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] ${
+                                        isSelected
+                                          ? isDark
+                                            ? 'border-[#4b6388] bg-[#182238] text-[#9ec5ff]'
+                                            : 'border-[#7aa4ff] bg-[#eef3ff] text-[#003fb1]'
+                                          : isDark
+                                            ? 'border-[#31415a] text-[#c6d3eb]'
+                                            : 'border-[#d9dde5] text-[#515f74]'
+                                      }`}
+                                    >
+                                      {isSelected ? 'Selected' : 'Select'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleSeek(segment.start)}
+                                      className="rounded-full bg-[#003fb1] px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-white"
+                                    >
+                                      Go To
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
                   </div>
                 </div>
-              ) : rightPanelView === 'subtitles' ? (
-                <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                ) : rightPanelView === 'subtitles' ? (
+                  <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
                   <div
                     className={`mb-4 rounded-2xl border p-2 ${
                       isDark
@@ -3859,57 +4109,70 @@ export default function HomePage(): JSX.Element {
                   >
                     {subtitleSegments.length === 0 ? (
                       <div className="grid grid-cols-2 gap-2">
-                        <button
-                          type="button"
+                        <ToolbarButton
+                          label="Add"
+                          tooltip="Import an existing .srt or .vtt subtitle file."
+                          guidedMode={guidedMode}
+                          isDark={isDark}
                           onClick={handleSubtitleUploadClick}
+                          icon={Upload}
                           disabled={subtitleEntryStatus !== 'idle'}
-                          className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
-                        >
-                          Add Subtitles
-                        </button>
-                        <button
-                          type="button"
+                          tone="workspace"
+                        />
+                        <ToolbarButton
+                          label="Generate"
+                          tooltip="Generate subtitles from the current video."
+                          guidedMode={guidedMode}
+                          isDark={isDark}
                           onClick={() => {
                             void handleGenerateSubtitlesFromPanel()
                           }}
+                          icon={Subtitles}
                           disabled={subtitleEntryStatus !== 'idle'}
-                          className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
-                        >
-                          Generate
-                        </button>
+                          tone="workspace"
+                        />
                       </div>
                     ) : (
                       <div className="grid grid-cols-2 gap-2">
-                        <button
-                          type="button"
+                        <ToolbarButton
+                          label="Replace"
+                          tooltip="Replace the current subtitles with another subtitle file."
+                          guidedMode={guidedMode}
+                          isDark={isDark}
                           onClick={handleSubtitleUploadClick}
-                          className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition"
-                        >
-                          Replace
-                        </button>
-                        <button
-                          type="button"
+                          icon={Upload}
+                          tone="workspace"
+                        />
+                        <ToolbarButton
+                          label="Remove"
+                          tooltip="Remove all subtitles from the current edit."
+                          guidedMode={guidedMode}
+                          isDark={isDark}
                           onClick={handleRemoveSubtitles}
-                          className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition"
-                        >
-                          Remove
-                        </button>
-                        <button
-                          type="button"
+                          icon={Trash2}
+                          danger
+                          tone="workspace"
+                        />
+                        <ToolbarButton
+                          label="SRT"
+                          tooltip="Export the current subtitles as an .srt file."
+                          guidedMode={guidedMode}
+                          isDark={isDark}
                           onClick={() => handleExportSubtitle('srt')}
+                          icon={Save}
                           disabled={subtitleSegments.length === 0}
-                          className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
-                        >
-                          Export SRT
-                        </button>
-                        <button
-                          type="button"
+                          tone="workspace"
+                        />
+                        <ToolbarButton
+                          label="VTT"
+                          tooltip="Export the current subtitles as a .vtt file."
+                          guidedMode={guidedMode}
+                          isDark={isDark}
                           onClick={() => handleExportSubtitle('vtt')}
+                          icon={Save}
                           disabled={subtitleSegments.length === 0}
-                          className="flex h-9 items-center justify-center rounded-xl bg-[#003fb1] px-3 text-[9px] font-bold uppercase tracking-[0.14em] text-white transition disabled:cursor-not-allowed disabled:opacity-40"
-                        >
-                          Export VTT
-                        </button>
+                          tone="workspace"
+                        />
                       </div>
                     )}
                   </div>
@@ -4175,4 +4438,3 @@ export default function HomePage(): JSX.Element {
     </div>
   )
 }
-
