@@ -352,7 +352,7 @@ function ToolbarButton({
       </span>
       {guidedMode && (
         <div
-          className={`pointer-events-none absolute left-1/2 top-full z-[120] mt-2 hidden w-44 -translate-x-1/2 rounded-2xl border p-3 text-left shadow-xl group-hover:block ${
+          className={`pointer-events-none absolute left-1/2 top-full z-[300] mt-2 hidden w-44 -translate-x-1/2 rounded-2xl border p-3 text-left shadow-xl group-hover:block ${
             isDark
               ? 'border-[#31415a] bg-[#111827]'
               : 'border-[#d4dcff] bg-white'
@@ -696,6 +696,49 @@ function relabelSegmentsForChapters(segments: ClipSegment[]): ClipSegment[] {
   return segments.map((segment, index) => ({
     ...segment,
     label: normalizeSegmentLabel(segment.label, index),
+  }))
+}
+
+function preserveChapterLabels(
+  previousSegments: ClipSegment[],
+  nextSegments: ClipSegment[],
+): ClipSegment[] {
+  const normalizedNextSegments = relabelSegmentsForChapters(nextSegments)
+  const assignedLabels = new Map<number, string>()
+  const tolerance = 0.02
+
+  previousSegments.forEach((previousSegment, previousIndex) => {
+    const baseLabel = normalizeSegmentLabel(previousSegment.label, previousIndex)
+    const matches = normalizedNextSegments
+      .map((segment, nextIndex) => ({ segment, nextIndex }))
+      .filter(({ segment }) => {
+        const startsInside = segment.start >= previousSegment.start - tolerance
+        const endsInside = segment.end <= previousSegment.end + tolerance
+        const overlaps =
+          segment.end > previousSegment.start + tolerance &&
+          segment.start < previousSegment.end - tolerance
+
+        return startsInside && endsInside && overlaps
+      })
+      .sort((left, right) => left.segment.start - right.segment.start)
+
+    if (matches.length === 0) {
+      return
+    }
+
+    if (matches.length === 1) {
+      assignedLabels.set(matches[0].nextIndex, baseLabel)
+      return
+    }
+
+    matches.forEach(({ nextIndex }, splitIndex) => {
+      assignedLabels.set(nextIndex, `${baseLabel}_${splitIndex + 1}`)
+    })
+  })
+
+  return normalizedNextSegments.map((segment, index) => ({
+    ...segment,
+    label: assignedLabels.get(index) ?? segment.label,
   }))
 }
 
@@ -1368,6 +1411,13 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleOpenCleanPanel = () => {
+    if (rightPanelView === 'clean' && !isRightPanelCollapsed) {
+      setIsRightPanelCollapsed(true)
+      setIsCutModeEnabled(false)
+      setActiveCutHandle(null)
+      return
+    }
+
     if (rightPanelView !== 'clean') {
       previousWorkspaceViewRef.current = rightPanelView
     }
@@ -1380,6 +1430,12 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleActivateCutMode = () => {
+    if (isCutModeEnabled) {
+      setIsCutModeEnabled(false)
+      setActiveCutHandle(null)
+      return
+    }
+
     if (rightPanelView !== 'clean') {
       previousWorkspaceViewRef.current = rightPanelView
       setRightPanelView('clean')
@@ -1429,6 +1485,13 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleRemoveSilence = async () => {
+    if (rightPanelView === 'silence' && !isRightPanelCollapsed) {
+      setIsRightPanelCollapsed(true)
+      setIsCutModeEnabled(false)
+      setActiveCutHandle(null)
+      return
+    }
+
     previousWorkspaceViewRef.current = 'silence'
     setRightPanelView('silence')
     setIsCutModeEnabled(false)
@@ -1528,6 +1591,13 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleOpenAIPanel = () => {
+    if (rightPanelView === 'ai' && !isRightPanelCollapsed) {
+      setIsRightPanelCollapsed(true)
+      setIsCutModeEnabled(false)
+      setActiveCutHandle(null)
+      return
+    }
+
     previousWorkspaceViewRef.current = 'ai'
     setRightPanelView('ai')
     setIsCutModeEnabled(false)
@@ -1536,6 +1606,13 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleOpenSubtitlesPanel = () => {
+    if (rightPanelView === 'subtitles' && !isRightPanelCollapsed) {
+      setIsRightPanelCollapsed(true)
+      setIsCutModeEnabled(false)
+      setActiveCutHandle(null)
+      return
+    }
+
     previousWorkspaceViewRef.current = 'subtitles'
     setRightPanelView('subtitles')
     setIsCutModeEnabled(false)
@@ -1545,6 +1622,13 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleOpenChaptersPanel = () => {
+    if (rightPanelView === 'chapters' && !isRightPanelCollapsed) {
+      setIsRightPanelCollapsed(true)
+      setIsCutModeEnabled(false)
+      setActiveCutHandle(null)
+      return
+    }
+
     previousWorkspaceViewRef.current = 'chapters'
     setRightPanelView('chapters')
     setIsCutModeEnabled(false)
@@ -1597,7 +1681,7 @@ export default function HomePage(): JSX.Element {
         selectedSilences,
       )
 
-      const nextSegments = relabelSegmentsForChapters(nextSession.segments)
+      const nextSegments = preserveChapterLabels(segments, nextSession.segments)
       setHistory((prev) => [...prev.slice(-29), previousState])
       setSegments(nextSegments)
       applyClipSelection(
@@ -1708,7 +1792,7 @@ export default function HomePage(): JSX.Element {
       )
 
       setHistory((prev) => [...prev.slice(-29), previousState])
-      const nextSegments = relabelSegmentsForChapters(nextSession.segments)
+      const nextSegments = preserveChapterLabels(segments, nextSession.segments)
       setEditorError(null)
       setSegments(nextSegments)
       applyClipSelection(
@@ -1813,7 +1897,7 @@ export default function HomePage(): JSX.Element {
         playhead,
       )
 
-      const nextSegments = relabelSegmentsForChapters(nextSession.segments)
+      const nextSegments = preserveChapterLabels(segments, nextSession.segments)
       setHistory((prev) => [...prev.slice(-29), previousState])
       setSegments(nextSegments)
       applyClipSelection(
@@ -1897,7 +1981,7 @@ export default function HomePage(): JSX.Element {
         subtitleSegments.length > 0
           ? remapSubtitlesToEditedTimeline(subtitleSegments, session.segments)
           : []
-      const nextSegments = relabelSegmentsForChapters(nextSession.segments)
+      const nextSegments = preserveChapterLabels(segments, nextSession.segments)
       const nextSelectedSegment =
         (nextSession.selectedSegmentId != null
           ? nextSegments.find(
@@ -2302,7 +2386,7 @@ export default function HomePage(): JSX.Element {
         end: Math.max(CUT_RANGE_MIN_GAP, nextSession.duration),
       })
       setCurrentTime(0)
-      const nextSegments = relabelSegmentsForChapters(nextSession.segments)
+      const nextSegments = preserveChapterLabels(segments, nextSession.segments)
       setSegments(nextSegments)
       applyClipSelection(
         nextSegments,
@@ -3009,7 +3093,7 @@ export default function HomePage(): JSX.Element {
                         isDark={isDark}
                         onClick={handleOpenCleanPanel}
                         icon={Brush}
-                        active={rightPanelView === 'clean'}
+                        active={rightPanelView === 'clean' && !isRightPanelCollapsed}
                         tone="editor"
                       />
                       <div className="mx-1 h-8 w-px rounded-full bg-[#d9dde5] dark:bg-[#31415a]" />
@@ -3040,6 +3124,7 @@ export default function HomePage(): JSX.Element {
                         onClick={handleOpenSubtitlesPanel}
                         icon={Subtitles}
                         disabled={subtitleStatus === 'processing'}
+                        active={rightPanelView === 'subtitles' && !isRightPanelCollapsed}
                         tone="workspace"
                       />
                       <ToolbarButton
@@ -3050,6 +3135,7 @@ export default function HomePage(): JSX.Element {
                         onClick={handleRemoveSilence}
                         icon={Mic}
                         disabled={silenceStatus === 'processing'}
+                        active={rightPanelView === 'silence' && !isRightPanelCollapsed}
                         tone="workspace"
                       />
                       <ToolbarButton
@@ -3059,6 +3145,7 @@ export default function HomePage(): JSX.Element {
                         isDark={isDark}
                         onClick={handleOpenChaptersPanel}
                         icon={Clapperboard}
+                        active={rightPanelView === 'chapters' && !isRightPanelCollapsed}
                         tone="workspace"
                       />
                       <ToolbarButton
@@ -3068,6 +3155,7 @@ export default function HomePage(): JSX.Element {
                         isDark={isDark}
                         onClick={handleOpenAIPanel}
                         icon={Sparkles}
+                        active={rightPanelView === 'ai' && !isRightPanelCollapsed}
                         tone="workspace"
                       />
                       <div className="mx-1 h-8 w-px rounded-full bg-[#d9dde5] dark:bg-[#31415a]" />
@@ -3724,9 +3812,9 @@ export default function HomePage(): JSX.Element {
                     </div>
                   </div>
                 ) : rightPanelView === 'silence' ? (
-                  <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                  <div className="flex min-h-0 flex-1 flex-col overflow-visible">
                   <div
-                    className={`mb-4 rounded-2xl border p-2 ${
+                    className={`relative z-20 mb-4 overflow-visible rounded-2xl border p-2 ${
                       isDark
                         ? 'border-[#243149] bg-[#111827]'
                         : 'border-[#e3e7ee] bg-[#fbfcfd]'
@@ -3920,10 +4008,10 @@ export default function HomePage(): JSX.Element {
                     )}
                   </div>
                 </div>
-                ) : rightPanelView === 'chapters' ? (
-                  <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              ) : rightPanelView === 'chapters' ? (
+                  <div className="flex min-h-0 flex-1 flex-col overflow-visible">
                   <div
-                    className={`mb-4 rounded-2xl border p-2 ${
+                    className={`relative z-20 mb-4 overflow-visible rounded-2xl border p-2 ${
                       isDark
                         ? 'border-[#243149] bg-[#111827]'
                         : 'border-[#e3e7ee] bg-[#fbfcfd]'
@@ -4099,9 +4187,9 @@ export default function HomePage(): JSX.Element {
                   </div>
                 </div>
                 ) : rightPanelView === 'subtitles' ? (
-                  <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                  <div className="flex min-h-0 flex-1 flex-col overflow-visible">
                   <div
-                    className={`mb-4 rounded-2xl border p-2 ${
+                    className={`relative z-20 mb-4 overflow-visible rounded-2xl border p-2 ${
                       isDark
                         ? 'border-[#243149] bg-[#111827]'
                         : 'border-[#e3e7ee] bg-[#fbfcfd]'
