@@ -90,6 +90,7 @@ interface VideoPreviewHandle {
 interface VideoPreviewPanelProps {
   subtitles: SubtitleSegment[]
   videoUrl?: string | null
+  playbackMode: 'edited' | 'original'
   onLoadedMetadata: (durationInSeconds: number) => void
   onTimeUpdate: (timeInSeconds: number) => void
   onPlaybackStateChange: (isPlaying: boolean) => void
@@ -118,6 +119,17 @@ interface TimelineThumbnail {
   time: number
 }
 
+interface OriginalTimelineSection {
+  kind: 'kept' | 'removed'
+  start: number
+  end: number
+}
+
+interface ReorderedSegmentsResult {
+  segments: ClipSegment[]
+  moved: boolean
+}
+
 interface EditorHistoryEntry {
   segments: ClipSegment[]
   selectedId: number | null
@@ -141,6 +153,7 @@ type SubtitleTimingField = 'start' | 'end'
 type SubtitleEntryStatus = 'idle' | 'uploading' | 'generating' | 'success'
 type RightPanelView = 'ai' | 'silence' | 'subtitles' | 'chapters' | 'clean'
 type CutHandle = 'start' | 'end'
+type PreviewPlaybackMode = 'edited' | 'original'
 
 const CUT_RANGE_MIN_GAP = 0.1
 
@@ -563,6 +576,7 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
     {
       videoUrl: externalVideoUrl,
       subtitles,
+      playbackMode,
       onLoadedMetadata,
       onTimeUpdate,
       onPlaybackStateChange,
@@ -677,7 +691,22 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
 
     return (
       <section className="flex flex-1 min-h-0 w-full items-center justify-center px-4 py-4 xl:px-6 xl:py-5">
-        <div className="relative w-full max-w-[900px] overflow-hidden rounded-[24px] bg-black shadow-[0_20px_60px_rgba(15,23,42,0.24)]">
+        <div className="w-full max-w-[900px]">
+          <div className="mb-3 flex items-center justify-between">
+            <span
+              className={`rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-[0.18em] ${
+                playbackMode === 'original'
+                  ? 'bg-[#fff0f8] text-[#a20f66] dark:bg-[#31192e] dark:text-[#ffb3de]'
+                  : 'bg-[#eef3ff] text-[#003fb1] dark:bg-[#1b3566] dark:text-[#9ec5ff]'
+              }`}
+            >
+              {playbackMode === 'original'
+                ? 'Playing Original Video'
+                : 'Playing Edited Video'}
+            </span>
+          </div>
+
+          <div className="relative overflow-hidden rounded-[24px] bg-black shadow-[0_20px_60px_rgba(15,23,42,0.24)]">
           {videoUrl ? (
             <video
               ref={videoRef}
@@ -734,6 +763,7 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
               </div>
             </button>
           )}
+          </div>
         </div>
 
         <input
@@ -1085,6 +1115,106 @@ function getSegmentTimelineFrames(
   return nearest ? [nearest] : []
 }
 
+function buildOriginalTimelineSections(
+  segments: ClipSegment[],
+  totalDuration: number,
+): OriginalTimelineSection[] {
+  const safeDuration = Math.max(0, totalDuration)
+  if (safeDuration <= 0) {
+    return []
+  }
+
+  const sortedSegments = [...segments]
+    .filter((segment) => segment.end > segment.start)
+    .sort((left, right) => left.start - right.start)
+
+  const sections: OriginalTimelineSection[] = []
+  let cursor = 0
+
+  sortedSegments.forEach((segment) => {
+    const start = clamp(segment.start, 0, safeDuration)
+    const end = clamp(segment.end, 0, safeDuration)
+
+    if (start > cursor) {
+      sections.push({
+        kind: 'removed',
+        start: cursor,
+        end: start,
+      })
+    }
+
+    if (end > start) {
+      sections.push({
+        kind: 'kept',
+        start,
+        end,
+      })
+      cursor = Math.max(cursor, end)
+    }
+  })
+
+  if (cursor < safeDuration) {
+    sections.push({
+      kind: 'removed',
+      start: cursor,
+      end: safeDuration,
+    })
+  }
+
+  return sections.filter((section) => section.end - section.start > 0.001)
+}
+
+function buildOriginalTimelineMarkers(
+  segments: ClipSegment[],
+  totalDuration: number,
+): number[] {
+  const safeDuration = Math.max(0, totalDuration)
+  if (safeDuration <= 0) {
+    return []
+  }
+
+  const seen = new Set<string>()
+
+  return segments
+    .slice(1)
+    .map((segment) => clamp(segment.start, 0, safeDuration))
+    .filter((value) => value > 0 && value < safeDuration)
+    .filter((value) => {
+      const key = value.toFixed(3)
+      if (seen.has(key)) {
+        return false
+      }
+      seen.add(key)
+      return true
+    })
+}
+
+function reorderSegmentsById(
+  segments: ClipSegment[],
+  draggedId: number,
+  targetId: number,
+): ReorderedSegmentsResult {
+  if (draggedId === targetId) {
+    return { segments, moved: false }
+  }
+
+  const draggedIndex = segments.findIndex((segment) => segment.id === draggedId)
+  const targetIndex = segments.findIndex((segment) => segment.id === targetId)
+
+  if (draggedIndex < 0 || targetIndex < 0) {
+    return { segments, moved: false }
+  }
+
+  const nextSegments = [...segments]
+  const [draggedSegment] = nextSegments.splice(draggedIndex, 1)
+  nextSegments.splice(targetIndex, 0, draggedSegment)
+
+  return {
+    segments: nextSegments,
+    moved: true,
+  }
+}
+
 export default function HomePage(): JSX.Element {
   const { theme, toggleTheme } = useTheme()
   const isDark = theme === 'dark'
@@ -1145,8 +1275,13 @@ export default function HomePage(): JSX.Element {
   const [timelineMediaReady, setTimelineMediaReady] = useState(false)
   const [isTimelineDragging, setIsTimelineDragging] = useState(false)
   const [activeCutHandle, setActiveCutHandle] = useState<CutHandle | null>(null)
+  const [isArrangeModeEnabled, setIsArrangeModeEnabled] = useState(false)
+  const [draggedSegmentId, setDraggedSegmentId] = useState<number | null>(null)
+  const [dragOverSegmentId, setDragOverSegmentId] = useState<number | null>(null)
   const [timelineZoom, setTimelineZoom] = useState(1)
   const [history, setHistory] = useState<EditorHistoryEntry[]>([])
+  const [previewPlaybackMode, setPreviewPlaybackMode] =
+    useState<PreviewPlaybackMode>('edited')
   const [selectedCategory, setSelectedCategory] = useState<string>('')
   const [categoryOptions, setCategoryOptions] = useState<string[]>(() =>
     readStoredCategories(),
@@ -1458,6 +1593,16 @@ export default function HomePage(): JSX.Element {
     : 0
   const timelinePlayheadRatio =
     editedDuration > 0 ? clamp(timelinePlayheadEditedTime / editedDuration, 0, 1) : 0
+  const originalTimelineSections = useMemo(
+    () => buildOriginalTimelineSections(segments, totalDuration),
+    [segments, totalDuration],
+  )
+  const originalTimelineMarkers = useMemo(
+    () => buildOriginalTimelineMarkers(segments, totalDuration),
+    [segments, totalDuration],
+  )
+  const sourcePlayheadRatio =
+    totalDuration > 0 ? clamp(currentTime / totalDuration, 0, 1) : 0
 
   const silenceReviewItems = silenceSegments.map((segment, index) => ({
     ...segment,
@@ -1549,7 +1694,11 @@ export default function HomePage(): JSX.Element {
     setRightPanelView('ai')
     setIsCutModeEnabled(false)
     setActiveCutHandle(null)
+    setIsArrangeModeEnabled(false)
+    setDraggedSegmentId(null)
+    setDragOverSegmentId(null)
     setHistory([])
+    setPreviewPlaybackMode('edited')
     setSelectedCategory('')
     setNewCategoryDraft('')
     setCutRange(buildFullCutRange(editedDuration || videoDuration || 180))
@@ -1600,6 +1749,7 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleSeek = (timeInSeconds: number) => {
+    setPreviewPlaybackMode('edited')
     const safeTime = Math.max(0, Math.min(timeInSeconds, totalDuration))
     const containingSegment = segments.find(
       (segment) => safeTime >= segment.start && safeTime <= segment.end,
@@ -1614,6 +1764,17 @@ export default function HomePage(): JSX.Element {
     }
     videoPreviewRef.current?.seekTo(safeTime)
     setCurrentTime(safeTime)
+  }
+
+  const handleSeekOriginal = (timeInSeconds: number, shouldPlay = false) => {
+    const safeTime = Math.max(0, Math.min(timeInSeconds, totalDuration))
+    setPreviewPlaybackMode('original')
+    videoPreviewRef.current?.seekTo(safeTime)
+    setCurrentTime(safeTime)
+
+    if (shouldPlay) {
+      videoPreviewRef.current?.play()
+    }
   }
 
   const seekEditedTimelineToTime = (editedTime: number) => {
@@ -1689,6 +1850,9 @@ export default function HomePage(): JSX.Element {
     setIsRightPanelCollapsed(false)
     setEditorError(null)
     setCutRange(buildFullCutRange(selectedCutDuration))
+    setIsArrangeModeEnabled(false)
+    setDraggedSegmentId(null)
+    setDragOverSegmentId(null)
     setIsCutModeEnabled(true)
     setActiveCutHandle(null)
   }
@@ -2397,6 +2561,31 @@ export default function HomePage(): JSX.Element {
     applyClipSelection(segments, nextSelectedIds, segmentId)
   }
 
+  const handleToggleArrangeMode = () => {
+    const nextIsEnabled = !isArrangeModeEnabled
+    if (nextIsEnabled) {
+      setIsCutModeEnabled(false)
+      setActiveCutHandle(null)
+    }
+    setIsArrangeModeEnabled(nextIsEnabled)
+    setDraggedSegmentId(null)
+    setDragOverSegmentId(null)
+    setEditorError(null)
+  }
+
+  const handleReorderSegment = (sourceId: number, targetId: number) => {
+    const result = reorderSegmentsById(segments, sourceId, targetId)
+    if (!result.moved) {
+      return
+    }
+
+    pushHistory()
+    setSegments(result.segments)
+    applyClipSelection(result.segments, selectedSegmentIds, selectedId)
+    setPreviewPlaybackMode('edited')
+    setEditorError(null)
+  }
+
   const handleUpdateSubtitle = (updated: SubtitleSegment) => {
     pushHistory()
     setSubtitleError(null)
@@ -2800,7 +2989,7 @@ export default function HomePage(): JSX.Element {
     if (isPlaying) {
       videoPreviewRef.current.pause()
     } else {
-      if (selectedSegment) {
+      if (previewPlaybackMode === 'edited' && selectedSegment) {
         const currentPreviewTime = videoPreviewRef.current.getCurrentTime()
         const clipEndBoundary = Math.max(
           selectedSegment.start,
@@ -2824,7 +3013,14 @@ export default function HomePage(): JSX.Element {
   }
 
   useEffect(() => {
-    if (!isPlaying || !selectedSegment || !videoPreviewRef.current) return
+    if (
+      previewPlaybackMode !== 'edited' ||
+      !isPlaying ||
+      !selectedSegment ||
+      !videoPreviewRef.current
+    ) {
+      return
+    }
 
     const clipEndBoundary = Math.max(
       selectedSegment.start,
@@ -2838,7 +3034,7 @@ export default function HomePage(): JSX.Element {
     videoPreviewRef.current.pause()
     videoPreviewRef.current.seekTo(clipEndBoundary)
     setCurrentTime(clipEndBoundary)
-  }, [currentTime, isPlaying, selectedSegment])
+  }, [currentTime, isPlaying, previewPlaybackMode, selectedSegment])
 
   useEffect(() => {
     if (!hasUnsavedChanges) {
@@ -3405,6 +3601,7 @@ export default function HomePage(): JSX.Element {
                 ref={videoPreviewRef}
                 videoUrl={videoSourceUrl ?? preloadedVideoUrl}
                 subtitles={subtitleSegments}
+                playbackMode={previewPlaybackMode}
                 onLoadedMetadata={(duration) => {
                   setVideoDuration(duration)
                   setCutRange(buildFullCutRange(duration))
@@ -3702,6 +3899,10 @@ export default function HomePage(): JSX.Element {
                                 const duration = Math.max(0.1, segment.end - segment.start)
                                 const isPrimarySelected = selectedId === segment.id
                                 const isSelected = selectedSegmentIdSet.has(segment.id)
+                                const isDragTarget =
+                                  isArrangeModeEnabled &&
+                                  dragOverSegmentId === segment.id &&
+                                  draggedSegmentId !== segment.id
                                 const segmentFrames = getSegmentTimelineFrames(
                                   timelineThumbnails,
                                   segment,
@@ -3736,9 +3937,52 @@ export default function HomePage(): JSX.Element {
                                     type="button"
                                     aria-pressed={isSelected}
                                     aria-label={`${segment.label}${isPrimarySelected ? ', active clip selected' : isSelected ? ', clip selected' : ''}`}
+                                    draggable={isArrangeModeEnabled}
+                                    onDragStart={(event) => {
+                                      if (!isArrangeModeEnabled) {
+                                        event.preventDefault()
+                                        return
+                                      }
+
+                                      setDraggedSegmentId(segment.id)
+                                      setDragOverSegmentId(segment.id)
+                                      event.dataTransfer.effectAllowed = 'move'
+                                      event.dataTransfer.setData(
+                                        'text/plain',
+                                        `${segment.id}`,
+                                      )
+                                    }}
+                                    onDragOver={(event) => {
+                                      if (!isArrangeModeEnabled || draggedSegmentId == null) {
+                                        return
+                                      }
+
+                                      event.preventDefault()
+                                      event.dataTransfer.dropEffect = 'move'
+                                      setDragOverSegmentId(segment.id)
+                                    }}
+                                    onDrop={(event) => {
+                                      if (!isArrangeModeEnabled || draggedSegmentId == null) {
+                                        return
+                                      }
+
+                                      event.preventDefault()
+                                      handleReorderSegment(draggedSegmentId, segment.id)
+                                      setDraggedSegmentId(null)
+                                      setDragOverSegmentId(null)
+                                    }}
+                                    onDragEnd={() => {
+                                      setDraggedSegmentId(null)
+                                      setDragOverSegmentId(null)
+                                    }}
                                     onPointerDown={(event) => {
                                       if (isCutModeEnabled) {
                                         event.preventDefault()
+                                        event.stopPropagation()
+                                        return
+                                      }
+
+                                      if (isArrangeModeEnabled) {
                                         event.stopPropagation()
                                         return
                                       }
@@ -3782,10 +4026,16 @@ export default function HomePage(): JSX.Element {
                                     }}
                                     style={{ flexGrow: duration, flexBasis: 0 }}
                                     className={`relative flex min-w-0 flex-1 flex-col justify-end overflow-hidden rounded-xl border text-left transition duration-150 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-offset-2 ${
+                                      isDragTarget
+                                        ? isDark
+                                          ? 'border-[#ffb3de] bg-[#2a1730] text-[#ffecf7] ring-2 ring-[#ff7ac8]/70'
+                                          : 'border-[#de34ab] bg-[#fff0f8] text-[#a20f66] ring-2 ring-[#de34ab]/35'
+                                        : ''
+                                    } ${
                                       isDark
                                         ? 'focus-visible:ring-[#8bb8ff] focus-visible:ring-offset-[#1a2435]'
                                         : 'focus-visible:ring-[#003fb1] focus-visible:ring-offset-white'
-                                    } ${clipFrameClasses}`}
+                                    } ${clipFrameClasses} ${isArrangeModeEnabled ? 'cursor-grab active:cursor-grabbing' : ''}`}
                                   >
                                     <div className="absolute inset-0">
                                       {timelineMediaReady && segmentFrames.length > 0 ? (
@@ -3994,6 +4244,96 @@ export default function HomePage(): JSX.Element {
                               ) : null}
                             </div>
                           </div>
+
+                          <div className="mt-3 px-1">
+                            <div
+                              className={`mb-1 flex items-center justify-between px-1 text-[9px] font-bold uppercase tracking-[0.18em] ${
+                                isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
+                              }`}
+                            >
+                              <span>Original Video Reference</span>
+                              <span>{formatClock(totalDuration)}</span>
+                            </div>
+
+                            <div
+                              className={`relative h-8 overflow-hidden rounded-xl border ${
+                                isDark
+                                  ? 'border-[#2b3950] bg-[#101827]'
+                                  : 'border-[#dfe5ec] bg-[#f6f8fb]'
+                              }`}
+                              onPointerDown={(event) => {
+                                if (event.pointerType === 'mouse' && event.button !== 0) {
+                                  return
+                                }
+
+                                const bounds = event.currentTarget.getBoundingClientRect()
+                                const ratio = clamp(
+                                  (event.clientX - bounds.left) / bounds.width,
+                                  0,
+                                  1,
+                                )
+                                handleSeekOriginal(ratio * totalDuration, true)
+                              }}
+                            >
+                              {originalTimelineSections.map((section, index) => {
+                                const left = totalDuration > 0 ? (section.start / totalDuration) * 100 : 0
+                                const width =
+                                  totalDuration > 0
+                                    ? ((section.end - section.start) / totalDuration) * 100
+                                    : 0
+
+                                return (
+                                  <div
+                                    key={`${section.kind}-${section.start}-${section.end}-${index}`}
+                                    className={`absolute inset-y-0 ${
+                                      section.kind === 'kept'
+                                        ? isDark
+                                          ? 'bg-[linear-gradient(90deg,#4b86e5_0%,#6fa8ff_100%)]'
+                                          : 'bg-[linear-gradient(90deg,#1a56db_0%,#5d8fff_100%)]'
+                                        : isDark
+                                          ? 'bg-[repeating-linear-gradient(135deg,rgba(148,163,184,0.18)_0px,rgba(148,163,184,0.18)_4px,rgba(15,23,42,0.05)_4px,rgba(15,23,42,0.05)_8px)]'
+                                          : 'bg-[repeating-linear-gradient(135deg,rgba(148,163,184,0.38)_0px,rgba(148,163,184,0.38)_4px,rgba(255,255,255,0.82)_4px,rgba(255,255,255,0.82)_8px)]'
+                                    }`}
+                                    style={{
+                                      left: `${left}%`,
+                                      width: `${Math.max(width, 0)}%`,
+                                    }}
+                                  />
+                                )
+                              })}
+
+                              {originalTimelineMarkers.map((marker) => (
+                                <span
+                                  key={marker}
+                                  className={`absolute inset-y-0 w-px -translate-x-1/2 ${
+                                    isDark ? 'bg-white/70' : 'bg-[#1a56db]'
+                                  }`}
+                                  style={{
+                                    left: `${(marker / totalDuration) * 100}%`,
+                                  }}
+                                />
+                              ))}
+
+                              {totalDuration > 0 ? (
+                                <div className="pointer-events-none absolute inset-0 z-20">
+                                  <span
+                                    className="absolute inset-y-0 w-0.5 -translate-x-1/2 bg-[#de34ab]"
+                                    style={{ left: `${sourcePlayheadRatio * 100}%` }}
+                                  />
+                                  <span
+                                    className="absolute top-0 h-0 w-0 -translate-x-1/2 border-x-[5px] border-b-[7px] border-x-transparent border-b-[#de34ab]"
+                                    style={{ left: `${sourcePlayheadRatio * 100}%` }}
+                                  />
+                                  <span
+                                    className="absolute -top-7 rounded-full bg-[#111827] px-2 py-0.5 text-[9px] font-mono text-white shadow-sm"
+                                    style={getTimelineTimestampStyle(sourcePlayheadRatio)}
+                                  >
+                                    {formatEditableTimestamp(currentTime)}
+                                  </span>
+                                </div>
+                              ) : null}
+                            </div>
+                          </div>
                         </div>
 
                         <div className="pt-1">
@@ -4166,7 +4506,7 @@ export default function HomePage(): JSX.Element {
                           : 'border-[#e3e7ee] bg-[#fbfcfd]'
                       }`}
                     >
-                      <div className="grid grid-cols-2 gap-2">
+                      <div className="grid grid-cols-3 gap-2">
                         <ToolbarButton
                           label="Cut"
                           tooltip="Activate cut mode so you can drag the pink range handles across the selected clips on the timeline."
@@ -4179,126 +4519,6 @@ export default function HomePage(): JSX.Element {
                           tone="workspace"
                         />
                         <ToolbarButton
-                          label="Apply Cut"
-                          tooltip="Apply the selected cut range and remove everything outside it from the selected clips."
-                          guidedMode
-                          isDark={isDark}
-                          onClick={() => {
-                            void handleCutVideo()
-                          }}
-                          icon={Scissors}
-                          disabled={
-                            !isCutModeEnabled ||
-                            !canCutSelectedSegments
-                          }
-                          tone="workspace"
-                        />
-                      </div>
-                    </div>
-
-                    <div
-                      className={`mb-4 rounded-2xl border px-4 py-3 text-[12px] leading-5 ${
-                        isDark
-                          ? 'border-[#243149] bg-[#111827] text-[#9fb0ca]'
-                          : 'border-[#e3e7ee] bg-[#fbfcfd] text-[#57657a]'
-                      }`}
-                    >
-                      {isCutModeEnabled
-                        ? 'Cut mode is active. Drag the two pink range handles across the selected clips to keep one continuous section from that selection. Unselected clips will stay unchanged.'
-                        : 'Select one or more clips, then choose Cut to activate the pink range handles only on those selected clips.'}
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <div
-                        className={`rounded-2xl border px-4 py-3 ${
-                          isDark
-                            ? 'border-[#243149] bg-[#111827]'
-                            : 'border-[#e3e7ee] bg-[#fbfcfd]'
-                        }`}
-                      >
-                        <span
-                          className={`block text-[9px] font-bold uppercase tracking-[0.14em] ${
-                            isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
-                          }`}
-                        >
-                          Keep From
-                        </span>
-                        <span
-                          className={`mt-2 block text-[14px] font-semibold ${
-                            isDark ? 'text-[#e5edf9]' : 'text-[#233147]'
-                          }`}
-                        >
-                          {formatEditableTimestamp(normalizedCutRange.start)}
-                        </span>
-                      </div>
-
-                      <div
-                        className={`rounded-2xl border px-4 py-3 ${
-                          isDark
-                            ? 'border-[#243149] bg-[#111827]'
-                            : 'border-[#e3e7ee] bg-[#fbfcfd]'
-                        }`}
-                      >
-                        <span
-                          className={`block text-[9px] font-bold uppercase tracking-[0.14em] ${
-                            isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
-                          }`}
-                        >
-                          Keep To
-                        </span>
-                        <span
-                          className={`mt-2 block text-[14px] font-semibold ${
-                            isDark ? 'text-[#e5edf9]' : 'text-[#233147]'
-                          }`}
-                        >
-                          {formatEditableTimestamp(normalizedCutRange.end)}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div
-                      className={`mt-4 rounded-2xl border border-dashed px-5 py-5 text-[12px] leading-6 ${
-                        isDark
-                          ? 'border-[#31415a] bg-[#111827] text-[#8fa2c2]'
-                          : 'border-[#c3c5d7] bg-[#fbfcfd] text-[#737686]'
-                      }`}
-                    >
-                      Remaining kept selection length:{' '}
-                      {formatEditableTimestamp(
-                        Math.max(
-                          CUT_RANGE_MIN_GAP,
-                          normalizedCutRange.end - normalizedCutRange.start,
-                        ),
-                      )}
-                    </div>
-
-                    <div
-                      className={`mt-4 rounded-2xl border px-4 py-3 ${
-                        isDark
-                          ? 'border-[#243149] bg-[#111827]'
-                          : 'border-[#e3e7ee] bg-[#fbfcfd]'
-                      }`}
-                    >
-                      <div className="mb-3">
-                        <p
-                          className={`text-[10px] font-bold uppercase tracking-[0.16em] ${
-                            isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
-                          }`}
-                        >
-                          Remove From The Middle
-                        </p>
-                        <p
-                          className={`mt-2 text-[12px] leading-5 ${
-                            isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'
-                          }`}
-                        >
-                          Split at the start and end of the unwanted part, then
-                          delete the selected section from the timeline.
-                        </p>
-                      </div>
-
-                      <div className="grid grid-cols-3 gap-2">
-                        <ToolbarButton
                           label="Split"
                           tooltip="Split the selected chapter at the playhead."
                           guidedMode
@@ -4310,6 +4530,18 @@ export default function HomePage(): JSX.Element {
                           disabled={!selectedSegment || !hasSingleSelectedSegment}
                           tone="workspace"
                         />
+                        <ToolbarButton
+                          label="Arrange"
+                          tooltip="Enable drag-and-drop so you can reorder chapters directly on the timeline."
+                          guidedMode
+                          isDark={isDark}
+                          onClick={handleToggleArrangeMode}
+                          icon={Files}
+                          active={isArrangeModeEnabled}
+                          tone="workspace"
+                        />
+                      </div>
+                      <div className="mt-2 grid grid-cols-2 gap-2">
                         <ToolbarButton
                           label="Merge"
                           tooltip="Merge works when two or more adjacent chapters are selected on the timeline. Use Shift-click for a range, or Cmd/Ctrl-click to add chapters to the selection."
@@ -4335,6 +4567,114 @@ export default function HomePage(): JSX.Element {
                         />
                       </div>
                     </div>
+
+                    {isCutModeEnabled ? (
+                      <>
+                        <div
+                          className={`mb-4 rounded-2xl border px-4 py-3 text-[12px] leading-5 ${
+                            isDark
+                              ? 'border-[#243149] bg-[#111827] text-[#9fb0ca]'
+                              : 'border-[#e3e7ee] bg-[#fbfcfd] text-[#57657a]'
+                          }`}
+                        >
+                          Cut mode is active. Drag the two pink range handles across
+                          the selected clips to keep one continuous section from that
+                          selection. Unselected clips will stay unchanged.
+                        </div>
+
+                        <div className="mb-4">
+                          <ToolbarButton
+                            label="Apply Cut"
+                            tooltip="Apply the selected cut range and remove everything outside it from the selected clips."
+                            guidedMode
+                            isDark={isDark}
+                            onClick={() => {
+                              void handleCutVideo()
+                            }}
+                            icon={Scissors}
+                            disabled={!canCutSelectedSegments}
+                            tone="workspace"
+                          />
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <div
+                            className={`rounded-2xl border px-4 py-3 ${
+                              isDark
+                                ? 'border-[#243149] bg-[#111827]'
+                                : 'border-[#e3e7ee] bg-[#fbfcfd]'
+                            }`}
+                          >
+                            <span
+                              className={`block text-[9px] font-bold uppercase tracking-[0.14em] ${
+                                isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
+                              }`}
+                            >
+                              Keep From
+                            </span>
+                            <span
+                              className={`mt-2 block text-[14px] font-semibold ${
+                                isDark ? 'text-[#e5edf9]' : 'text-[#233147]'
+                              }`}
+                            >
+                              {formatEditableTimestamp(normalizedCutRange.start)}
+                            </span>
+                          </div>
+
+                          <div
+                            className={`rounded-2xl border px-4 py-3 ${
+                              isDark
+                                ? 'border-[#243149] bg-[#111827]'
+                                : 'border-[#e3e7ee] bg-[#fbfcfd]'
+                            }`}
+                          >
+                            <span
+                              className={`block text-[9px] font-bold uppercase tracking-[0.14em] ${
+                                isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
+                              }`}
+                            >
+                              Keep To
+                            </span>
+                            <span
+                              className={`mt-2 block text-[14px] font-semibold ${
+                                isDark ? 'text-[#e5edf9]' : 'text-[#233147]'
+                              }`}
+                            >
+                              {formatEditableTimestamp(normalizedCutRange.end)}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div
+                          className={`mt-4 rounded-2xl border border-dashed px-5 py-5 text-[12px] leading-6 ${
+                            isDark
+                              ? 'border-[#31415a] bg-[#111827] text-[#8fa2c2]'
+                              : 'border-[#c3c5d7] bg-[#fbfcfd] text-[#737686]'
+                          }`}
+                        >
+                          Remaining kept selection length:{' '}
+                          {formatEditableTimestamp(
+                            Math.max(
+                              CUT_RANGE_MIN_GAP,
+                              normalizedCutRange.end - normalizedCutRange.start,
+                            ),
+                          )}
+                        </div>
+                      </>
+                    ) : null}
+
+                    {isArrangeModeEnabled ? (
+                      <div
+                        className={`mt-4 rounded-2xl border px-4 py-3 text-[12px] leading-5 ${
+                          isDark
+                            ? 'border-[#5d2d56] bg-[#231321] text-[#ffb3de]'
+                            : 'border-[#f2b6d9] bg-[#fff4fa] text-[#a20f66]'
+                        }`}
+                      >
+                        Arrange mode is active. Drag chapters on the timeline to
+                        reorder them, and their current names will stay attached.
+                      </div>
+                    ) : null}
                   </div>
                 ) : rightPanelView === 'silence' ? (
                   <div className="flex min-h-0 flex-1 flex-col overflow-visible">

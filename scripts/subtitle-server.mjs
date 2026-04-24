@@ -177,7 +177,6 @@ function sanitizeEditorSegments(segments) {
 
       return { id, label, start, end }
     })
-    .sort((left, right) => left.start - right.start)
 }
 
 function relabelEditorSegments(segments) {
@@ -1106,9 +1105,7 @@ const server = createServer(async (request, response) => {
         typeof payload?.sessionId === 'string' ? payload.sessionId : ''
       const selectedSegmentId = Number(payload?.selectedSegmentId ?? 0)
       const session = getEditorSession(sessionId)
-      const nextSegments = relabelEditorSegments(
-        sanitizeEditorSegments(payload?.segments),
-      )
+      const nextSegments = sanitizeEditorSegments(payload?.segments)
 
       session.segments = nextSegments
       session.selectedSegmentId =
