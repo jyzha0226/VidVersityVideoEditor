@@ -37,6 +37,7 @@ export interface EditorSessionState {
   sessionId: string
   duration: number
   selectedSegmentId: number | null
+  category: string
   segments: EditorClipSegment[]
 }
 
@@ -66,6 +67,7 @@ interface EditorSessionApiResponse {
   sessionId?: string
   duration?: number
   selectedSegmentId?: number | null
+  category?: string
   segments?: Array<{
     id?: number
     label?: string
@@ -171,6 +173,8 @@ function normalizeEditorSession(
       payload?.selectedSegmentId == null
         ? segments[0]?.id ?? null
         : Number(payload.selectedSegmentId),
+    category:
+      typeof payload?.category === 'string' ? payload.category.trim() : '',
     segments,
   }
 }
@@ -349,6 +353,7 @@ export async function replaceEditorSessionSegments(
   sessionId: string,
   segments: EditorClipSegment[],
   selectedSegmentId: number | null,
+  category?: string,
 ): Promise<EditorSessionState> {
   const apiBaseUrl = resolveSubtitleApiUrl()
   const response = await fetch(`${apiBaseUrl}/api/editor/session/replace`, {
@@ -359,6 +364,7 @@ export async function replaceEditorSessionSegments(
     body: JSON.stringify({
       sessionId,
       selectedSegmentId,
+      category,
       segments,
     }),
   })
@@ -370,6 +376,35 @@ export async function replaceEditorSessionSegments(
   if (!response.ok) {
     throw new Error(
       payload?.error || 'Could not update the editor session.',
+    )
+  }
+
+  return normalizeEditorSession(payload)
+}
+
+export async function updateEditorSessionCategory(
+  sessionId: string,
+  category: string,
+): Promise<EditorSessionState> {
+  const apiBaseUrl = resolveSubtitleApiUrl()
+  const response = await fetch(`${apiBaseUrl}/api/editor/session/category`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      sessionId,
+      category,
+    }),
+  })
+
+  const payload = (await response.json().catch(() => null)) as
+    | EditorSessionApiResponse
+    | null
+
+  if (!response.ok) {
+    throw new Error(
+      payload?.error || 'Could not update the editor session category.',
     )
   }
 

@@ -429,8 +429,13 @@ function serializeEditorSession(session) {
     sessionId: session.id,
     duration: session.duration,
     selectedSegmentId: session.selectedSegmentId,
+    category: session.category || '',
     segments: session.segments.map((segment) => ({ ...segment })),
   }
+}
+
+function sanitizeCategory(category) {
+  return typeof category === 'string' ? category.trim() : ''
 }
 
 function buildEditorExportName(session, fileNameSuffix = 'edited') {
@@ -1034,6 +1039,7 @@ const server = createServer(async (request, response) => {
         filePath,
         fileName,
         duration,
+        category: '',
         nextSegmentId: 2,
         selectedSegmentId: 1,
         segments: [
@@ -1066,10 +1072,23 @@ const server = createServer(async (request, response) => {
         Number.isFinite(selectedSegmentId) && selectedSegmentId > 0
           ? selectedSegmentId
           : nextSegments[0]?.id ?? null
+      session.category = sanitizeCategory(payload?.category) || session.category || ''
       session.nextSegmentId = Math.max(
         session.nextSegmentId,
         ...nextSegments.map((segment) => segment.id + 1),
       )
+
+      sendJson(response, 200, serializeEditorSession(session))
+      return
+    }
+
+    if (url.pathname === '/api/editor/session/category') {
+      const payload = parseJsonBody(body)
+      const sessionId =
+        typeof payload?.sessionId === 'string' ? payload.sessionId : ''
+      const session = getEditorSession(sessionId)
+
+      session.category = sanitizeCategory(payload?.category)
 
       sendJson(response, 200, serializeEditorSession(session))
       return

@@ -59,9 +59,24 @@ import {
   replaceEditorSessionSegments,
   splitEditorSessionAtTime,
   generateSubtitlesFromVideo,
+  updateEditorSessionCategory,
 } from '../subtitles/api'
 import { importSubtitlesFromFile } from '../subtitles/import'
 import type { SubtitleSegment } from '../subtitles/types'
+import { Input } from '../components/ui/input'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '../components/ui/dialog'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../components/ui/select'
 
 interface VideoPreviewHandle {
   seekTo: (timeInSeconds: number) => void
@@ -172,6 +187,72 @@ const AI_QUICK_ACTIONS = [
   'Remove long pauses across the edit',
   'Rewrite subtitles for readability',
 ]
+
+const CATEGORY_STORAGE_KEY = 'vidversity-video-categories'
+const DEFAULT_CATEGORY_VALUE = '__none__'
+const NEW_CATEGORY_VALUE = '__new__'
+
+function normalizeCategoryName(category: string): string {
+  return category.trim().replace(/\s+/g, ' ')
+}
+
+function readStoredCategories(): string[] {
+  if (typeof window === 'undefined') {
+    return []
+  }
+
+  try {
+    const raw = window.localStorage.getItem(CATEGORY_STORAGE_KEY)
+    if (!raw) {
+      return []
+    }
+
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+
+    return parsed
+      .map((item) => normalizeCategoryName(`${item ?? ''}`))
+      .filter((item, index, items) => {
+        if (item.length === 0) {
+          return false
+        }
+
+        return (
+          items.findIndex(
+            (candidate) => candidate.toLowerCase() === item.toLowerCase(),
+          ) === index
+        )
+      })
+  } catch {
+    return []
+  }
+}
+
+function mergeCategoryOptions(
+  categories: string[],
+  additionalCategory?: string | null,
+): string[] {
+  const nextCategories: string[] = []
+  const seen = new Set<string>()
+
+  ;[...categories, normalizeCategoryName(additionalCategory ?? '')].forEach((category) => {
+    if (!category) {
+      return
+    }
+
+    const key = category.toLowerCase()
+    if (seen.has(key)) {
+      return
+    }
+
+    seen.add(key)
+    nextCategories.push(category)
+  })
+
+  return nextCategories
+}
 
 function formatClock(seconds: number): string {
   const safeSeconds = Math.max(0, Math.floor(seconds))
@@ -987,6 +1068,12 @@ export default function HomePage(): JSX.Element {
   const [activeCutHandle, setActiveCutHandle] = useState<CutHandle | null>(null)
   const [timelineZoom, setTimelineZoom] = useState(1)
   const [history, setHistory] = useState<EditorHistoryEntry[]>([])
+  const [selectedCategory, setSelectedCategory] = useState<string>('')
+  const [categoryOptions, setCategoryOptions] = useState<string[]>(() =>
+    readStoredCategories(),
+  )
+  const [newCategoryDraft, setNewCategoryDraft] = useState('')
+  const [isCreateCategoryModalOpen, setIsCreateCategoryModalOpen] = useState(false)
   const [cutRange, setCutRange] = useState<{ start: number; end: number }>({
     start: 0,
     end: 180,
@@ -1071,11 +1158,28 @@ export default function HomePage(): JSX.Element {
     setSilenceStatus('idle')
     setSilenceError(null)
     setSilenceNotice(null)
+    setSelectedCategory('')
+    setNewCategoryDraft('')
     setCutRange({
       start: 0,
       end: 180,
     })
   }, [preloadedVideoUrl])
+
+  useEffect(() => {
+    setCategoryOptions((prev) => mergeCategoryOptions(prev, selectedCategory))
+  }, [selectedCategory])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+
+    window.localStorage.setItem(
+      CATEGORY_STORAGE_KEY,
+      JSON.stringify(categoryOptions),
+    )
+  }, [categoryOptions])
 
   useEffect(() => {
     let cancelled = false
@@ -1115,7 +1219,11 @@ export default function HomePage(): JSX.Element {
     void (async () => {
       try {
         setEditorStatus('syncing')
-        await replaceEditorSessionSegments(editorSessionId, segments, selectedId)
+        await replaceEditorSessionSegments(
+          editorSessionId,
+          segments,
+          selectedId,
+        )
         if (!cancelled) {
           setEditorStatus('ready')
           setEditorError(null)
@@ -1136,6 +1244,40 @@ export default function HomePage(): JSX.Element {
       cancelled = true
     }
   }, [editorSessionId, segments, selectedId])
+
+  useEffect(() => {
+    if (!editorSessionId) {
+      return
+    }
+
+    let cancelled = false
+
+    void (async () => {
+      try {
+        const session = await updateEditorSessionCategory(
+          editorSessionId,
+          selectedCategory,
+        )
+
+        if (!cancelled) {
+          setSelectedCategory(session.category)
+          setEditorError(null)
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setEditorError(
+            error instanceof Error
+              ? error.message
+              : 'Could not update the video category.',
+          )
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [editorSessionId, selectedCategory])
 
   const orderedSelectedSegmentIds = orderClipSelectionIds(
     segments,
@@ -1231,6 +1373,7 @@ export default function HomePage(): JSX.Element {
     (
       history.length > 0 ||
       Boolean(editorSessionId) ||
+      Boolean(selectedCategory) ||
       subtitleSegments.length > 0 ||
       silenceSegments.length > 0 ||
       stagedSilenceSegmentKeys.length > 0
@@ -1305,6 +1448,8 @@ export default function HomePage(): JSX.Element {
     setIsCutModeEnabled(false)
     setActiveCutHandle(null)
     setHistory([])
+    setSelectedCategory('')
+    setNewCategoryDraft('')
     setCutRange({
       start: 0,
       end: Math.max(CUT_RANGE_MIN_GAP, editedDuration || videoDuration || 180),
@@ -1332,6 +1477,7 @@ export default function HomePage(): JSX.Element {
         editorSessionId,
         previous.segments,
         previous.selectedId,
+        selectedCategory,
       )
       const nextSegments = relabelSegmentsForChapters(session.segments)
       setSegments(nextSegments)
@@ -1840,6 +1986,7 @@ export default function HomePage(): JSX.Element {
         sessionId: editorSessionId,
         duration: videoDuration ?? totalDuration,
         selectedSegmentId: selectedId,
+        category: selectedCategory,
         segments,
       }
     }
@@ -1849,6 +1996,7 @@ export default function HomePage(): JSX.Element {
       const session = await createEditorSessionFromVideo(videoFile)
       const nextSegments = relabelSegmentsForChapters(session.segments)
       setEditorSessionId(session.sessionId)
+      setSelectedCategory(session.category || selectedCategory)
       setSegments(nextSegments)
       applyClipSelection(
         nextSegments,
@@ -2291,6 +2439,7 @@ export default function HomePage(): JSX.Element {
         session.sessionId,
         segments,
         selectedId,
+        selectedCategory,
       )
       const rendered = await exportEditorSessionVideo(syncedSession.sessionId, {
         segments: [selectedSegment],
@@ -2323,6 +2472,7 @@ export default function HomePage(): JSX.Element {
         session.sessionId,
         segments,
         selectedId,
+        selectedCategory,
       )
 
       const rendered = await exportEditorSessionVideo(syncedSession.sessionId)
@@ -2400,6 +2550,7 @@ export default function HomePage(): JSX.Element {
           selectedId,
       )
       setEditorSessionId(nextSession.sessionId)
+      setSelectedCategory(nextSession.category)
       setChapterNameDrafts({})
       setEditorStatus('ready')
       setIsPlaying(false)
@@ -2431,6 +2582,30 @@ export default function HomePage(): JSX.Element {
     } finally {
       setAppendStatus('idle')
     }
+  }
+
+  const handleCategorySelect = (value: string) => {
+    if (value === NEW_CATEGORY_VALUE) {
+      setIsCreateCategoryModalOpen(true)
+      return
+    }
+
+    const nextCategory = value === DEFAULT_CATEGORY_VALUE ? '' : value
+    setSelectedCategory(nextCategory)
+    setEditorError(null)
+  }
+
+  const handleCreateCategory = () => {
+    const nextCategory = normalizeCategoryName(newCategoryDraft)
+    if (!nextCategory) {
+      return
+    }
+
+    setCategoryOptions((prev) => mergeCategoryOptions(prev, nextCategory))
+    setSelectedCategory(nextCategory)
+    setNewCategoryDraft('')
+    setIsCreateCategoryModalOpen(false)
+    setEditorError(null)
   }
 
   const handleSubtitleFileSelected = async (
@@ -2756,6 +2931,56 @@ export default function HomePage(): JSX.Element {
             : 'xl:grid-cols-[248px_minmax(0,1fr)_340px]'
         } ${isDark ? 'bg-[#0b1220]' : 'bg-[#f7f9fb]'}`}
       >
+        <Dialog
+          open={isCreateCategoryModalOpen}
+          onOpenChange={setIsCreateCategoryModalOpen}
+        >
+          <DialogContent
+            className={`sm:max-w-[420px] ${
+              isDark
+                ? 'border-[#243149] bg-[#0f172a] text-[#edf2ff]'
+                : 'border-[#e3e7ee] bg-white text-[#191c1e]'
+            }`}
+          >
+            <DialogHeader>
+              <DialogTitle>Create new category</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-3">
+              <Input
+                value={newCategoryDraft}
+                onChange={(event) => setNewCategoryDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    handleCreateCategory()
+                  }
+                }}
+                placeholder="e.g. Lectures, Marketing, Tutorials"
+                className={`h-10 rounded-xl text-sm ${
+                  isDark
+                    ? 'border-[#31415a] bg-[#111827] text-[#edf2ff] placeholder:text-[#64748b]'
+                    : 'border-[#d9dde5] bg-white text-[#191c1e] placeholder:text-[#8a94a6]'
+                }`}
+              />
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={handleCreateCategory}
+                  disabled={normalizeCategoryName(newCategoryDraft).length === 0}
+                  className={`flex h-10 items-center justify-center gap-2 rounded-xl px-4 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                    isDark
+                      ? 'bg-[#1a56db] text-white hover:bg-[#2b67ec]'
+                      : 'bg-[#003fb1] text-white hover:bg-[#1a56db]'
+                  }`}
+                >
+                  <Plus className="h-4 w-4" />
+                  Add
+                </button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
+
         <input
           ref={subtitleUploadInputRef}
           type="file"
@@ -2874,6 +3099,69 @@ export default function HomePage(): JSX.Element {
                     {guidedMode ? 'On' : 'Off'}
                   </span>
                 </div>
+              </div>
+            </div>
+
+            <div
+              className={`rounded-[20px] border px-4 py-4 ${
+                isDark
+                  ? 'border-[#243149] bg-[#0f172a]'
+                  : 'border-[#e3e7ee] bg-white'
+              }`}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p
+                    className={`text-[11px] font-bold uppercase tracking-[0.18em] ${
+                      isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+                    }`}
+                  >
+                    Video Category
+                  </p>
+                </div>
+                <span
+                  className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] ${
+                    selectedCategory
+                      ? isDark
+                        ? 'bg-[#1a2740] text-[#8bb8ff]'
+                        : 'bg-[#eef3ff] text-[#003fb1]'
+                      : isDark
+                        ? 'bg-[#1a1f2b] text-[#9fb0ca]'
+                        : 'bg-[#f3f4f6] text-[#57657a]'
+                  }`}
+                >
+                  {selectedCategory ? 'Assigned' : 'Optional'}
+                </span>
+              </div>
+
+              <div className="mt-4">
+                <Select
+                  value={selectedCategory || DEFAULT_CATEGORY_VALUE}
+                  onValueChange={handleCategorySelect}
+                >
+                  <SelectTrigger
+                    className={`h-10 rounded-xl border text-sm ${
+                      isDark
+                        ? 'border-[#31415a] bg-[#111827] text-[#edf2ff]'
+                        : 'border-[#d9dde5] bg-white text-[#191c1e]'
+                    }`}
+                  >
+                    <SelectValue placeholder="Select a category" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={DEFAULT_CATEGORY_VALUE}>
+                      No category
+                    </SelectItem>
+                    <SelectItem value={NEW_CATEGORY_VALUE}>
+                      New category
+                    </SelectItem>
+                    {categoryOptions.map((category) => (
+                      <SelectItem key={category} value={category}>
+                        {category}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
           </div>
@@ -3096,7 +3384,6 @@ export default function HomePage(): JSX.Element {
                         active={rightPanelView === 'clean' && !isRightPanelCollapsed}
                         tone="editor"
                       />
-                      <div className="mx-1 h-8 w-px rounded-full bg-[#d9dde5] dark:bg-[#31415a]" />
                       <ToolbarButton
                         label="Add Video"
                         tooltip="Add another video to the end of the timeline."
@@ -3110,8 +3397,20 @@ export default function HomePage(): JSX.Element {
                           editorStatus === 'syncing' ||
                           (!selectedVideoFile && !videoSourceUrl && !preloadedVideoUrl)
                         }
-                        tone="workspace"
+                        tone="editor"
                       />
+                      <ToolbarButton
+                        label="Silencer"
+                        tooltip="Find silent parts you may want to remove."
+                        guidedMode={guidedMode}
+                        isDark={isDark}
+                        onClick={handleRemoveSilence}
+                        icon={Mic}
+                        disabled={silenceStatus === 'processing'}
+                        active={rightPanelView === 'silence' && !isRightPanelCollapsed}
+                        tone="editor"
+                      />
+                      <div className="mx-1 h-8 w-px rounded-full bg-[#d9dde5] dark:bg-[#31415a]" />
                       <ToolbarButton
                         label="Subtitles"
                         tooltip={
@@ -3125,17 +3424,6 @@ export default function HomePage(): JSX.Element {
                         icon={Subtitles}
                         disabled={subtitleStatus === 'processing'}
                         active={rightPanelView === 'subtitles' && !isRightPanelCollapsed}
-                        tone="workspace"
-                      />
-                      <ToolbarButton
-                        label="Silencer"
-                        tooltip="Find silent parts you may want to remove."
-                        guidedMode={guidedMode}
-                        isDark={isDark}
-                        onClick={handleRemoveSilence}
-                        icon={Mic}
-                        disabled={silenceStatus === 'processing'}
-                        active={rightPanelView === 'silence' && !isRightPanelCollapsed}
                         tone="workspace"
                       />
                       <ToolbarButton
