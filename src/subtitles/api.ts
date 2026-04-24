@@ -475,6 +475,7 @@ export async function cutEditorSessionToRange(
   sessionId: string,
   cutStart: number,
   cutEnd: number,
+  segmentIds?: number[],
 ): Promise<EditorSessionState> {
   const apiBaseUrl = resolveSubtitleApiUrl()
   const response = await fetch(`${apiBaseUrl}/api/editor/cut`, {
@@ -486,6 +487,7 @@ export async function cutEditorSessionToRange(
       sessionId,
       cutStart,
       cutEnd,
+      segmentIds,
     }),
   })
 

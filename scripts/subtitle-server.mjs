@@ -194,14 +194,31 @@ function getEditorTimelineDuration(segments) {
   )
 }
 
-function sanitizeSelectedSegmentIds(segmentIds) {
-  const normalizedIds = Array.isArray(segmentIds)
+function normalizeEditorSegmentIds(segmentIds) {
+  return Array.isArray(segmentIds)
     ? [...new Set(segmentIds.map((segmentId) => Number(segmentId)))]
         .filter((segmentId) => Number.isFinite(segmentId) && segmentId > 0)
     : []
+}
+
+function sanitizeSelectedSegmentIds(segmentIds) {
+  const normalizedIds = normalizeEditorSegmentIds(segmentIds)
 
   if (normalizedIds.length < 2) {
     throw new Error('Select at least two clips to merge.')
+  }
+
+  return normalizedIds
+}
+
+function sanitizeCutSegmentIds(segmentIds) {
+  if (segmentIds == null) {
+    return null
+  }
+
+  const normalizedIds = normalizeEditorSegmentIds(segmentIds)
+  if (normalizedIds.length === 0) {
+    throw new Error('Select at least one clip to cut.')
   }
 
   return normalizedIds
@@ -272,18 +289,37 @@ function flattenMergedEditorSegments(segments, segmentIds) {
   }
 }
 
-function cutEditorSegmentsToRange(segments, cutStart, cutEnd) {
+function cutEditorSegmentsToRange(segments, cutStart, cutEnd, selectedSegmentIds = null) {
   if (!Array.isArray(segments) || segments.length === 0) {
     return []
   }
 
-  let editedOffset = 0
+  const selectedSegmentIdSet =
+    Array.isArray(selectedSegmentIds) && selectedSegmentIds.length > 0
+      ? new Set(selectedSegmentIds)
+      : null
+  let cuttableOffset = 0
+  let matchedSelectedSegments = 0
   const nextSegments = []
 
   segments.forEach((segment) => {
     const segmentDuration = Math.max(0, segment.end - segment.start)
-    const editedSegmentStart = editedOffset
-    const editedSegmentEnd = editedOffset + segmentDuration
+    const isCuttable =
+      selectedSegmentIdSet == null || selectedSegmentIdSet.has(segment.id)
+
+    if (!isCuttable) {
+      nextSegments.push({
+        id: segment.id,
+        label: segment.label,
+        start: segment.start,
+        end: segment.end,
+      })
+      return
+    }
+
+    matchedSelectedSegments += 1
+    const editedSegmentStart = cuttableOffset
+    const editedSegmentEnd = cuttableOffset + segmentDuration
     const overlapStart = Math.max(cutStart, editedSegmentStart)
     const overlapEnd = Math.min(cutEnd, editedSegmentEnd)
 
@@ -299,8 +335,15 @@ function cutEditorSegmentsToRange(segments, cutStart, cutEnd) {
       })
     }
 
-    editedOffset = editedSegmentEnd
+    cuttableOffset = editedSegmentEnd
   })
+
+  if (
+    selectedSegmentIdSet != null &&
+    matchedSelectedSegments !== selectedSegmentIdSet.size
+  ) {
+    throw new Error('One or more selected clips were not found in the editor session.')
+  }
 
   return relabelEditorSegments(nextSegments)
 }
@@ -1236,10 +1279,21 @@ const server = createServer(async (request, response) => {
       const rawCutStart = Number(payload?.cutStart ?? 0)
       const rawCutEnd = Number(payload?.cutEnd ?? 0)
       const session = getEditorSession(sessionId)
-      const editedDuration = session.segments.reduce(
-        (sum, segment) => sum + Math.max(0, segment.end - segment.start),
-        0,
-      )
+      const selectedSegmentIds = sanitizeCutSegmentIds(payload?.segmentIds)
+      const selectedSegmentIdSet =
+        selectedSegmentIds != null ? new Set(selectedSegmentIds) : null
+      const cuttableSegments =
+        selectedSegmentIdSet == null
+          ? session.segments
+          : session.segments.filter((segment) => selectedSegmentIdSet.has(segment.id))
+      const editedDuration = getEditorTimelineDuration(cuttableSegments)
+
+      if (
+        selectedSegmentIds != null &&
+        cuttableSegments.length !== selectedSegmentIds.length
+      ) {
+        throw new Error('One or more selected clips were not found in the editor session.')
+      }
 
       if (editedDuration <= 0) {
         throw new Error('The current edit does not contain any duration to cut.')
@@ -1257,6 +1311,7 @@ const server = createServer(async (request, response) => {
         session.segments,
         cutStart,
         cutEnd,
+        selectedSegmentIds,
       )
 
       if (nextSegments.length === 0) {
@@ -1266,7 +1321,10 @@ const server = createServer(async (request, response) => {
       }
 
       session.segments = nextSegments
-      session.selectedSegmentId = nextSegments[0]?.id ?? null
+      session.selectedSegmentId =
+        (selectedSegmentIdSet != null
+          ? nextSegments.find((segment) => selectedSegmentIdSet.has(segment.id))?.id
+          : nextSegments[0]?.id) ?? null
       sendJson(response, 200, serializeEditorSession(session))
       return
     }
