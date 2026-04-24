@@ -9,6 +9,11 @@ import { fileURLToPath } from 'node:url'
 
 const HOST = process.env.SUBTITLE_API_HOST || '127.0.0.1'
 const PORT = Number(process.env.SUBTITLE_API_PORT || 8787)
+const OLLAMA_BASE_URL = (
+  process.env.OLLAMA_BASE_URL || 'http://localhost:11434'
+).replace(/\/$/, '')
+const OLLAMA_MODEL = (process.env.OLLAMA_MODEL || 'vidversity-edit').trim()
+const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 15000)
 const LOCAL_WINDOWS_PYTHON_BIN = fileURLToPath(
   new URL('../.venv/Scripts/python.exe', import.meta.url),
 )
@@ -124,6 +129,207 @@ function parseJsonBody(buffer) {
     return JSON.parse(buffer.toString('utf8'))
   } catch {
     throw new Error('Request body must be valid JSON.')
+  }
+}
+
+const AI_INTENTS = new Set([
+  'cut',
+  'split',
+  'merge',
+  'mute',
+  'subtitle',
+  'trim_silence',
+  'chapter_suggest',
+  'unknown',
+])
+const AI_ACTIONS = new Set([
+  'remove',
+  'keep',
+  'split_at',
+  'mute',
+  'add_subtitle',
+  'trim_silence',
+  'suggest_chapter',
+])
+
+function isTimestampString(value) {
+  return typeof value === 'string' && /^\d{1,2}:\d{2}(?::\d{2})?$/.test(value.trim())
+}
+
+function normalizeAiTimestamp(value) {
+  if (!isTimestampString(value)) {
+    return null
+  }
+
+  return value.trim()
+}
+
+function buildSafeAiSuggestion(notes = []) {
+  return {
+    intent: 'unknown',
+    needs_review: true,
+    parameters: {},
+    operations: [],
+    chapters: [],
+    notes,
+  }
+}
+
+function normalizeAiSuggestion(rawPayload, baseNote) {
+  const safePayload =
+    rawPayload && typeof rawPayload === 'object' ? rawPayload : {}
+  const notes = [
+    ...(Array.isArray(safePayload.notes)
+      ? safePayload.notes
+          .map((item) => `${item ?? ''}`.trim())
+          .filter((item) => item.length > 0)
+      : []),
+  ]
+
+  if (baseNote) {
+    notes.push(baseNote)
+  }
+
+  const intent = AI_INTENTS.has(`${safePayload.intent ?? ''}`)
+    ? safePayload.intent
+    : 'unknown'
+
+  const operations = Array.isArray(safePayload.operations)
+    ? safePayload.operations
+        .map((operation) => {
+          const action = `${operation?.action ?? ''}`
+          if (!AI_ACTIONS.has(action)) {
+            return null
+          }
+
+          const start = normalizeAiTimestamp(operation?.start)
+          const end = normalizeAiTimestamp(operation?.end)
+          if ((operation?.start != null && start == null) || (operation?.end != null && end == null)) {
+            notes.push(`Operation "${action}" had invalid timestamps and was normalized for review.`)
+          }
+
+          if (start == null && end == null) {
+            notes.push(`Operation "${action}" is missing timestamps. Review required.`)
+          }
+
+          return {
+            action,
+            start,
+            end,
+            text: typeof operation?.text === 'string' ? operation.text : null,
+          }
+        })
+        .filter(Boolean)
+    : []
+
+  const chapters = Array.isArray(safePayload.chapters)
+    ? safePayload.chapters.map((chapter, index) => ({
+        title:
+          typeof chapter?.title === 'string' && chapter.title.trim().length > 0
+            ? chapter.title.trim()
+            : `Chapter ${index + 1}`,
+        start: normalizeAiTimestamp(chapter?.start),
+        end: normalizeAiTimestamp(chapter?.end),
+        summary: typeof chapter?.summary === 'string' ? chapter.summary.trim() : '',
+        thumbnailTime: normalizeAiTimestamp(chapter?.thumbnailTime),
+      }))
+    : []
+
+  return {
+    intent,
+    needs_review: true,
+    parameters:
+      safePayload.parameters && typeof safePayload.parameters === 'object'
+        ? safePayload.parameters
+        : {},
+    operations,
+    chapters,
+    notes,
+  }
+}
+
+function parseOllamaMessageContent(ollamaPayload) {
+  const content = ollamaPayload?.message?.content
+  if (typeof content !== 'string' || content.trim().length === 0) {
+    throw new Error('Ollama returned an empty message.')
+  }
+
+  try {
+    return JSON.parse(content)
+  } catch {
+    throw new Error('Ollama response was not valid JSON content.')
+  }
+}
+
+function classifyOllamaError(error) {
+  if (error instanceof Error) {
+    if (error.name === 'AbortError') {
+      return 'Ollama request timed out. Check model load time or increase OLLAMA_TIMEOUT_MS.'
+    }
+
+    if (/ECONNREFUSED/i.test(error.message)) {
+      return 'Could not connect to Ollama. Ensure local Ollama is running.'
+    }
+  }
+
+  return error instanceof Error
+    ? error.message
+    : 'Failed to reach Ollama local API.'
+}
+
+async function callOllamaChat({ prompt, videoDuration, transcript, mode }) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS)
+
+  const systemPrompt =
+    mode === 'chapters'
+      ? [
+          'You are VidVersity chapter planner.',
+          'Return only JSON.',
+          'Set intent to chapter_suggest.',
+          'needs_review must be true.',
+          'Use transcript timestamps when possible.',
+        ].join(' ')
+      : [
+          'You are VidVersity edit assistant.',
+          'Return only JSON.',
+          'Convert prompt into review-only edit operations.',
+          'needs_review must be true.',
+        ].join(' ')
+
+  const userPayload = {
+    prompt,
+    videoDuration: videoDuration || null,
+    transcript: Array.isArray(transcript) ? transcript : [],
+  }
+
+  try {
+    const response = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: OLLAMA_MODEL,
+        stream: false,
+        format: 'json',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: JSON.stringify(userPayload) },
+        ],
+      }),
+    })
+
+    const payload = await response.json().catch(() => null)
+    if (!response.ok) {
+      throw new Error(
+        payload?.error ||
+          `Ollama request failed with status ${response.status}.`,
+      )
+    }
+
+    return parseOllamaMessageContent(payload)
+  } finally {
+    clearTimeout(timeout)
   }
 }
 
@@ -978,6 +1184,8 @@ const server = createServer(async (request, response) => {
       cutEditorSession: '/api/editor/cut',
       deleteEditorSilence: '/api/editor/delete-silence',
       exportEditorSession: '/api/editor/export',
+      aiEditCommand: '/api/ai/edit-command',
+      aiChapterSuggestions: '/api/ai/chapter-suggestions',
       python: PYTHON_BIN,
     })
     return
@@ -1015,8 +1223,67 @@ const server = createServer(async (request, response) => {
 
   try {
     const body = await readRequestBody(request)
-    if (body.length === 0) {
+    const isAiRoute =
+      url.pathname === '/api/ai/edit-command' ||
+      url.pathname === '/api/ai/chapter-suggestions'
+
+    if (body.length === 0 && !isAiRoute) {
       sendJson(response, 400, { error: 'No video bytes were uploaded.' })
+      return
+    }
+
+    if (url.pathname === '/api/ai/edit-command') {
+      const payload = parseJsonBody(body)
+      const prompt =
+        typeof payload?.prompt === 'string' ? payload.prompt.trim() : ''
+
+      if (!prompt) {
+        sendJson(response, 400, {
+          error: 'AI prompt is required.',
+          suggestion: buildSafeAiSuggestion([
+            'Provide a natural-language editing request to continue.',
+          ]),
+        })
+        return
+      }
+
+      try {
+        const aiRaw = await callOllamaChat({
+          prompt,
+          videoDuration: payload?.videoDuration,
+          transcript: payload?.transcript,
+          mode: 'edit',
+        })
+        sendJson(response, 200, normalizeAiSuggestion(aiRaw))
+      } catch (error) {
+        sendJson(response, 200, buildSafeAiSuggestion([classifyOllamaError(error)]))
+      }
+      return
+    }
+
+    if (url.pathname === '/api/ai/chapter-suggestions') {
+      const payload = parseJsonBody(body)
+
+      try {
+        const aiRaw = await callOllamaChat({
+          prompt:
+            'Generate chapter suggestions from transcript and timestamps for review.',
+          videoDuration: payload?.videoDuration,
+          transcript: payload?.transcript,
+          mode: 'chapters',
+        })
+        const normalized = normalizeAiSuggestion(
+          { ...aiRaw, intent: 'chapter_suggest' },
+          'Chapter suggestions are review-only and are not applied automatically.',
+        )
+        sendJson(response, 200, normalized)
+      } catch (error) {
+        sendJson(
+          response,
+          200,
+          buildSafeAiSuggestion([classifyOllamaError(error)]),
+        )
+      }
       return
     }
 

@@ -249,6 +249,55 @@ Backend syntax check:
 node --check scripts/subtitle-server.mjs
 ```
 
+## AI integration (local Ollama only)
+
+VidVersity AI suggestions are **review-only**:
+
+- the frontend sends natural-language prompts to the VidVersity backend
+- the backend calls local Ollama
+- AI output is validated and normalized into structured JSON
+- the UI shows suggested operations for review
+- edits are only applied after explicit user confirmation
+
+Required local AI setup:
+
+- Ollama must be running locally
+- default Ollama URL: `http://localhost:11434`
+- required model name: `vidversity-edit`
+
+Optional environment variables for the subtitle/editor backend:
+
+```bash
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=vidversity-edit
+OLLAMA_TIMEOUT_MS=15000
+```
+
+New backend endpoints:
+
+- `POST /api/ai/edit-command`
+- `POST /api/ai/chapter-suggestions`
+
+Example testable requests:
+
+```bash
+curl -s http://127.0.0.1:8787/api/ai/edit-command \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Cut the introduction from 00:00 to 01:30","videoDuration":"00:10:00","transcript":[]}'
+
+curl -s http://127.0.0.1:8787/api/ai/edit-command \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Remove silent parts longer than 3 seconds","videoDuration":"00:10:00","transcript":[]}'
+
+curl -s http://127.0.0.1:8787/api/ai/edit-command \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Split this video into chapters by topic","videoDuration":"00:10:00","transcript":[]}'
+
+curl -s http://127.0.0.1:8787/api/ai/edit-command \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Extract the video from 2:30 to 3:30 and mute from 2:45 until the end","videoDuration":"00:10:00","transcript":[]}'
+```
+
 ## Project Notes
 
 ### Editor model

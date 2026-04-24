@@ -63,6 +63,9 @@ import {
 } from '../subtitles/api'
 import { importSubtitlesFromFile } from '../subtitles/import'
 import type { SubtitleSegment } from '../subtitles/types'
+import { requestAiEditCommand } from '../ai/client'
+import { applyAiSuggestion } from '../ai/executionAdapter'
+import type { AiSuggestion } from '../ai/types'
 import { Input } from '../components/ui/input'
 import {
   Dialog,
@@ -1025,9 +1028,12 @@ export default function HomePage(): JSX.Element {
     {
       id: 'assistant-seed',
       role: 'assistant',
-      text: 'AI actions will appear here once the backend is connected. For now, suggestion chips can prefill a request and Send stores it in this workspace panel.',
+      text: 'AI suggestions are review-only. Ask for an edit, review operations, then apply only after confirmation.',
     },
   ])
+  const [aiSuggestion, setAiSuggestion] = useState<AiSuggestion | null>(null)
+  const [aiRequestStatus, setAiRequestStatus] = useState<'idle' | 'loading'>('idle')
+  const [aiError, setAiError] = useState<string | null>(null)
   const [subtitleSegments, setSubtitleSegments] = useState<SubtitleSegment[]>([])
   const [subtitleStatus, setSubtitleStatus] = useState<SubtitleStatus>('idle')
   const [subtitleError, setSubtitleError] = useState<string | null>(null)
@@ -2714,7 +2720,7 @@ export default function HomePage(): JSX.Element {
     setTimelineZoom((prev) => clamp(prev + direction * 0.5, 1, 4))
   }
 
-  const handleSendAIPrompt = () => {
+  const handleSendAIPrompt = async () => {
     const trimmed = aiPromptDraft.trim()
     if (!trimmed) return
 
@@ -2727,6 +2733,136 @@ export default function HomePage(): JSX.Element {
       },
     ])
     setAiPromptDraft('')
+    setAiRequestStatus('loading')
+    setAiError(null)
+
+    try {
+      const suggestion = await requestAiEditCommand({
+        prompt: trimmed,
+        videoDuration: videoDuration != null ? formatClock(videoDuration) : null,
+        transcript: subtitleSegments.map((segment) => ({
+          start: formatClock(segment.start),
+          end: formatClock(segment.end),
+          text: segment.text,
+        })),
+      })
+
+      setAiSuggestion(suggestion)
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: `assistant-${Date.now()}`,
+          role: 'assistant',
+          text:
+            suggestion.notes[0] ||
+            `Suggested ${suggestion.operations.length} operation(s). Review before applying.`,
+        },
+      ])
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'AI request failed unexpectedly.'
+      setAiError(message)
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: `assistant-${Date.now()}`,
+          role: 'assistant',
+          text: `AI error: ${message}`,
+        },
+      ])
+    } finally {
+      setAiRequestStatus('idle')
+    }
+  }
+
+  const handleCancelAiSuggestion = () => {
+    setAiSuggestion(null)
+    setAiError(null)
+  }
+
+  const handleApplyAiSuggestion = async () => {
+    if (!aiSuggestion) return
+
+    try {
+      const execution = await applyAiSuggestion(aiSuggestion, {
+        onRemoveRange: async (start, end) => {
+          const parsedStart = start ? parseEditableTimestamp(start) : null
+          const parsedEnd = end ? parseEditableTimestamp(end) : null
+          if (parsedStart == null || parsedEnd == null || parsedEnd <= parsedStart) {
+            throw new Error('Remove operation requires valid start/end timestamps.')
+          }
+
+          const session = await ensureEditorSession()
+          const nextSession = await deleteSilenceRangesFromEditorSession(
+            session.sessionId,
+            [{ start: parsedStart, end: parsedEnd }],
+          )
+          syncTimelineFromEditorSession(nextSession)
+        },
+        onSplitAt: async (start) => {
+          const parsedStart = start ? parseEditableTimestamp(start) : null
+          if (parsedStart == null) {
+            throw new Error('Split operation requires a valid timestamp.')
+          }
+
+          const session = await ensureEditorSession()
+          const activeSegment =
+            session.segments.find((segment) => segment.id === selectedId) ||
+            session.segments.find(
+              (segment) => parsedStart > segment.start && parsedStart < segment.end,
+            ) ||
+            session.segments[0]
+
+          if (!activeSegment) {
+            throw new Error('No segment available to split.')
+          }
+
+          const nextSession = await splitEditorSessionAtTime(
+            session.sessionId,
+            activeSegment.id,
+            parsedStart,
+          )
+          syncTimelineFromEditorSession(nextSession)
+        },
+        onAddSubtitle: async (start, end, text) => {
+          const parsedStart = start ? parseEditableTimestamp(start) : null
+          const parsedEnd = end ? parseEditableTimestamp(end) : null
+          if (parsedStart == null || parsedEnd == null || parsedEnd <= parsedStart) {
+            throw new Error('Subtitle operation requires valid start/end timestamps.')
+          }
+
+          const id = `ai-${Date.now()}`
+          setSubtitleSegments((prev) =>
+            [...prev, { id, start: parsedStart, end: parsedEnd, text: text ?? '' }].sort(
+              (left, right) => left.start - right.start,
+            ),
+          )
+        },
+      })
+
+      const summary = [
+        execution.applied.length > 0
+          ? `Applied: ${execution.applied.join('; ')}`
+          : 'No operations were applied.',
+        execution.skipped.length > 0
+          ? `Skipped: ${execution.skipped.join('; ')}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(' ')
+
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: `assistant-${Date.now()}`,
+          role: 'assistant',
+          text: summary,
+        },
+      ])
+      setAiSuggestion(null)
+    } catch (error) {
+      setAiError(error instanceof Error ? error.message : 'Failed to apply AI suggestion.')
+    }
   }
 
   useEffect(() => {
@@ -4764,6 +4900,96 @@ export default function HomePage(): JSX.Element {
                           {message.text}
                         </div>
                       ))}
+
+                      {aiSuggestion && (
+                        <div
+                          className={`space-y-3 rounded-2xl border p-3 text-[12px] ${
+                            isDark
+                              ? 'border-[#31415a] bg-[#0f172a] text-[#d7e4ff]'
+                              : 'border-[#d9dde5] bg-[#f8faff] text-[#243042]'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="font-semibold">
+                              Suggested intent: {aiSuggestion.intent}
+                            </p>
+                            <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">
+                              Review required
+                            </span>
+                          </div>
+
+                          <div className="space-y-1">
+                            {aiSuggestion.operations.length === 0 ? (
+                              <p className="text-[11px] opacity-80">
+                                No direct timeline edits suggested.
+                              </p>
+                            ) : (
+                              aiSuggestion.operations.map((operation, index) => (
+                                <div
+                                  key={`${operation.action}-${index}`}
+                                  className={`rounded-xl border px-2 py-2 ${
+                                    isDark
+                                      ? 'border-[#2b3a53] bg-[#111827]'
+                                      : 'border-[#d7e4ff] bg-white'
+                                  }`}
+                                >
+                                  <p className="font-medium">{operation.action}</p>
+                                  <p className="text-[11px] opacity-80">
+                                    {operation.start ?? 'null'} → {operation.end ?? 'null'}
+                                  </p>
+                                  {operation.text ? (
+                                    <p className="text-[11px] opacity-80">{operation.text}</p>
+                                  ) : null}
+                                </div>
+                              ))
+                            )}
+                          </div>
+
+                          {aiSuggestion.notes.length > 0 && (
+                            <ul className="list-disc space-y-1 pl-4 text-[11px] opacity-80">
+                              {aiSuggestion.notes.map((note, index) => (
+                                <li key={`${note}-${index}`}>{note}</li>
+                              ))}
+                            </ul>
+                          )}
+
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={handleApplyAiSuggestion}
+                              className={`rounded-full px-3 py-1.5 text-[11px] font-semibold ${
+                                isDark
+                                  ? 'bg-[#1b3566] text-[#edf2ff] hover:bg-[#234178]'
+                                  : 'bg-[#003fb1] text-white hover:bg-[#1a56db]'
+                              }`}
+                            >
+                              Apply
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleCancelAiSuggestion}
+                              className={`rounded-full border px-3 py-1.5 text-[11px] ${
+                                isDark
+                                  ? 'border-[#4c5c76] text-[#c6d3eb]'
+                                  : 'border-[#d0dae8] text-[#44536a]'
+                              }`}
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setAiPromptDraft('')}
+                              className={`rounded-full border px-3 py-1.5 text-[11px] ${
+                                isDark
+                                  ? 'border-[#4c5c76] text-[#c6d3eb]'
+                                  : 'border-[#d0dae8] text-[#44536a]'
+                              }`}
+                            >
+                              Edit
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     <div
@@ -4792,7 +5018,7 @@ export default function HomePage(): JSX.Element {
                       <button
                         type="button"
                         onClick={handleSendAIPrompt}
-                        disabled={aiPromptDraft.trim().length === 0}
+                        disabled={aiPromptDraft.trim().length === 0 || aiRequestStatus === 'loading'}
                         className={`flex h-11 w-11 items-center justify-center rounded-2xl transition disabled:cursor-not-allowed disabled:opacity-40 ${
                           isDark
                             ? 'bg-[#1b3566] text-[#edf2ff] hover:bg-[#234178]'
@@ -4803,6 +5029,9 @@ export default function HomePage(): JSX.Element {
                         <Send className="h-4 w-4" />
                       </button>
                     </div>
+                    {aiError ? (
+                      <p className="mt-2 text-[11px] text-[#ff8f9a]">{aiError}</p>
+                    ) : null}
                   </div>
                 </>
               )}
