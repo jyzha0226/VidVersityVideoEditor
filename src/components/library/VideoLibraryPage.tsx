@@ -44,15 +44,15 @@ export default function VideoLibraryPage({
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const navigate = useNavigate()
 
-  const navLinkClass = ({ isActive }: { isActive: boolean }) =>
-    `flex w-full items-center gap-3 rounded-xl px-3 py-2.5 transition ${
+  const topTabClass = ({ isActive }: { isActive: boolean }) =>
+    `flex h-10 items-center gap-2 rounded-t-2xl border px-4 text-[12px] font-bold uppercase tracking-[0.12em] transition ${
       isActive
         ? isDark
-          ? 'bg-[#182238] text-[#8bb8ff] font-semibold shadow-sm'
-          : 'bg-white text-[#003fb1] font-semibold shadow-sm'
+          ? 'border-[#243149] bg-[#0b1220] text-[#edf2ff] shadow-[0_-8px_24px_rgba(15,23,42,0.18)]'
+          : 'border-white bg-white text-[#003fb1] shadow-[0_-8px_24px_rgba(15,23,42,0.12)]'
         : isDark
-          ? 'text-[#9fb0ca] hover:bg-[#182238] hover:text-[#8bb8ff]'
-          : 'text-[#57657a] hover:bg-white hover:text-[#003fb1]'
+          ? 'border-white/10 bg-white/8 text-white/78 hover:bg-white/14 hover:text-white'
+          : 'border-white/15 bg-white/14 text-white/82 hover:bg-white/22 hover:text-white'
     }`
 
   const handlePrimaryAction = () => {
@@ -83,14 +83,28 @@ export default function VideoLibraryPage({
         isDark ? 'bg-[#0b1220] text-[#edf2ff]' : 'bg-[#f7f9fb] text-[#191c1e]'
       }`}
     >
-      <header className="sticky top-0 z-40 flex items-center justify-between gap-4 bg-[#de34ab] px-5 py-3 text-white shadow-[0_12px_40px_rgba(222,52,171,0.28)]">
-        <div className="flex items-center gap-8">
-          <div className="font-['Manrope'] text-xl font-extrabold tracking-[-0.04em]">
+      <header className="sticky top-0 z-40 flex items-center justify-between gap-3 bg-[#de34ab] px-5 py-3 text-white shadow-[0_12px_40px_rgba(222,52,171,0.28)] sm:items-end sm:pb-0 sm:pt-3">
+        <div className="flex min-w-0 items-center gap-8 sm:items-end">
+          <div className="shrink-0 font-['Manrope'] text-xl font-extrabold tracking-[-0.04em] sm:pb-3">
             Vidversity
           </div>
+          <nav className="hidden min-w-0 items-end gap-1 sm:ml-[112px] sm:flex">
+            <NavLink to="/drafts" className={topTabClass}>
+              <Files className="h-4 w-4" />
+              Drafts
+            </NavLink>
+            <NavLink to="/archive" className={topTabClass}>
+              <FolderArchive className="h-4 w-4" />
+              Archive
+            </NavLink>
+            <NavLink to="/" end className={topTabClass}>
+              <Clapperboard className="h-4 w-4" />
+              Editor
+            </NavLink>
+          </nav>
         </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 sm:pb-3">
           <button
             type="button"
             onClick={() => setGuidedMode((prev) => !prev)}
@@ -122,22 +136,22 @@ export default function VideoLibraryPage({
               <Sun className="h-4 w-4" />
             )}
           </button>
-          <button
-            type="button"
-            className="rounded-full bg-white/18 p-2 backdrop-blur transition hover:bg-white/24"
-          >
-            <HelpCircle className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            className="relative rounded-full bg-white/18 p-2 backdrop-blur transition hover:bg-white/24"
-          >
-            <Bell className="h-4 w-4" />
-            <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500" />
-          </button>
-          <div className="flex h-9 w-9 items-center justify-center rounded-full border-2 border-white/25 bg-white/20 font-semibold">
-            NR
-          </div>
+	          <button
+	            type="button"
+	            className="hidden rounded-full bg-white/18 p-2 backdrop-blur transition hover:bg-white/24 sm:block"
+	          >
+	            <HelpCircle className="h-4 w-4" />
+	          </button>
+	          <button
+	            type="button"
+	            className="relative hidden rounded-full bg-white/18 p-2 backdrop-blur transition hover:bg-white/24 sm:block"
+	          >
+	            <Bell className="h-4 w-4" />
+	            <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500" />
+	          </button>
+	          <div className="hidden h-9 w-9 items-center justify-center rounded-full border-2 border-white/25 bg-white/20 font-semibold sm:flex">
+	            NR
+	          </div>
         </div>
       </header>
 
@@ -153,23 +167,6 @@ export default function VideoLibraryPage({
               : 'border-[#d9dde5] bg-[#f2f4f6]'
           }`}
         >
-          <div className="space-y-5">
-            <nav className="space-y-1 text-sm">
-              <NavLink to="/drafts" className={navLinkClass}>
-                <Files className="h-4 w-4" />
-                Drafts
-              </NavLink>
-              <NavLink to="/archive" className={navLinkClass}>
-                <FolderArchive className="h-4 w-4" />
-                Archive
-              </NavLink>
-              <NavLink to="/" end className={navLinkClass}>
-                <Clapperboard className="h-4 w-4" />
-                Editor
-              </NavLink>
-            </nav>
-          </div>
-
           <div className="space-y-2">
             <button
               type="button"

@@ -151,9 +151,10 @@ type ExportKind = 'clip' | 'video'
 type AppendStatus = 'idle' | 'processing'
 type SubtitleTimingField = 'start' | 'end'
 type SubtitleEntryStatus = 'idle' | 'uploading' | 'generating' | 'success'
-type RightPanelView = 'ai' | 'silence' | 'subtitles' | 'chapters' | 'clean'
+type RightPanelView = 'ai' | 'silence' | 'subtitles' | 'chapters' | 'clean' | 'done'
 type CutHandle = 'start' | 'end'
 type PreviewPlaybackMode = 'edited' | 'original'
+type WorkflowStepId = 'clean' | 'polish' | 'chapters' | 'course' | ''
 
 const CUT_RANGE_MIN_GAP = 0.1
 
@@ -400,39 +401,22 @@ function ToolbarButton({
   disabled = false,
   danger = false,
   active = false,
-  tone = 'editor',
 }: ToolbarButtonProps): JSX.Element {
   const styles = active
     ? danger
       ? isDark
         ? 'bg-[#3a1c24] text-[#ffb7c0] shadow-[0_10px_24px_rgba(162,53,53,0.18)]'
         : 'bg-[#fff0f1] text-[#a23535] shadow-[0_10px_24px_rgba(162,53,53,0.14)]'
-      : tone === 'workspace'
-        ? isDark
-          ? 'bg-[#31192e] text-[#ffb3de] shadow-[0_10px_24px_rgba(222,52,171,0.18)]'
-          : 'bg-[#fff0f8] text-[#a20f66] shadow-[0_10px_24px_rgba(194,24,122,0.14)]'
-        : tone === 'global'
-          ? isDark
-            ? 'bg-[#22314a] text-[#f2f6ff] shadow-[0_10px_24px_rgba(34,49,74,0.2)]'
-            : 'bg-[#edf2f7] text-[#37465d] shadow-[0_10px_24px_rgba(91,104,124,0.14)]'
-          : isDark
-            ? 'bg-[#1b3566] text-[#cfe3ff] shadow-[0_10px_24px_rgba(26,86,219,0.22)]'
-            : 'bg-[#e8f0ff] text-[#00308a] shadow-[0_10px_24px_rgba(0,63,177,0.16)]'
+      : isDark
+        ? 'bg-[#1b3566] text-[#cfe3ff] shadow-[0_10px_24px_rgba(26,86,219,0.22)]'
+        : 'bg-[#e8f0ff] text-[#00308a] shadow-[0_10px_24px_rgba(0,63,177,0.16)]'
     : danger
       ? isDark
         ? 'text-[#ff8f9a] hover:bg-[#2a1820]'
         : 'text-[#a23535] hover:bg-[#fff1f1]'
-      : tone === 'workspace'
-        ? isDark
-          ? 'text-[#ff7ac8] hover:bg-[#2a1730] hover:text-[#ffb3de]'
-          : 'text-[#c2187a] hover:bg-[#fff0f8] hover:text-[#a20f66]'
-        : tone === 'global'
-          ? isDark
-            ? 'text-[#d6deec] hover:bg-[#22314a] hover:text-[#f2f6ff]'
-            : 'text-[#5b687c] hover:bg-[#f2f4f6] hover:text-[#37465d]'
-          : isDark
-            ? 'text-[#8bb8ff] hover:bg-[#182238] hover:text-[#cfe3ff]'
-            : 'text-[#003fb1] hover:bg-[#eef3ff] hover:text-[#00308a]'
+      : isDark
+        ? 'text-[#d6deec] hover:bg-[#22314a] hover:text-[#f2f6ff]'
+        : 'text-[#5b687c] hover:bg-[#f2f4f6] hover:text-[#37465d]'
 
   return (
     <button
@@ -1280,6 +1264,7 @@ export default function HomePage(): JSX.Element {
   const [dragOverSegmentId, setDragOverSegmentId] = useState<number | null>(null)
   const [timelineZoom, setTimelineZoom] = useState(1)
   const [history, setHistory] = useState<EditorHistoryEntry[]>([])
+  const [activeWorkflowStep, setActiveWorkflowStep] = useState<WorkflowStepId>('')
   const [previewPlaybackMode, setPreviewPlaybackMode] =
     useState<PreviewPlaybackMode>('edited')
   const [selectedCategory, setSelectedCategory] = useState<string>('')
@@ -1625,6 +1610,36 @@ export default function HomePage(): JSX.Element {
       silenceSegments.length > 0 ||
       stagedSilenceSegmentKeys.length > 0
     )
+  const workflowSteps = [
+	    {
+	      id: 'clean',
+	      step: 'Step 1',
+	      label: 'Clean',
+	      tooltip: 'Remove unwanted sections, add videos, and undo edits.',
+	      icon: Brush,
+	    },
+    {
+	      id: 'polish',
+	      step: 'Step 2',
+	      label: 'Polish',
+	      tooltip: 'Add subtitles or find quiet sections to improve the video.',
+	      icon: Sparkles,
+	    },
+    {
+	      id: 'chapters',
+	      step: 'Step 3',
+	      label: 'Chapters',
+	      tooltip: 'Split the video into clear named chapters.',
+	      icon: Clapperboard,
+	    },
+    {
+	      id: 'course',
+	      step: 'Step 4',
+	      label: 'Course',
+	      tooltip: 'Save, export, or add the finished video to a course.',
+	      icon: BookOpen,
+	    },
+  ]
 
   const captureEditorState = (): EditorHistoryEntry => ({
     segments: segments.map((segment) => ({ ...segment })),
@@ -1689,10 +1704,11 @@ export default function HomePage(): JSX.Element {
     setSilenceSegments([])
     setSelectedSilenceSegmentKeys([])
     setStagedSilenceSegmentKeys([])
-    setSilenceNotice(null)
-    previousWorkspaceViewRef.current = 'ai'
-    setRightPanelView('ai')
-    setIsCutModeEnabled(false)
+	    setSilenceNotice(null)
+	    previousWorkspaceViewRef.current = 'ai'
+	    setRightPanelView('ai')
+	    setActiveWorkflowStep('')
+	    setIsCutModeEnabled(false)
     setActiveCutHandle(null)
     setIsArrangeModeEnabled(false)
     setDraggedSegmentId(null)
@@ -1704,8 +1720,9 @@ export default function HomePage(): JSX.Element {
     setCutRange(buildFullCutRange(editedDuration || videoDuration || 180))
   }
 
-  const handleUndo = async () => {
-    if (history.length === 0) return
+	  const handleUndo = async () => {
+	    if (history.length === 0) return
+	    setActiveWorkflowStep('clean')
 
     const previous = history[history.length - 1]
     setHistory((prev) => prev.slice(0, -1))
@@ -1816,8 +1833,9 @@ export default function HomePage(): JSX.Element {
     seekEditedTimelineToTime(ratio * editedDuration)
   }
 
-  const handleOpenCleanPanel = () => {
-    if (rightPanelView === 'clean' && !isRightPanelCollapsed) {
+	  const handleOpenCleanPanel = () => {
+	    setActiveWorkflowStep('clean')
+	    if (rightPanelView === 'clean' && !isRightPanelCollapsed) {
       setIsRightPanelCollapsed(true)
       setIsCutModeEnabled(false)
       setActiveCutHandle(null)
@@ -1835,8 +1853,9 @@ export default function HomePage(): JSX.Element {
     setCutRange(buildFullCutRange(selectedCutDuration))
   }
 
-  const handleActivateCutMode = () => {
-    if (isCutModeEnabled) {
+	  const handleActivateCutMode = () => {
+	    setActiveWorkflowStep('clean')
+	    if (isCutModeEnabled) {
       setIsCutModeEnabled(false)
       setActiveCutHandle(null)
       return
@@ -1876,9 +1895,10 @@ export default function HomePage(): JSX.Element {
       })
       setSubtitleSegments(generated)
       setSubtitleTimingDrafts({})
-      setSubtitleStatus('success')
-      previousWorkspaceViewRef.current = 'subtitles'
-      setRightPanelView('subtitles')
+	      setSubtitleStatus('success')
+	      previousWorkspaceViewRef.current = 'subtitles'
+	      setRightPanelView('subtitles')
+	      setActiveWorkflowStep('polish')
       setIsCutModeEnabled(false)
       setIsRightPanelCollapsed(false)
       return true
@@ -1893,8 +1913,9 @@ export default function HomePage(): JSX.Element {
     }
   }
 
-  const handleRemoveSilence = async () => {
-    if (rightPanelView === 'silence' && !isRightPanelCollapsed) {
+	  const handleRemoveSilence = async () => {
+	    setActiveWorkflowStep('polish')
+	    if (rightPanelView === 'silence' && !isRightPanelCollapsed) {
       setIsRightPanelCollapsed(true)
       setIsCutModeEnabled(false)
       setActiveCutHandle(null)
@@ -1999,7 +2020,7 @@ export default function HomePage(): JSX.Element {
     }
   }
 
-  const handleOpenAIPanel = () => {
+	  const handleOpenAIPanel = () => {
     if (rightPanelView === 'ai' && !isRightPanelCollapsed) {
       setIsRightPanelCollapsed(true)
       setIsCutModeEnabled(false)
@@ -2007,15 +2028,17 @@ export default function HomePage(): JSX.Element {
       return
     }
 
-    previousWorkspaceViewRef.current = 'ai'
-    setRightPanelView('ai')
+	    previousWorkspaceViewRef.current = 'ai'
+	    setRightPanelView('ai')
+	    setActiveWorkflowStep('')
     setIsCutModeEnabled(false)
     setActiveCutHandle(null)
     setIsRightPanelCollapsed(false)
   }
 
-  const handleOpenSubtitlesPanel = () => {
-    if (rightPanelView === 'subtitles' && !isRightPanelCollapsed) {
+	  const handleOpenSubtitlesPanel = () => {
+	    setActiveWorkflowStep('polish')
+	    if (rightPanelView === 'subtitles' && !isRightPanelCollapsed) {
       setIsRightPanelCollapsed(true)
       setIsCutModeEnabled(false)
       setActiveCutHandle(null)
@@ -2030,8 +2053,9 @@ export default function HomePage(): JSX.Element {
     setSubtitleError(null)
   }
 
-  const handleOpenChaptersPanel = () => {
-    if (rightPanelView === 'chapters' && !isRightPanelCollapsed) {
+	  const handleOpenChaptersPanel = () => {
+	    setActiveWorkflowStep('chapters')
+	    if (rightPanelView === 'chapters' && !isRightPanelCollapsed) {
       setIsRightPanelCollapsed(true)
       setIsCutModeEnabled(false)
       setActiveCutHandle(null)
@@ -2046,7 +2070,71 @@ export default function HomePage(): JSX.Element {
     setSceneStatus('pending')
   }
 
-  const handleToggleSilenceSelection = (key: string) => {
+	  const handleOpenDonePanel = () => {
+	    setActiveWorkflowStep('course')
+	    if (rightPanelView === 'done' && !isRightPanelCollapsed) {
+      setIsRightPanelCollapsed(true)
+      setIsCutModeEnabled(false)
+      setActiveCutHandle(null)
+      return
+    }
+
+    previousWorkspaceViewRef.current = 'done'
+    setRightPanelView('done')
+    setIsCutModeEnabled(false)
+    setActiveCutHandle(null)
+	    setIsRightPanelCollapsed(false)
+	  }
+
+	  const handleWorkflowStepClick = (stepId: WorkflowStepId) => {
+	    setActiveWorkflowStep(stepId)
+	    setIsCutModeEnabled(false)
+	    setActiveCutHandle(null)
+	    setIsRightPanelCollapsed(false)
+
+	    if (stepId === 'clean') {
+	      if (rightPanelView !== 'clean') {
+	        previousWorkspaceViewRef.current = rightPanelView
+	      }
+	      setRightPanelView('clean')
+	      setEditorError(null)
+	      setCutRange(buildFullCutRange(selectedCutDuration))
+	      return
+	    }
+
+	    if (stepId === 'polish') {
+	      previousWorkspaceViewRef.current = 'subtitles'
+	      setRightPanelView('subtitles')
+	      setSubtitleError(null)
+	      return
+	    }
+
+	    if (stepId === 'chapters') {
+	      previousWorkspaceViewRef.current = 'chapters'
+	      setRightPanelView('chapters')
+	      setSceneStatus('pending')
+	      return
+	    }
+
+	    if (stepId === 'course') {
+	      previousWorkspaceViewRef.current = 'done'
+	      setRightPanelView('done')
+	    }
+	  }
+
+	  const handleToggleRightPanelCollapsed = () => {
+	    if (isRightPanelCollapsed) {
+	      if (!rightPanelView) {
+	        setRightPanelView('ai')
+	      }
+	      setIsRightPanelCollapsed(false)
+	      return
+	    }
+
+	    setIsRightPanelCollapsed(true)
+	  }
+
+	  const handleToggleSilenceSelection = (key: string) => {
     setSelectedSilenceSegmentKeys((prev) =>
       prev.includes(key) ? prev.filter((item) => item !== key) : [...prev, key],
     )
@@ -2844,9 +2932,10 @@ export default function HomePage(): JSX.Element {
     subtitleUploadInputRef.current?.click()
   }
 
-  const handleAppendVideoClick = () => {
-    appendVideoInputRef.current?.click()
-  }
+	  const handleAppendVideoClick = () => {
+	    setActiveWorkflowStep('clean')
+	    appendVideoInputRef.current?.click()
+	  }
 
   const handleAppendVideoSelected = async (
     event: React.ChangeEvent<HTMLInputElement>,
@@ -3127,15 +3216,15 @@ export default function HomePage(): JSX.Element {
   }, [isCutModeEnabled, selectedCutScopeKey, selectedCutDuration])
 
   const progress = totalDuration > 0 ? currentTime / totalDuration : 0
-  const navLinkClass = ({ isActive }: { isActive: boolean }) =>
-    `flex w-full items-center gap-3 rounded-xl px-3 py-2.5 transition ${
+  const topTabClass = ({ isActive }: { isActive: boolean }) =>
+    `flex h-10 items-center gap-2 rounded-t-2xl border px-4 text-[12px] font-bold uppercase tracking-[0.12em] transition ${
       isActive
         ? isDark
-          ? 'bg-[#182238] text-[#8bb8ff] font-semibold shadow-sm'
-          : 'bg-white text-[#003fb1] font-semibold shadow-sm'
+          ? 'border-[#243149] bg-[#0b1220] text-[#edf2ff] shadow-[0_-8px_24px_rgba(15,23,42,0.18)]'
+          : 'border-white bg-white text-[#003fb1] shadow-[0_-8px_24px_rgba(15,23,42,0.12)]'
         : isDark
-          ? 'text-[#9fb0ca] hover:bg-[#182238] hover:text-[#8bb8ff]'
-          : 'text-[#57657a] hover:bg-white hover:text-[#003fb1]'
+          ? 'border-white/10 bg-white/8 text-white/78 hover:bg-white/14 hover:text-white'
+          : 'border-white/15 bg-white/14 text-white/82 hover:bg-white/22 hover:text-white'
     }`
 
   const timeMarkers = useMemo(
@@ -3219,14 +3308,53 @@ export default function HomePage(): JSX.Element {
         </div>
       ) : null}
 
-      <header className="sticky top-0 z-40 flex items-center justify-between gap-4 bg-[#de34ab] px-5 py-3 text-white shadow-[0_12px_40px_rgba(222,52,171,0.28)]">
-        <div className="flex items-center gap-8">
-          <div className="font-['Manrope'] text-xl font-extrabold tracking-[-0.04em]">
+      <header className="sticky top-0 z-40 flex items-center justify-between gap-3 bg-[#de34ab] px-5 py-3 text-white shadow-[0_12px_40px_rgba(222,52,171,0.28)] sm:items-end sm:pb-0 sm:pt-3">
+        <div className="flex min-w-0 items-center gap-8 sm:items-end">
+          <div className="shrink-0 font-['Manrope'] text-xl font-extrabold tracking-[-0.04em] sm:pb-3">
             Vidversity
           </div>
+          <nav className="hidden min-w-0 items-end gap-1 sm:ml-[112px] sm:flex">
+            <NavLink
+              to="/drafts"
+              className={topTabClass}
+              onClick={(event) => {
+                if (!confirmDiscardChanges()) {
+                  event.preventDefault()
+                }
+              }}
+            >
+              <Files className="h-4 w-4" />
+              Drafts
+            </NavLink>
+            <NavLink
+              to="/archive"
+              className={topTabClass}
+              onClick={(event) => {
+                if (!confirmDiscardChanges()) {
+                  event.preventDefault()
+                }
+              }}
+            >
+              <FolderArchive className="h-4 w-4" />
+              Archive
+            </NavLink>
+            <NavLink
+              to="/"
+              end
+              className={topTabClass}
+              onClick={(event) => {
+                if (!confirmDiscardChanges()) {
+                  event.preventDefault()
+                }
+              }}
+            >
+              <Clapperboard className="h-4 w-4" />
+              Editor
+            </NavLink>
+          </nav>
         </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 sm:pb-3">
           <button
             type="button"
             onClick={() => setGuidedMode((prev) => !prev)}
@@ -3258,22 +3386,22 @@ export default function HomePage(): JSX.Element {
               <Sun className="h-4 w-4" />
             )}
           </button>
-          <button
-            type="button"
-            className="rounded-full bg-white/18 p-2 backdrop-blur transition hover:bg-white/24"
-          >
-            <HelpCircle className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            className="relative rounded-full bg-white/18 p-2 backdrop-blur transition hover:bg-white/24"
-          >
-            <Bell className="h-4 w-4" />
-            <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500" />
-          </button>
-          <div className="flex h-9 w-9 items-center justify-center rounded-full border-2 border-white/25 bg-white/20 font-semibold">
-            NR
-          </div>
+	          <button
+	            type="button"
+	            className="hidden rounded-full bg-white/18 p-2 backdrop-blur transition hover:bg-white/24 sm:block"
+	          >
+	            <HelpCircle className="h-4 w-4" />
+	          </button>
+	          <button
+	            type="button"
+	            className="relative hidden rounded-full bg-white/18 p-2 backdrop-blur transition hover:bg-white/24 sm:block"
+	          >
+	            <Bell className="h-4 w-4" />
+	            <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500" />
+	          </button>
+	          <div className="hidden h-9 w-9 items-center justify-center rounded-full border-2 border-white/25 bg-white/20 font-semibold sm:flex">
+	            NR
+	          </div>
         </div>
       </header>
 
@@ -3356,46 +3484,99 @@ export default function HomePage(): JSX.Element {
               : 'border-[#d9dde5] bg-[#f2f4f6]'
           }`}
         >
-          <div className="space-y-5">
-            <nav className="space-y-1 text-sm">
-              <NavLink
-                to="/drafts"
-                className={navLinkClass}
-                onClick={(event) => {
-                  if (!confirmDiscardChanges()) {
-                    event.preventDefault()
-                  }
-                }}
-              >
-                <Files className="h-4 w-4" />
-                Drafts
-              </NavLink>
-              <NavLink
-                to="/archive"
-                className={navLinkClass}
-                onClick={(event) => {
-                  if (!confirmDiscardChanges()) {
-                    event.preventDefault()
-                  }
-                }}
-              >
-                <FolderArchive className="h-4 w-4" />
-                Archive
-              </NavLink>
-              <NavLink
-                to="/"
-                end
-                className={navLinkClass}
-                onClick={(event) => {
-                  if (!confirmDiscardChanges()) {
-                    event.preventDefault()
-                  }
-                }}
-              >
-                <Clapperboard className="h-4 w-4" />
-                Editor
-              </NavLink>
-            </nav>
+	          <div className="space-y-5">
+	            <div
+	              className={`rounded-[20px] border px-3 py-3 ${
+	                isDark
+	                  ? 'border-[#243149] bg-[#0f172a]'
+	                  : 'border-[#e3e7ee] bg-white'
+	              }`}
+	            >
+	              <p
+	                className={`mb-3 text-[10px] font-bold uppercase tracking-[0.18em] ${
+	                  isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+	                }`}
+	              >
+	                Workflow
+	              </p>
+	              <div className="space-y-1.5">
+	                {workflowSteps.map((step, index) => {
+	                  const StepIcon = step.icon
+	                  const activeIndex = workflowSteps.findIndex(
+	                    (candidate) => candidate.id === activeWorkflowStep,
+	                  )
+	                  const isActive = activeWorkflowStep === step.id
+	                  const isComplete = activeIndex > index
+
+	                  return (
+		                    <button
+		                      type="button"
+		                      key={step.id}
+		                      onClick={() => handleWorkflowStepClick(step.id as WorkflowStepId)}
+		                      className={`group relative flex w-full items-center gap-2 rounded-xl border px-2.5 py-2 text-left transition ${
+		                        isActive
+		                          ? isDark
+		                            ? 'border-[#8bb8ff] bg-[#182238] text-[#edf2ff] shadow-[0_10px_22px_rgba(139,184,255,0.12)]'
+	                            : 'border-[#7aa4ff] bg-[#eef3ff] text-[#003fb1] shadow-[0_10px_22px_rgba(0,63,177,0.1)]'
+	                          : isComplete
+	                            ? isDark
+	                              ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb]'
+	                              : 'border-[#d9dde5] bg-[#fbfcfd] text-[#515f74]'
+	                            : isDark
+	                              ? 'border-[#243149] bg-[#111827] text-[#8fa2c2]'
+	                              : 'border-[#e3e7ee] bg-[#fbfcfd] text-[#637287]'
+	                      }`}
+	                    >
+	                      <span
+	                        className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${
+	                          isActive
+	                            ? isDark
+	                              ? 'bg-[#1b3566] text-[#9ec5ff]'
+	                              : 'bg-white text-[#003fb1]'
+	                            : isDark
+	                              ? 'bg-[#1e293b] text-[#8fa2c2]'
+	                              : 'bg-[#f2f4f6] text-[#637287]'
+	                        }`}
+	                      >
+	                        <StepIcon className="h-3.5 w-3.5" />
+	                      </span>
+	                      <span className="min-w-0">
+	                        <span className="block text-[8px] font-bold uppercase tracking-[0.1em]">
+	                          {step.step}
+	                        </span>
+	                        <span className="block truncate text-[10px] font-bold uppercase tracking-[0.12em]">
+	                          {step.label}
+		                        </span>
+		                      </span>
+		                      {guidedMode ? (
+			                        <span
+			                          className={`pointer-events-none absolute left-full top-1/2 z-[300] ml-3 hidden w-52 -translate-y-1/2 rounded-2xl border p-3 text-left shadow-xl group-hover:block ${
+			                            isDark
+			                              ? 'border-[#31415a] bg-[#0f172a]'
+			                              : 'border-[#d9dde5] bg-white'
+			                          }`}
+			                        >
+			                          <span
+			                            className={`block text-[9px] font-extrabold uppercase tracking-[0.2em] ${
+			                              isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+			                            }`}
+			                          >
+			                            Guided Tip
+			                          </span>
+			                          <span
+			                            className={`mt-1 block text-[11px] leading-4 ${
+			                              isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'
+			                            }`}
+			                          >
+			                            {step.tooltip}
+			                          </span>
+			                        </span>
+		                      ) : null}
+		                    </button>
+	                  )
+	                })}
+	              </div>
+	            </div>
 
             <div
               className={`rounded-[20px] border px-4 py-4 ${
@@ -3404,88 +3585,13 @@ export default function HomePage(): JSX.Element {
                   : 'border-[#e3e7ee] bg-white'
               }`}
             >
-              <p
-                className={`text-[11px] font-bold uppercase tracking-[0.18em] ${
-                  isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
-                }`}
-              >
-                Session Status
-              </p>
-              <div className="mt-3 space-y-3">
-                <div className="flex items-center justify-between text-[12px]">
-                  <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
-                    Video loaded
-                  </span>
-                  <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
-                    {selectedVideoFile || videoSourceUrl ? 'Ready' : 'Waiting'}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-[12px]">
-                  <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
-                    Subtitles
-                  </span>
-                  <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
-                    {subtitleSegments.length > 0
-                      ? `${subtitleSegments.length} loaded`
-                      : subtitleStatus === 'processing'
-                        ? 'Processing'
-                        : 'Not added'}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-[12px]">
-                  <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
-                    Silence cleanup
-                  </span>
-                  <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
-                    {silenceStatus === 'processing'
-                      ? 'Analyzing'
-                      : silenceStatus === 'success'
-                        ? `${selectedSilenceCount}/${silenceSegments.length} selected`
-                        : 'Ready'}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-[12px]">
-                  <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
-                    Guided mode
-                  </span>
-                  <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
-                    {guidedMode ? 'On' : 'Off'}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <div
-              className={`rounded-[20px] border px-4 py-4 ${
-                isDark
-                  ? 'border-[#243149] bg-[#0f172a]'
-                  : 'border-[#e3e7ee] bg-white'
-              }`}
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p
-                    className={`text-[11px] font-bold uppercase tracking-[0.18em] ${
-                      isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
-                    }`}
-                  >
-                    Video Category
-                  </p>
-                </div>
-                <span
-                  className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] ${
-                    selectedCategory
-                      ? isDark
-                        ? 'bg-[#1a2740] text-[#8bb8ff]'
-                        : 'bg-[#eef3ff] text-[#003fb1]'
-                      : isDark
-                        ? 'bg-[#1a1f2b] text-[#9fb0ca]'
-                        : 'bg-[#f3f4f6] text-[#57657a]'
-                  }`}
-                >
-                  {selectedCategory ? 'Assigned' : 'Optional'}
-                </span>
-              </div>
+	              <p
+	                className={`text-[11px] font-bold uppercase tracking-[0.18em] ${
+	                  isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+	                }`}
+	              >
+	                Video Category
+	              </p>
 
               <div className="mt-4">
                 <Select
@@ -3516,73 +3622,68 @@ export default function HomePage(): JSX.Element {
                   </SelectContent>
                 </Select>
               </div>
-            </div>
-          </div>
+	            </div>
+	          </div>
 
-          <div className="space-y-2">
-            <button
-              type="button"
-              className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${
-                isDark
-                  ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
-                  : 'border border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb] hover:text-[#003fb1]'
-              }`}
-            >
-              <Save className="h-4 w-4" />
-              Save Draft
-            </button>
-            <button
-              type="button"
-              className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${
-                isDark
-                  ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
-                  : 'border border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb] hover:text-[#003fb1]'
-              }`}
-            >
-              <FolderArchive className="h-4 w-4" />
-              Archive Video
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                void handleExportSelectedClip()
-              }}
-              disabled={
-                exportStatus === 'processing' ||
-                editorStatus === 'syncing' ||
-                !selectedSegment ||
-                !hasSingleSelectedSegment ||
-                (!selectedVideoFile && !editorSessionId)
-              }
-              className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
-                isDark
-                  ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
-                  : 'border border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb] hover:text-[#003fb1]'
-              }`}
-            >
-              <Video className="h-4 w-4" />
-              {exportStatus === 'processing' && activeExportKind === 'clip'
-                ? 'Rendering Chapter...'
-                : 'Export Chapter'}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                void handleExportVideo()
-              }}
-              disabled={
-                exportStatus === 'processing' ||
-                editorStatus === 'syncing' ||
-                (!selectedVideoFile && !editorSessionId)
-              }
-              className="w-full rounded-xl bg-gradient-to-r from-[#003fb1] to-[#1a56db] px-4 py-3 text-sm font-semibold text-white shadow-[0_12px_30px_rgba(0,63,177,0.22)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {exportStatus === 'processing' && activeExportKind === 'video'
-                ? 'Rendering Video...'
-                : 'Export Video'}
-            </button>
-          </div>
-        </aside>
+	          <div
+	            className={`mt-5 rounded-[20px] border px-4 py-4 ${
+	              isDark
+	                ? 'border-[#243149] bg-[#0f172a]'
+	                : 'border-[#e3e7ee] bg-white'
+	            }`}
+	          >
+	            <p
+	              className={`text-[11px] font-bold uppercase tracking-[0.18em] ${
+	                isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+	              }`}
+	            >
+	              Session Status
+	            </p>
+	            <div className="mt-3 space-y-3">
+	              <div className="flex items-center justify-between text-[12px]">
+	                <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
+	                  Video loaded
+	                </span>
+	                <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
+	                  {selectedVideoFile || videoSourceUrl ? 'Ready' : 'Waiting'}
+	                </span>
+	              </div>
+	              <div className="flex items-center justify-between text-[12px]">
+	                <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
+	                  Subtitles
+	                </span>
+	                <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
+	                  {subtitleSegments.length > 0
+	                    ? `${subtitleSegments.length} loaded`
+	                    : subtitleStatus === 'processing'
+	                      ? 'Processing'
+	                      : 'Not added'}
+	                </span>
+	              </div>
+	              <div className="flex items-center justify-between text-[12px]">
+	                <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
+	                  Silence cleanup
+	                </span>
+	                <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
+	                  {silenceStatus === 'processing'
+	                    ? 'Analyzing'
+	                    : silenceStatus === 'success'
+	                      ? `${selectedSilenceCount}/${silenceSegments.length} selected`
+	                      : 'Ready'}
+	                </span>
+	              </div>
+	              <div className="flex items-center justify-between text-[12px]">
+	                <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
+	                  Guided mode
+	                </span>
+	                <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
+	                  {guidedMode ? 'On' : 'Off'}
+	                </span>
+	              </div>
+	            </div>
+	          </div>
+
+	        </aside>
 
         <main
           className={`min-h-0 min-w-0 overflow-y-auto overflow-x-hidden ${
@@ -3615,14 +3716,55 @@ export default function HomePage(): JSX.Element {
                 }}
               />
 
-              <section
-                className={`mt-auto border-t ${
-                  isDark
-                    ? 'border-[#243149] bg-[linear-gradient(180deg,#111827_0%,#0f172a_100%)]'
-                    : 'border-[#e3e7ee] bg-[linear-gradient(180deg,#fbfcfd_0%,#f3f6f9_100%)]'
-                }`}
-              >
-                <div className="mx-auto w-full max-w-[1040px] px-4 py-3">
+	              <section
+	                className={`relative mt-auto border-t ${
+	                  isDark
+	                    ? 'border-[#243149] bg-[linear-gradient(180deg,#111827_0%,#0f172a_100%)]'
+	                    : 'border-[#e3e7ee] bg-[linear-gradient(180deg,#fbfcfd_0%,#f3f6f9_100%)]'
+	                }`}
+	              >
+		                <button
+		                  type="button"
+		                  onClick={handleOpenAIPanel}
+		                  className={`group absolute right-3 top-3 z-30 flex h-11 w-11 items-center justify-center rounded-full border shadow-[0_12px_30px_rgba(15,23,42,0.16)] transition hover:-translate-y-0.5 ${
+		                    rightPanelView === 'ai' && !isRightPanelCollapsed
+		                      ? isDark
+		                        ? 'border-[#8bb8ff] bg-[#1b3566] text-[#cfe3ff]'
+	                        : 'border-[#7aa4ff] bg-[#e8f0ff] text-[#00308a]'
+	                      : isDark
+	                        ? 'border-[#31415a] bg-[#0f172a] text-[#d6deec] hover:border-[#8bb8ff] hover:text-[#cfe3ff]'
+	                        : 'border-[#d9dde5] bg-white text-[#5b687c] hover:border-[#7aa4ff] hover:text-[#003fb1]'
+	                  }`}
+	                  title="Open AI chat"
+		                  aria-label="Open AI chat"
+		                >
+		                  <Sparkles className="h-4.5 w-4.5" />
+		                  {guidedMode ? (
+		                    <span
+		                      className={`pointer-events-none absolute right-full top-1/2 z-[300] mr-3 hidden w-48 -translate-y-1/2 rounded-2xl border p-3 text-left shadow-xl group-hover:block ${
+		                        isDark
+		                          ? 'border-[#31415a] bg-[#0f172a]'
+		                          : 'border-[#d9dde5] bg-white'
+		                      }`}
+		                    >
+		                      <span
+		                        className={`block text-[9px] font-extrabold uppercase tracking-[0.2em] ${
+		                          isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+		                        }`}
+		                      >
+		                        Guided Tip
+		                      </span>
+		                      <span
+		                        className={`mt-1 block text-[11px] leading-4 ${
+		                          isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'
+		                        }`}
+		                      >
+		                        Open AI chat for editing help and quick suggestions.
+		                      </span>
+		                    </span>
+		                  ) : null}
+		                </button>
+	                <div className="mx-auto w-full max-w-[1040px] px-4 py-3">
                   <div
                     className={`rounded-[24px] border px-4 py-2.5 shadow-[0_18px_50px_rgba(15,23,42,0.06)] ${
                       isDark
@@ -3724,90 +3866,139 @@ export default function HomePage(): JSX.Element {
                       </div>
                     </div>
 
-                    <div className="flex flex-wrap items-center justify-center gap-1.5">
-                      <ToolbarButton
-                        label="Clean"
-                        tooltip="Open cleaning tools to keep a range, split at the playhead, or delete a selected section."
-                        guidedMode={guidedMode}
-                        isDark={isDark}
-                        onClick={handleOpenCleanPanel}
-                        icon={Brush}
-                        active={rightPanelView === 'clean' && !isRightPanelCollapsed}
-                        tone="editor"
-                      />
-                      <ToolbarButton
-                        label="Add Video"
-                        tooltip="Add another video to the end of the timeline."
-                        guidedMode={guidedMode}
-                        isDark={isDark}
-                        onClick={handleAppendVideoClick}
-                        icon={Plus}
-                        disabled={
-                          appendStatus === 'processing' ||
-                          exportStatus === 'processing' ||
-                          editorStatus === 'syncing' ||
-                          (!selectedVideoFile && !videoSourceUrl && !preloadedVideoUrl)
-                        }
-                        tone="editor"
-                      />
-                      <ToolbarButton
-                        label="Silencer"
-                        tooltip="Find silent parts you may want to remove."
-                        guidedMode={guidedMode}
-                        isDark={isDark}
-                        onClick={handleRemoveSilence}
-                        icon={Mic}
-                        disabled={silenceStatus === 'processing'}
-                        active={rightPanelView === 'silence' && !isRightPanelCollapsed}
-                        tone="editor"
-                      />
-                      <div className="mx-1 h-8 w-px rounded-full bg-[#d9dde5] dark:bg-[#31415a]" />
-                      <ToolbarButton
-                        label="Subtitles"
-                        tooltip={
-                          subtitleSegments.length > 0
-                            ? 'Open subtitles to review and edit your captions.'
-                            : 'Open subtitles to generate or add captions.'
-                        }
-                        guidedMode={guidedMode}
-                        isDark={isDark}
-                        onClick={handleOpenSubtitlesPanel}
-                        icon={Subtitles}
-                        disabled={subtitleStatus === 'processing'}
-                        active={rightPanelView === 'subtitles' && !isRightPanelCollapsed}
-                        tone="workspace"
-                      />
-                      <ToolbarButton
-                        label="Chapters"
-                        tooltip="Split the video into chapters and rename each chapter."
-                        guidedMode={guidedMode}
-                        isDark={isDark}
-                        onClick={handleOpenChaptersPanel}
-                        icon={Clapperboard}
-                        active={rightPanelView === 'chapters' && !isRightPanelCollapsed}
-                        tone="workspace"
-                      />
-                      <ToolbarButton
-                        label="AI"
-                        tooltip="Open AI tools for editing help."
-                        guidedMode={guidedMode}
-                        isDark={isDark}
-                        onClick={handleOpenAIPanel}
-                        icon={Sparkles}
-                        active={rightPanelView === 'ai' && !isRightPanelCollapsed}
-                        tone="workspace"
-                      />
-                      <div className="mx-1 h-8 w-px rounded-full bg-[#d9dde5] dark:bg-[#31415a]" />
-                      <ToolbarButton
-                        label="Undo"
-                        tooltip="Undo your last change."
-                        guidedMode={guidedMode}
-                        isDark={isDark}
-                        onClick={handleUndo}
-                        icon={RotateCcw}
-                        disabled={history.length === 0}
-                        tone="global"
-                      />
+	                    <div className="flex flex-wrap items-center justify-center gap-2">
+	                      <div
+	                        className={`flex items-center gap-1 rounded-2xl border px-1.5 py-1 ${
+	                          activeWorkflowStep === 'clean'
+	                            ? isDark
+	                              ? 'border-[#8bb8ff] bg-[#182238]'
+	                              : 'border-[#7aa4ff] bg-[#eef3ff]'
+	                            : isDark
+	                              ? 'border-[#243149] bg-[#111827]'
+	                              : 'border-[#e3e7ee] bg-[#fbfcfd]'
+	                        }`}
+	                      >
+	                        <ToolbarButton
+	                          label="Clean"
+	                          tooltip="Open cleaning tools to keep a range, split at the playhead, or delete a selected section."
+	                          guidedMode={guidedMode}
+	                          isDark={isDark}
+	                          onClick={handleOpenCleanPanel}
+	                          icon={Brush}
+	                          active={rightPanelView === 'clean' && !isRightPanelCollapsed}
+	                          tone="editor"
+	                        />
+	                        <ToolbarButton
+	                          label="Add Video"
+	                          tooltip="Add another video to the end of the timeline."
+	                          guidedMode={guidedMode}
+	                          isDark={isDark}
+	                          onClick={handleAppendVideoClick}
+	                          icon={Plus}
+	                          disabled={
+	                            appendStatus === 'processing' ||
+	                            exportStatus === 'processing' ||
+	                            editorStatus === 'syncing' ||
+	                            (!selectedVideoFile && !videoSourceUrl && !preloadedVideoUrl)
+	                          }
+	                          tone="global"
+	                        />
+	                        <ToolbarButton
+	                          label="Undo"
+	                          tooltip="Undo your last change."
+	                          guidedMode={guidedMode}
+	                          isDark={isDark}
+	                          onClick={handleUndo}
+	                          icon={RotateCcw}
+	                          disabled={history.length === 0}
+	                          tone="global"
+	                        />
+	                      </div>
+
+	                      <div
+	                        className={`flex items-center gap-1 rounded-2xl border px-1.5 py-1 ${
+	                          activeWorkflowStep === 'polish'
+	                            ? isDark
+	                              ? 'border-[#8bb8ff] bg-[#182238]'
+	                              : 'border-[#7aa4ff] bg-[#eef3ff]'
+	                            : isDark
+	                              ? 'border-[#243149] bg-[#111827]'
+	                              : 'border-[#e3e7ee] bg-[#fbfcfd]'
+	                        }`}
+	                      >
+	                        <ToolbarButton
+	                          label="Silencer"
+	                          tooltip="Find silent parts you may want to remove."
+	                          guidedMode={guidedMode}
+	                          isDark={isDark}
+	                          onClick={handleRemoveSilence}
+	                          icon={Mic}
+	                          disabled={silenceStatus === 'processing'}
+	                          active={rightPanelView === 'silence' && !isRightPanelCollapsed}
+	                          tone="editor"
+	                        />
+	                        <ToolbarButton
+	                          label="Subtitles"
+	                          tooltip={
+	                            subtitleSegments.length > 0
+	                              ? 'Open subtitles to review and edit your captions.'
+	                              : 'Open subtitles to generate or add captions.'
+	                          }
+	                          guidedMode={guidedMode}
+	                          isDark={isDark}
+	                          onClick={handleOpenSubtitlesPanel}
+	                          icon={Subtitles}
+	                          disabled={subtitleStatus === 'processing'}
+	                          active={rightPanelView === 'subtitles' && !isRightPanelCollapsed}
+	                          tone="workspace"
+	                        />
+	                      </div>
+
+	                      <div
+	                        className={`flex items-center gap-1 rounded-2xl border px-1.5 py-1 ${
+	                          activeWorkflowStep === 'chapters'
+	                            ? isDark
+	                              ? 'border-[#8bb8ff] bg-[#182238]'
+	                              : 'border-[#7aa4ff] bg-[#eef3ff]'
+	                            : isDark
+	                              ? 'border-[#243149] bg-[#111827]'
+	                              : 'border-[#e3e7ee] bg-[#fbfcfd]'
+	                        }`}
+	                      >
+	                        <ToolbarButton
+	                          label="Chapters"
+	                          tooltip="Split the video into chapters and rename each chapter."
+	                          guidedMode={guidedMode}
+	                          isDark={isDark}
+	                          onClick={handleOpenChaptersPanel}
+	                          icon={Clapperboard}
+	                          active={rightPanelView === 'chapters' && !isRightPanelCollapsed}
+	                          tone="workspace"
+	                        />
+	                      </div>
+
+	                      <div
+	                        className={`flex items-center gap-1 rounded-2xl border px-1.5 py-1 ${
+	                          activeWorkflowStep === 'course'
+	                            ? isDark
+	                              ? 'border-[#8bb8ff] bg-[#182238]'
+	                              : 'border-[#7aa4ff] bg-[#eef3ff]'
+	                            : isDark
+	                              ? 'border-[#243149] bg-[#111827]'
+	                              : 'border-[#e3e7ee] bg-[#fbfcfd]'
+	                        }`}
+	                      >
+	                        <ToolbarButton
+	                          label="Done"
+	                          tooltip="Open final save, archive, export, and course actions."
+	                          guidedMode={guidedMode}
+	                          isDark={isDark}
+	                          onClick={handleOpenDonePanel}
+	                          icon={Check}
+	                          active={rightPanelView === 'done' && !isRightPanelCollapsed}
+	                          tone="global"
+	                        />
+	                      </div>
                     </div>
                   </div>
                 </div>
@@ -4392,9 +4583,13 @@ export default function HomePage(): JSX.Element {
               : 'border-[#d9dde5] bg-white'
           }`}
         >
-          <div className="mb-3 flex items-center justify-between gap-2">
-            {!isRightPanelCollapsed ? (
-              <div className="flex items-center gap-2">
+	          <div
+	            className={`mb-3 flex items-center gap-2 ${
+	              isRightPanelCollapsed ? 'justify-center' : 'justify-between'
+	            }`}
+	          >
+	            {!isRightPanelCollapsed ? (
+	              <div className="flex items-center gap-2">
                 {rightPanelView === 'clean' ? (
                   <Brush className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
                 ) : rightPanelView === 'silence' ? (
@@ -4403,6 +4598,8 @@ export default function HomePage(): JSX.Element {
                   <Clapperboard className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
                 ) : rightPanelView === 'subtitles' ? (
                   <Subtitles className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
+                ) : rightPanelView === 'done' ? (
+                  <Check className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
                 ) : (
                   <Sparkles className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
                 )}
@@ -4419,18 +4616,16 @@ export default function HomePage(): JSX.Element {
                       ? 'Chapters'
                     : rightPanelView === 'subtitles'
                       ? 'Subtitles'
+                    : rightPanelView === 'done'
+                      ? 'Done'
                       : 'AI Workspace'}
                 </h2>
               </div>
-            ) : (
-              <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-2xl bg-[#eef3ff] text-[#003fb1] dark:bg-[#1b3566] dark:text-[#9ec5ff]">
-                <Sparkles className="h-4 w-4" />
-              </div>
-            )}
+	            ) : null}
 
-            <button
-              type="button"
-              onClick={() => setIsRightPanelCollapsed((prev) => !prev)}
+	            <button
+	              type="button"
+	              onClick={handleToggleRightPanelCollapsed}
               className={`flex h-10 w-10 items-center justify-center rounded-2xl border transition ${
                 isDark
                   ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb] hover:bg-[#182238]'
@@ -4446,50 +4641,7 @@ export default function HomePage(): JSX.Element {
             </button>
           </div>
 
-          {isRightPanelCollapsed ? (
-            <div className="flex min-h-0 flex-1 flex-col items-center justify-between py-2">
-              <div className="writing-mode-vertical text-center [writing-mode:vertical-rl]">
-                <span
-                  className={`text-[10px] font-bold uppercase tracking-[0.2em] ${
-                    isDark ? 'text-[#8fa2c2]' : 'text-[#737686]'
-                  }`}
-                >
-                  {rightPanelView === 'clean'
-                    ? 'Clean'
-                    : rightPanelView === 'silence'
-                    ? 'Silence Review'
-                    : rightPanelView === 'chapters'
-                      ? 'Chapters'
-                    : rightPanelView === 'subtitles'
-                      ? 'Subtitles'
-                      : 'AI Workspace'}
-                </span>
-              </div>
-              <div className="space-y-2">
-                {(rightPanelView === 'clean'
-                  ? ['Clean', 'Cut', 'Delete']
-                  : rightPanelView === 'silence'
-                  ? ['Silence', 'Review', 'Timeline']
-                  : rightPanelView === 'chapters'
-                    ? ['Chapters', 'Rename', 'Split']
-                  : rightPanelView === 'subtitles'
-                    ? ['Subtitles', 'Review', 'Export']
-                  : ['Chapters', 'Trim', 'Captions']
-                ).map((item) => (
-                  <div
-                    key={item}
-                    className={`rounded-full px-2 py-1 text-[9px] font-bold uppercase tracking-[0.14em] ${
-                      isDark
-                        ? 'bg-[#111827] text-[#8fa2c2]'
-                        : 'bg-[#f2f4f6] text-[#637287]'
-                    }`}
-                  >
-                    {item}
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : (
+	          {isRightPanelCollapsed ? null : (
             <div
               className={`flex min-h-0 flex-1 flex-col rounded-[22px] border p-4 ${
                 isDark
@@ -5290,6 +5442,116 @@ export default function HomePage(): JSX.Element {
                         ))}
                       </div>
                     )}
+                  </div>
+                </div>
+              ) : rightPanelView === 'done' ? (
+                <div className="flex min-h-0 flex-1 flex-col overflow-visible">
+                  <div
+                    className={`relative z-20 mb-4 overflow-visible rounded-2xl border p-2 ${
+                      isDark
+                        ? 'border-[#243149] bg-[#111827]'
+                        : 'border-[#e3e7ee] bg-[#fbfcfd]'
+                    }`}
+                  >
+                    <div className="grid grid-cols-1 gap-2">
+                      <button
+                        type="button"
+                        className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${
+                          isDark
+                            ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
+                            : 'border border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb] hover:text-[#003fb1]'
+                        }`}
+                      >
+                        <Save className="h-4 w-4" />
+                        Save Draft
+                      </button>
+                      <button
+                        type="button"
+                        className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${
+                          isDark
+                            ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
+                            : 'border border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb] hover:text-[#003fb1]'
+                        }`}
+                      >
+                        <FolderArchive className="h-4 w-4" />
+                        Archive Video
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void handleExportSelectedClip()
+                        }}
+                        disabled={
+                          exportStatus === 'processing' ||
+                          editorStatus === 'syncing' ||
+                          !selectedSegment ||
+                          !hasSingleSelectedSegment ||
+                          (!selectedVideoFile && !editorSessionId)
+                        }
+                        className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                          isDark
+                            ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
+                            : 'border border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb] hover:text-[#003fb1]'
+                        }`}
+                      >
+                        <Video className="h-4 w-4" />
+                        {exportStatus === 'processing' && activeExportKind === 'clip'
+                          ? 'Rendering Chapter...'
+                          : 'Export Chapter'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void handleExportVideo()
+                        }}
+                        disabled={
+                          exportStatus === 'processing' ||
+                          editorStatus === 'syncing' ||
+                          (!selectedVideoFile && !editorSessionId)
+                        }
+                        className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#003fb1] to-[#1a56db] px-4 py-3 text-sm font-semibold text-white shadow-[0_12px_30px_rgba(0,63,177,0.22)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <Video className="h-4 w-4" />
+                        {exportStatus === 'processing' && activeExportKind === 'video'
+                          ? 'Rendering Video...'
+                          : 'Export Video'}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div
+                    className={`rounded-2xl border p-2 ${
+                      isDark
+                        ? 'border-[#243149] bg-[#111827]'
+                        : 'border-[#e3e7ee] bg-[#fbfcfd]'
+                    }`}
+                  >
+                    <div className="grid grid-cols-1 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {}}
+                        className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${
+                          isDark
+                            ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
+                            : 'border border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb] hover:text-[#003fb1]'
+                        }`}
+                      >
+                        <BookOpen className="h-4 w-4" />
+                        Add Video to Existing Course
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {}}
+                        className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${
+                          isDark
+                            ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
+                            : 'border border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb] hover:text-[#003fb1]'
+                        }`}
+                      >
+                        <Plus className="h-4 w-4" />
+                        Add Video to New Course
+                      </button>
+                    </div>
                   </div>
                 </div>
               ) : (
