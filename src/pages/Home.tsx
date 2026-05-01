@@ -65,6 +65,8 @@ import {
 import { importSubtitlesFromFile } from '../subtitles/import'
 import type { SubtitleSegment } from '../subtitles/types'
 import { Input } from '../components/ui/input'
+import { requestAIEditCommand } from '../ai/api'
+import type { AIEditSuggestion } from '../ai/types'
 import {
   Dialog,
   DialogContent,
@@ -141,6 +143,7 @@ interface AIDraftMessage {
   id: string
   role: 'user' | 'assistant'
   text: string
+  suggestion?: AIEditSuggestion
 }
 
 type SubtitleStatus = 'idle' | 'processing' | 'success' | 'error'
@@ -1221,6 +1224,13 @@ export default function HomePage(): JSX.Element {
       text: 'AI actions will appear here once the backend is connected. For now, suggestion chips can prefill a request and Send stores it in this workspace panel.',
     },
   ])
+  const [aiPendingSuggestion, setAiPendingSuggestion] = useState<AIEditSuggestion | null>(
+    null,
+  )
+  const [aiRequestStatus, setAiRequestStatus] = useState<
+    'idle' | 'sending' | 'success' | 'error'
+  >('idle')
+  const [aiResponseJson, setAiResponseJson] = useState<string>('')
   const [subtitleSegments, setSubtitleSegments] = useState<SubtitleSegment[]>([])
   const [subtitleStatus, setSubtitleStatus] = useState<SubtitleStatus>('idle')
   const [subtitleError, setSubtitleError] = useState<string | null>(null)
@@ -3145,7 +3155,7 @@ export default function HomePage(): JSX.Element {
     setTimelineZoom((prev) => clamp(prev + direction * 0.5, 1, 4))
   }
 
-  const handleSendAIPrompt = () => {
+  const handleSendAIPrompt = async () => {
     const trimmed = aiPromptDraft.trim()
     if (!trimmed) return
 
@@ -3158,6 +3168,41 @@ export default function HomePage(): JSX.Element {
       },
     ])
     setAiPromptDraft('')
+    setAiRequestStatus('sending')
+
+    try {
+      const { suggestion } = await requestAIEditCommand({
+        prompt: trimmed,
+        videoDuration: formatEditableTimestamp(videoDuration ?? totalDuration),
+        transcript: subtitleSegments.map((segment) => ({
+          start: formatEditableTimestamp(segment.start),
+          end: formatEditableTimestamp(segment.end),
+          text: segment.text,
+        })),
+      })
+      setAiPendingSuggestion(suggestion)
+      setAiResponseJson(JSON.stringify(suggestion, null, 2))
+      setAiRequestStatus('success')
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: `assistant-${Date.now()}`,
+          role: 'assistant',
+          text: `Intent: ${suggestion.intent}. Review the operations before applying.`,
+          suggestion,
+        },
+      ])
+    } catch (error) {
+      setAiRequestStatus('error')
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: `assistant-error-${Date.now()}`,
+          role: 'assistant',
+          text: error instanceof Error ? error.message : 'AI request failed.',
+        },
+      ])
+    }
   }
 
   useEffect(() => {
@@ -3214,6 +3259,21 @@ export default function HomePage(): JSX.Element {
     setCutRange(buildFullCutRange(selectedCutDuration))
     setActiveCutHandle(null)
   }, [isCutModeEnabled, selectedCutScopeKey, selectedCutDuration])
+
+  const handleApplyAISuggestion = () => {
+    if (!aiPendingSuggestion) return
+    setAiMessages((prev) => [
+      ...prev,
+      {
+        id: `assistant-loop-${Date.now()}`,
+        role: 'assistant',
+        text: 'JSON suggestion confirmed. Next step is wiring JSON operations to timeline adapters.',
+      },
+    ])
+    setAiPendingSuggestion(null)
+  }
+
+  const handleCancelAISuggestion = () => setAiPendingSuggestion(null)
 
   const progress = totalDuration > 0 ? currentTime / totalDuration : 0
   const topTabClass = ({ isActive }: { isActive: boolean }) =>
@@ -5603,6 +5663,55 @@ export default function HomePage(): JSX.Element {
                           {message.text}
                         </div>
                       ))}
+
+                      {aiPendingSuggestion && (
+                        <div className={`rounded-2xl border p-3 text-[12px] ${
+                          isDark
+                            ? 'border-[#31415a] bg-[#0f172a] text-[#c6d3eb]'
+                            : 'border-[#d9dde5] bg-[#f8fbff] text-[#334155]'
+                        }`}>
+                          <p className="font-semibold">
+                            Review AI suggestion ({aiPendingSuggestion.intent})
+                          </p>
+                          <ul className="mt-2 list-disc space-y-1 pl-4">
+                            {aiPendingSuggestion.operations.map((operation, index) => (
+                              <li key={`${operation.action}-${index}`}>
+                                {operation.action}: {operation.start ?? 'null'} →{' '}
+                                {operation.end ?? 'null'}
+                              </li>
+                            ))}
+                          </ul>
+                          {aiPendingSuggestion.notes.length > 0 && (
+                            <p className="mt-2">
+                              Notes: {aiPendingSuggestion.notes.join(' | ')}
+                            </p>
+                          )}
+                          <div className="mt-3 flex gap-2">
+                            <button
+                              type="button"
+                              onClick={handleApplyAISuggestion}
+                              className="rounded-lg bg-[#003fb1] px-3 py-1.5 text-white"
+                            >
+                              Apply
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleCancelAISuggestion}
+                              className="rounded-lg border px-3 py-1.5"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                          <div className="mt-3">
+                            <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide opacity-70">
+                              Backend JSON response
+                            </p>
+                            <pre className="max-h-40 overflow-auto rounded-lg border p-2 text-[11px] leading-4">
+{aiResponseJson}
+                            </pre>
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     <div
@@ -5631,7 +5740,7 @@ export default function HomePage(): JSX.Element {
                       <button
                         type="button"
                         onClick={handleSendAIPrompt}
-                        disabled={aiPromptDraft.trim().length === 0}
+                        disabled={aiPromptDraft.trim().length === 0 || aiRequestStatus === 'sending'}
                         className={`flex h-11 w-11 items-center justify-center rounded-2xl transition disabled:cursor-not-allowed disabled:opacity-40 ${
                           isDark
                             ? 'bg-[#1b3566] text-[#edf2ff] hover:bg-[#234178]'
@@ -5642,6 +5751,12 @@ export default function HomePage(): JSX.Element {
                         <Send className="h-4 w-4" />
                       </button>
                     </div>
+                    <p className="mt-2 text-[11px] opacity-70">
+                      {aiRequestStatus === 'sending' && 'Sending request: chat box → backend endpoint → Ollama...'}
+                      {aiRequestStatus === 'success' && 'Response received: Ollama JSON has been validated and shown above.'}
+                      {aiRequestStatus === 'error' && 'Request failed. Check backend server logs and Ollama status.'}
+                      {aiRequestStatus === 'idle' && 'Submit a prompt to test the AI request/response loop.'}
+                    </p>
                   </div>
                 </>
               )}
