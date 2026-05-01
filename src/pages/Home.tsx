@@ -67,7 +67,6 @@ import type { SubtitleSegment } from '../subtitles/types'
 import { Input } from '../components/ui/input'
 import { requestAIEditCommand } from '../ai/api'
 import type { AIEditSuggestion } from '../ai/types'
-import { applyAISuggestionWithAdapters } from '../ai/executionAdapter'
 import {
   Dialog,
   DialogContent,
@@ -1228,6 +1227,10 @@ export default function HomePage(): JSX.Element {
   const [aiPendingSuggestion, setAiPendingSuggestion] = useState<AIEditSuggestion | null>(
     null,
   )
+  const [aiRequestStatus, setAiRequestStatus] = useState<
+    'idle' | 'sending' | 'success' | 'error'
+  >('idle')
+  const [aiResponseJson, setAiResponseJson] = useState<string>('')
   const [subtitleSegments, setSubtitleSegments] = useState<SubtitleSegment[]>([])
   const [subtitleStatus, setSubtitleStatus] = useState<SubtitleStatus>('idle')
   const [subtitleError, setSubtitleError] = useState<string | null>(null)
@@ -3165,6 +3168,7 @@ export default function HomePage(): JSX.Element {
       },
     ])
     setAiPromptDraft('')
+    setAiRequestStatus('sending')
 
     try {
       const { suggestion } = await requestAIEditCommand({
@@ -3177,6 +3181,8 @@ export default function HomePage(): JSX.Element {
         })),
       })
       setAiPendingSuggestion(suggestion)
+      setAiResponseJson(JSON.stringify(suggestion, null, 2))
+      setAiRequestStatus('success')
       setAiMessages((prev) => [
         ...prev,
         {
@@ -3187,6 +3193,7 @@ export default function HomePage(): JSX.Element {
         },
       ])
     } catch (error) {
+      setAiRequestStatus('error')
       setAiMessages((prev) => [
         ...prev,
         {
@@ -3255,25 +3262,14 @@ export default function HomePage(): JSX.Element {
 
   const handleApplyAISuggestion = () => {
     if (!aiPendingSuggestion) return
-    const notes = applyAISuggestionWithAdapters(aiPendingSuggestion, {
-      onRemoveRange: () => {
-        void handleCutRangeApply()
+    setAiMessages((prev) => [
+      ...prev,
+      {
+        id: `assistant-loop-${Date.now()}`,
+        role: 'assistant',
+        text: 'JSON suggestion confirmed. Next step is wiring JSON operations to timeline adapters.',
       },
-      onSplitAt: () => {
-        void handleSplitAtPlayhead()
-      },
-    })
-
-    if (notes.length > 0) {
-      setAiMessages((prev) => [
-        ...prev,
-        {
-          id: `assistant-note-${Date.now()}`,
-          role: 'assistant',
-          text: notes.join(' '),
-        },
-      ])
-    }
+    ])
     setAiPendingSuggestion(null)
   }
 
@@ -5706,6 +5702,14 @@ export default function HomePage(): JSX.Element {
                               Cancel
                             </button>
                           </div>
+                          <div className="mt-3">
+                            <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide opacity-70">
+                              Backend JSON response
+                            </p>
+                            <pre className="max-h-40 overflow-auto rounded-lg border p-2 text-[11px] leading-4">
+{aiResponseJson}
+                            </pre>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -5736,7 +5740,7 @@ export default function HomePage(): JSX.Element {
                       <button
                         type="button"
                         onClick={handleSendAIPrompt}
-                        disabled={aiPromptDraft.trim().length === 0}
+                        disabled={aiPromptDraft.trim().length === 0 || aiRequestStatus === 'sending'}
                         className={`flex h-11 w-11 items-center justify-center rounded-2xl transition disabled:cursor-not-allowed disabled:opacity-40 ${
                           isDark
                             ? 'bg-[#1b3566] text-[#edf2ff] hover:bg-[#234178]'
@@ -5747,6 +5751,12 @@ export default function HomePage(): JSX.Element {
                         <Send className="h-4 w-4" />
                       </button>
                     </div>
+                    <p className="mt-2 text-[11px] opacity-70">
+                      {aiRequestStatus === 'sending' && 'Sending request: chat box → backend endpoint → Ollama...'}
+                      {aiRequestStatus === 'success' && 'Response received: Ollama JSON has been validated and shown above.'}
+                      {aiRequestStatus === 'error' && 'Request failed. Check backend server logs and Ollama status.'}
+                      {aiRequestStatus === 'idle' && 'Submit a prompt to test the AI request/response loop.'}
+                    </p>
                   </div>
                 </>
               )}
