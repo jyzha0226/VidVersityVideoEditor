@@ -1003,12 +1003,20 @@ function normalizeAISuggestion(input) {
   const suggestion = input && typeof input === 'object' ? input : {}
   const notes = Array.isArray(suggestion.notes) ? suggestion.notes.map((n) => `${n}`) : []
   const operations = Array.isArray(suggestion.operations) ? suggestion.operations : []
-  const normalizedOperations = operations.map((operation) => ({
-    action: allowedActions.has(operation?.action) ? operation.action : 'suggest_chapter',
-    start: typeof operation?.start === 'string' ? operation.start : null,
-    end: typeof operation?.end === 'string' ? operation.end : null,
-    text: typeof operation?.text === 'string' ? operation.text : null,
-  }))
+  const normalizedOperations = operations
+    .map((operation) => {
+      if (!allowedActions.has(operation?.action)) {
+        notes.push('One or more operations used unsupported actions and were removed.')
+        return null
+      }
+      return {
+        action: operation.action,
+        start: typeof operation?.start === 'string' ? operation.start : null,
+        end: typeof operation?.end === 'string' ? operation.end : null,
+        text: typeof operation?.text === 'string' ? operation.text : null,
+      }
+    })
+    .filter(Boolean)
   normalizedOperations.forEach((operation) => {
     if (operation.start == null || operation.end == null) {
       notes.push('One or more operation timestamps are missing and require manual review.')
@@ -1049,11 +1057,19 @@ function normalizeAISuggestion(input) {
       }
     }
   }
+  const normalizedIntent = allowedIntents.has(suggestion.intent)
+    ? suggestion.intent
+    : 'unknown'
+  const safeOperations =
+    normalizedIntent === 'unknown' ? [] : normalizedOperations
+  if (normalizedIntent === 'unknown' && normalizedOperations.length > 0) {
+    notes.push('Ambiguous intent detected; operations were cleared for safety.')
+  }
   return {
-    intent: allowedIntents.has(suggestion.intent) ? suggestion.intent : 'unknown',
+    intent: normalizedIntent,
     needs_review: true,
     parameters: suggestion.parameters && typeof suggestion.parameters === 'object' ? suggestion.parameters : {},
-    operations: normalizedOperations,
+    operations: safeOperations,
     chapters,
     notes,
   }
@@ -1075,7 +1091,7 @@ async function callOllamaChat(messages) {
     if (!response.ok) throw new Error(payload?.error || `Ollama request failed (${response.status}).`)
     const content = payload?.message?.content
     if (typeof content !== 'string') throw new Error('Ollama response did not include JSON content.')
-    return JSON.parse(content)
+    return { parsed: JSON.parse(content), rawContent: content }
   } finally { clearTimeout(timeout) }
 }
 await mkdir(TEMP_DIR, { recursive: true })
@@ -1168,15 +1184,21 @@ const server = createServer(async (request, response) => {
       const prompt = url.pathname === '/api/ai/chapter-suggestions'
         ? 'Suggest chapters by topic from the transcript and timestamps.'
         : `${payload?.prompt || ''}`
-      const systemPrompt = 'Return JSON only. needs_review must always be true. Never execute edits; only suggest operations.'
+      const systemPrompt = 'Return JSON only. needs_review must always be true. Never execute edits; only suggest operations. If intent is unknown, operations must be [].'
       try {
-        const raw = await callOllamaChat([
+        const userContent = [
+          `Prompt: ${prompt}`,
+          `VideoDuration: ${payload?.videoDuration || 'unknown'}`,
+          `Transcript: ${JSON.stringify(transcript)}`,
+        ].join('\n')
+        const modelResponse = await callOllamaChat([
           { role: 'system', content: systemPrompt },
-          { role: 'user', content: JSON.stringify({ prompt, videoDuration: payload?.videoDuration || null, transcript }) },
+          { role: 'user', content: userContent },
         ])
-        const suggestion = normalizeAISuggestion(raw)
+        const suggestion = normalizeAISuggestion(modelResponse.parsed)
         if (url.pathname === '/api/ai/chapter-suggestions') suggestion.intent = 'chapter_suggest'
-        sendJson(response, 200, { suggestion })
+        const debugEnabled = process.env.AI_DEBUG === '1'
+        sendJson(response, 200, debugEnabled ? { suggestion, debug: { rawModelContent: modelResponse.rawContent } } : { suggestion })
       } catch (error) {
         sendJson(response, 200, { suggestion: buildSafeAISuggestion(error instanceof Error ? error.message : 'AI service unavailable.') })
       }
