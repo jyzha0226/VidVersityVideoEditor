@@ -3158,6 +3158,18 @@ export default function HomePage(): JSX.Element {
   const handleSendAIPrompt = async () => {
     const trimmed = aiPromptDraft.trim()
     if (!trimmed) return
+    if (!videoSourceUrl && !selectedVideoFile) {
+      setAiRequestStatus('error')
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: `assistant-video-required-${Date.now()}`,
+          role: 'assistant',
+          text: 'Please upload or select a video before using AI Workspace.',
+        },
+      ])
+      return
+    }
 
     setAiMessages((prev) => [
       ...prev,
@@ -3171,14 +3183,39 @@ export default function HomePage(): JSX.Element {
     setAiRequestStatus('sending')
 
     try {
-      const { suggestion } = await requestAIEditCommand({
-        prompt: trimmed,
-        videoDuration: formatEditableTimestamp(videoDuration ?? totalDuration),
-        transcript: subtitleSegments.map((segment) => ({
+      const shouldSuggestChapters = /chapter|chapters|topic/i.test(trimmed)
+      let transcriptForAI = subtitleSegments.map((segment) => ({
+        start: formatEditableTimestamp(segment.start),
+        end: formatEditableTimestamp(segment.end),
+        text: segment.text,
+      }))
+
+      if (shouldSuggestChapters && transcriptForAI.length === 0) {
+        const videoFile = await ensureVideoFile()
+        if (!videoFile) {
+          throw new Error(
+            'Chapter suggestion requires a loaded video. Upload a local video first.',
+          )
+        }
+
+        setSubtitleStatus('processing')
+        const generated = await generateSubtitlesFromVideo(videoFile, {
+          model: 'tiny.en',
+          language: 'en',
+        })
+        setSubtitleSegments(generated)
+        setSubtitleStatus('success')
+        transcriptForAI = generated.map((segment) => ({
           start: formatEditableTimestamp(segment.start),
           end: formatEditableTimestamp(segment.end),
           text: segment.text,
-        })),
+        }))
+      }
+
+      const { suggestion } = await requestAIEditCommand({
+        prompt: trimmed,
+        videoDuration: formatEditableTimestamp(videoDuration ?? totalDuration),
+        transcript: transcriptForAI,
       })
       setAiPendingSuggestion(suggestion)
       setAiResponseJson(JSON.stringify(suggestion, null, 2))
@@ -5633,12 +5670,13 @@ export default function HomePage(): JSX.Element {
                       <button
                         key={item}
                         type="button"
+                        disabled={!videoSourceUrl && !selectedVideoFile}
                         onClick={() => setAiPromptDraft(item)}
                         className={`rounded-full border px-3 py-2 text-left text-[12px] transition ${
                           isDark
                             ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb] hover:border-[#4b6388] hover:bg-[#131f33]'
                             : 'border-[#d9dde5] bg-white text-[#515f74] hover:border-[#7aa4ff] hover:bg-[#f6f9ff]'
-                        }`}
+                        } disabled:cursor-not-allowed disabled:opacity-45`}
                       >
                         {item}
                       </button>
@@ -5740,7 +5778,11 @@ export default function HomePage(): JSX.Element {
                       <button
                         type="button"
                         onClick={handleSendAIPrompt}
-                        disabled={aiPromptDraft.trim().length === 0 || aiRequestStatus === 'sending'}
+                        disabled={
+                          aiPromptDraft.trim().length === 0 ||
+                          aiRequestStatus === 'sending' ||
+                          (!videoSourceUrl && !selectedVideoFile)
+                        }
                         className={`flex h-11 w-11 items-center justify-center rounded-2xl transition disabled:cursor-not-allowed disabled:opacity-40 ${
                           isDark
                             ? 'bg-[#1b3566] text-[#edf2ff] hover:bg-[#234178]'
@@ -5757,6 +5799,11 @@ export default function HomePage(): JSX.Element {
                       {aiRequestStatus === 'error' && 'Request failed. Check backend server logs and Ollama status.'}
                       {aiRequestStatus === 'idle' && 'Submit a prompt to test the AI request/response loop.'}
                     </p>
+                    {!videoSourceUrl && !selectedVideoFile && (
+                      <p className="mt-1 text-[11px] font-medium text-amber-500">
+                        Upload a video first to enable AI Workspace suggestions.
+                      </p>
+                    )}
                   </div>
                 </>
               )}

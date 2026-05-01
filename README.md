@@ -313,3 +313,8 @@ python FFmpegAudioActivityDetector.py
 - AI responses are validated/normalized and always returned as review-only suggestions (`needs_review: true`).
 - Suggestions must be confirmed in the UI before any edit adapter is invoked.
 - Run example prompt checks: `node scripts/ai-integration-examples.mjs`.
+- Recommended `vidversity-edit` System Prompt guidance:
+  - Return JSON only (no markdown/code fences).
+  - Keep chapter suggestions time-contiguous and ordered by timeline position.
+  - Use `null` timestamps when missing and add clarification notes.
+  - Keep `needs_review: true` for all responses.

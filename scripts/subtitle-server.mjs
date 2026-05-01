@@ -989,6 +989,15 @@ function buildSafeAISuggestion(message) {
 }
 
 function normalizeAISuggestion(input) {
+  const parseLooseTime = (value) => {
+    if (typeof value !== 'string' || value.trim().length === 0) return null
+    if (value === 'END') return Number.POSITIVE_INFINITY
+    const parts = value.split(':').map((item) => Number(item))
+    if (parts.some((item) => Number.isNaN(item))) return null
+    if (parts.length === 2) return parts[0] * 60 + parts[1]
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    return null
+  }
   const allowedIntents = new Set(['cut','split','merge','mute','subtitle','trim_silence','chapter_suggest','unknown'])
   const allowedActions = new Set(['remove','keep','split_at','mute','add_subtitle','trim_silence','suggest_chapter'])
   const suggestion = input && typeof input === 'object' ? input : {}
@@ -1005,13 +1014,41 @@ function normalizeAISuggestion(input) {
       notes.push('One or more operation timestamps are missing and require manual review.')
     }
   })
-  const chapters = Array.isArray(suggestion.chapters) ? suggestion.chapters.map((chapter) => ({
-    title: typeof chapter?.title === 'string' && chapter.title.trim() ? chapter.title.trim() : 'Untitled chapter',
-    start: typeof chapter?.start === 'string' ? chapter.start : null,
-    end: typeof chapter?.end === 'string' ? chapter.end : null,
-    summary: typeof chapter?.summary === 'string' ? chapter.summary : '',
-    thumbnailTime: typeof chapter?.thumbnailTime === 'string' ? chapter.thumbnailTime : null,
-  })) : []
+  const chapters = Array.isArray(suggestion.chapters)
+    ? suggestion.chapters
+        .map((chapter) => ({
+          title:
+            typeof chapter?.title === 'string' && chapter.title.trim()
+              ? chapter.title.trim()
+              : 'Untitled chapter',
+          start: typeof chapter?.start === 'string' ? chapter.start : null,
+          end: typeof chapter?.end === 'string' ? chapter.end : null,
+          summary: typeof chapter?.summary === 'string' ? chapter.summary : '',
+          thumbnailTime:
+            typeof chapter?.thumbnailTime === 'string' ? chapter.thumbnailTime : null,
+        }))
+        .sort((left, right) => {
+          const leftValue = parseLooseTime(left.start) ?? Number.POSITIVE_INFINITY
+          const rightValue = parseLooseTime(right.start) ?? Number.POSITIVE_INFINITY
+          return leftValue - rightValue
+        })
+    : []
+  if (chapters.length > 1) {
+    for (let index = 1; index < chapters.length; index += 1) {
+      const previousEnd = parseLooseTime(chapters[index - 1].end)
+      const currentStart = parseLooseTime(chapters[index].start)
+      if (
+        previousEnd != null &&
+        currentStart != null &&
+        Number.isFinite(previousEnd) &&
+        Number.isFinite(currentStart) &&
+        currentStart < previousEnd
+      ) {
+        notes.push('Chapter boundaries overlap; review continuity before applying.')
+        break
+      }
+    }
+  }
   return {
     intent: allowedIntents.has(suggestion.intent) ? suggestion.intent : 'unknown',
     needs_review: true,
