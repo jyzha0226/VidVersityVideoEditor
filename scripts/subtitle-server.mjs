@@ -1084,7 +1084,16 @@ async function callOllamaChat(messages) {
     const response = await fetch(`${baseUrl}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, stream: false, format: 'json', messages }),
+      body: JSON.stringify({
+        model,
+        stream: false,
+        format: 'json',
+        options: {
+          temperature: Number(process.env.OLLAMA_TEMPERATURE || 0),
+          top_p: Number(process.env.OLLAMA_TOP_P || 0.9),
+        },
+        messages,
+      }),
       signal: controller.signal,
     })
     const payload = await response.json().catch(() => null)
@@ -1186,19 +1195,36 @@ const server = createServer(async (request, response) => {
         : `${payload?.prompt || ''}`
       const systemPrompt = 'Return JSON only. needs_review must always be true. Never execute edits; only suggest operations. If intent is unknown, operations must be [].'
       try {
-        const userContent = [
-          `Prompt: ${prompt}`,
-          `VideoDuration: ${payload?.videoDuration || 'unknown'}`,
-          `Transcript: ${JSON.stringify(transcript)}`,
-        ].join('\n')
-        const modelResponse = await callOllamaChat([
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userContent },
-        ])
+        const shouldMatchLocal =
+          process.env.AI_MATCH_LOCAL === '1' &&
+          url.pathname === '/api/ai/edit-command'
+        const messages = shouldMatchLocal
+          ? [{ role: 'user', content: prompt }]
+          : [
+              { role: 'system', content: systemPrompt },
+              {
+                role: 'user',
+                content: [
+                  `Prompt: ${prompt}`,
+                  `VideoDuration: ${payload?.videoDuration || 'unknown'}`,
+                  `Transcript: ${JSON.stringify(transcript)}`,
+                ].join('\n'),
+              },
+            ]
+        const modelResponse = await callOllamaChat(messages)
         const suggestion = normalizeAISuggestion(modelResponse.parsed)
         if (url.pathname === '/api/ai/chapter-suggestions') suggestion.intent = 'chapter_suggest'
         const debugEnabled = process.env.AI_DEBUG === '1'
-        sendJson(response, 200, debugEnabled ? { suggestion, debug: { rawModelContent: modelResponse.rawContent } } : { suggestion })
+        sendJson(
+          response,
+          200,
+          debugEnabled
+            ? {
+                suggestion,
+                debug: { rawModelContent: modelResponse.rawContent, messages },
+              }
+            : { suggestion },
+        )
       } catch (error) {
         sendJson(response, 200, { suggestion: buildSafeAISuggestion(error instanceof Error ? error.message : 'AI service unavailable.') })
       }
