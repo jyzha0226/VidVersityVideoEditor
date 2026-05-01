@@ -976,6 +976,71 @@ function runAudioActivityDetection(
   return runPythonWorker(AUDIO_ACTIVITY_WORKER_PATH, args)
 }
 
+
+function buildSafeAISuggestion(message) {
+  return {
+    intent: 'unknown',
+    needs_review: true,
+    parameters: {},
+    operations: [],
+    chapters: [],
+    notes: [message],
+  }
+}
+
+function normalizeAISuggestion(input) {
+  const allowedIntents = new Set(['cut','split','merge','mute','subtitle','trim_silence','chapter_suggest','unknown'])
+  const allowedActions = new Set(['remove','keep','split_at','mute','add_subtitle','trim_silence','suggest_chapter'])
+  const suggestion = input && typeof input === 'object' ? input : {}
+  const notes = Array.isArray(suggestion.notes) ? suggestion.notes.map((n) => `${n}`) : []
+  const operations = Array.isArray(suggestion.operations) ? suggestion.operations : []
+  const normalizedOperations = operations.map((operation) => ({
+    action: allowedActions.has(operation?.action) ? operation.action : 'suggest_chapter',
+    start: typeof operation?.start === 'string' ? operation.start : null,
+    end: typeof operation?.end === 'string' ? operation.end : null,
+    text: typeof operation?.text === 'string' ? operation.text : null,
+  }))
+  normalizedOperations.forEach((operation) => {
+    if (operation.start == null || operation.end == null) {
+      notes.push('One or more operation timestamps are missing and require manual review.')
+    }
+  })
+  const chapters = Array.isArray(suggestion.chapters) ? suggestion.chapters.map((chapter) => ({
+    title: typeof chapter?.title === 'string' && chapter.title.trim() ? chapter.title.trim() : 'Untitled chapter',
+    start: typeof chapter?.start === 'string' ? chapter.start : null,
+    end: typeof chapter?.end === 'string' ? chapter.end : null,
+    summary: typeof chapter?.summary === 'string' ? chapter.summary : '',
+    thumbnailTime: typeof chapter?.thumbnailTime === 'string' ? chapter.thumbnailTime : null,
+  })) : []
+  return {
+    intent: allowedIntents.has(suggestion.intent) ? suggestion.intent : 'unknown',
+    needs_review: true,
+    parameters: suggestion.parameters && typeof suggestion.parameters === 'object' ? suggestion.parameters : {},
+    operations: normalizedOperations,
+    chapters,
+    notes,
+  }
+}
+
+async function callOllamaChat(messages) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.OLLAMA_TIMEOUT_MS || 12000))
+  const baseUrl = (process.env.OLLAMA_BASE_URL || 'http://localhost:11434').replace(/\/$/, '')
+  const model = process.env.OLLAMA_MODEL || 'vidversity-edit'
+  try {
+    const response = await fetch(`${baseUrl}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, stream: false, format: 'json', messages }),
+      signal: controller.signal,
+    })
+    const payload = await response.json().catch(() => null)
+    if (!response.ok) throw new Error(payload?.error || `Ollama request failed (${response.status}).`)
+    const content = payload?.message?.content
+    if (typeof content !== 'string') throw new Error('Ollama response did not include JSON content.')
+    return JSON.parse(content)
+  } finally { clearTimeout(timeout) }
+}
 await mkdir(TEMP_DIR, { recursive: true })
 await mkdir(EDITOR_SESSION_DIR, { recursive: true })
 
@@ -1020,6 +1085,8 @@ const server = createServer(async (request, response) => {
       cutEditorSession: '/api/editor/cut',
       deleteEditorSilence: '/api/editor/delete-silence',
       exportEditorSession: '/api/editor/export',
+      aiEditCommand: '/api/ai/edit-command',
+      aiChapterSuggestions: '/api/ai/chapter-suggestions',
       python: PYTHON_BIN,
     })
     return
@@ -1057,6 +1124,28 @@ const server = createServer(async (request, response) => {
 
   try {
     const body = await readRequestBody(request)
+
+    if (url.pathname === '/api/ai/edit-command' || url.pathname === '/api/ai/chapter-suggestions') {
+      const payload = parseJsonBody(body)
+      const transcript = Array.isArray(payload?.transcript) ? payload.transcript : []
+      const prompt = url.pathname === '/api/ai/chapter-suggestions'
+        ? 'Suggest chapters by topic from the transcript and timestamps.'
+        : `${payload?.prompt || ''}`
+      const systemPrompt = 'Return JSON only. needs_review must always be true. Never execute edits; only suggest operations.'
+      try {
+        const raw = await callOllamaChat([
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: JSON.stringify({ prompt, videoDuration: payload?.videoDuration || null, transcript }) },
+        ])
+        const suggestion = normalizeAISuggestion(raw)
+        if (url.pathname === '/api/ai/chapter-suggestions') suggestion.intent = 'chapter_suggest'
+        sendJson(response, 200, { suggestion })
+      } catch (error) {
+        sendJson(response, 200, { suggestion: buildSafeAISuggestion(error instanceof Error ? error.message : 'AI service unavailable.') })
+      }
+      return
+    }
+
     if (body.length === 0) {
       sendJson(response, 400, { error: 'No video bytes were uploaded.' })
       return
