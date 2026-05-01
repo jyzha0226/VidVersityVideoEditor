@@ -2,6 +2,7 @@
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -1280,7 +1281,9 @@ export default function HomePage(): JSX.Element {
   const [isCutModeEnabled, setIsCutModeEnabled] = useState(false)
 
   const videoPreviewRef = useRef<VideoPreviewHandle | null>(null)
+  const timelineScrollRef = useRef<HTMLDivElement | null>(null)
   const timelineTrackRef = useRef<HTMLDivElement | null>(null)
+  const shouldCenterPlayheadAfterZoomRef = useRef(false)
   const subtitleUploadInputRef = useRef<HTMLInputElement | null>(null)
   const appendVideoInputRef = useRef<HTMLInputElement | null>(null)
   const previousWorkspaceViewRef = useRef<Exclude<RightPanelView, 'clean'>>('ai')
@@ -1588,6 +1591,28 @@ export default function HomePage(): JSX.Element {
   )
   const sourcePlayheadRatio =
     totalDuration > 0 ? clamp(currentTime / totalDuration, 0, 1) : 0
+
+  useLayoutEffect(() => {
+    if (!shouldCenterPlayheadAfterZoomRef.current) {
+      return
+    }
+
+    shouldCenterPlayheadAfterZoomRef.current = false
+    const scrollContainer = timelineScrollRef.current
+    if (!scrollContainer) {
+      return
+    }
+
+    const maxScrollLeft = Math.max(
+      0,
+      scrollContainer.scrollWidth - scrollContainer.clientWidth,
+    )
+    const playheadScrollLeft =
+      timelinePlayheadRatio * scrollContainer.scrollWidth -
+      scrollContainer.clientWidth / 2
+
+    scrollContainer.scrollLeft = clamp(playheadScrollLeft, 0, maxScrollLeft)
+  }, [timelinePlayheadRatio, timelineZoom])
 
   const silenceReviewItems = silenceSegments.map((segment, index) => ({
     ...segment,
@@ -3142,7 +3167,13 @@ export default function HomePage(): JSX.Element {
   }, [hasUnsavedChanges])
 
   const handleTimelineZoom = (direction: -1 | 1) => {
-    setTimelineZoom((prev) => clamp(prev + direction * 0.5, 1, 4))
+    const nextZoom = clamp(timelineZoom + direction * 0.5, 1, 4)
+    if (nextZoom === timelineZoom) {
+      return
+    }
+
+    shouldCenterPlayheadAfterZoomRef.current = true
+    setTimelineZoom(nextZoom)
   }
 
   const handleSendAIPrompt = () => {
@@ -4067,7 +4098,7 @@ export default function HomePage(): JSX.Element {
                         : 'border-[#d9dde5] bg-white'
                     }`}
                   >
-                    <div className="overflow-x-auto pb-1">
+                    <div ref={timelineScrollRef} className="overflow-x-auto pb-1">
                       <div className="relative min-w-full" style={{ width: `${timelineZoom * 100}%` }}>
                         <div className="relative">
                           <div
