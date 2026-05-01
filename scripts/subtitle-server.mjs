@@ -1018,7 +1018,16 @@ function normalizeAISuggestion(input) {
     })
     .filter(Boolean)
   normalizedOperations.forEach((operation) => {
-    if (operation.start == null || operation.end == null) {
+    const requiresBothBounds =
+      operation.action === 'remove' ||
+      operation.action === 'keep' ||
+      operation.action === 'mute' ||
+      operation.action === 'add_subtitle'
+    const requiresStartOnly = operation.action === 'split_at'
+    if (
+      (requiresBothBounds && (operation.start == null || operation.end == null)) ||
+      (requiresStartOnly && operation.start == null)
+    ) {
       notes.push('One or more operation timestamps are missing and require manual review.')
     }
   })
@@ -1077,7 +1086,7 @@ function normalizeAISuggestion(input) {
 
 async function callOllamaChat(messages) {
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), Number(process.env.OLLAMA_TIMEOUT_MS || 12000))
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.OLLAMA_TIMEOUT_MS || 30000))
   const baseUrl = (process.env.OLLAMA_BASE_URL || 'http://localhost:11434').replace(/\/$/, '')
   const model = process.env.OLLAMA_MODEL || 'vidversity-edit'
   try {
@@ -1226,7 +1235,16 @@ const server = createServer(async (request, response) => {
             : { suggestion },
         )
       } catch (error) {
-        sendJson(response, 200, { suggestion: buildSafeAISuggestion(error instanceof Error ? error.message : 'AI service unavailable.') })
+        const reason =
+          error instanceof Error ? error.message : 'AI service unavailable.'
+        const debugEnabled = process.env.AI_DEBUG === '1'
+        sendJson(
+          response,
+          200,
+          debugEnabled
+            ? { suggestion: buildSafeAISuggestion(reason), debug: { error: reason } }
+            : { suggestion: buildSafeAISuggestion(reason) },
+        )
       }
       return
     }
