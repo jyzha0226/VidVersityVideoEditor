@@ -3169,10 +3169,10 @@ export default function HomePage(): JSX.Element {
     try {
       const { suggestion } = await requestAIEditCommand({
         prompt: trimmed,
-        videoDuration: formatTime(videoDuration ?? totalDuration),
+        videoDuration: formatEditableTimestamp(videoDuration ?? totalDuration),
         transcript: subtitleSegments.map((segment) => ({
-          start: formatTime(segment.start),
-          end: formatTime(segment.end),
+          start: formatEditableTimestamp(segment.start),
+          end: formatEditableTimestamp(segment.end),
           text: segment.text,
         })),
       })
