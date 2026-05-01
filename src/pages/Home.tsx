@@ -65,6 +65,9 @@ import {
 import { importSubtitlesFromFile } from '../subtitles/import'
 import type { SubtitleSegment } from '../subtitles/types'
 import { Input } from '../components/ui/input'
+import { requestAIEditCommand } from '../ai/api'
+import type { AIEditSuggestion } from '../ai/types'
+import { applyAISuggestionWithAdapters } from '../ai/executionAdapter'
 import {
   Dialog,
   DialogContent,
@@ -141,6 +144,7 @@ interface AIDraftMessage {
   id: string
   role: 'user' | 'assistant'
   text: string
+  suggestion?: AIEditSuggestion
 }
 
 type SubtitleStatus = 'idle' | 'processing' | 'success' | 'error'
@@ -1221,6 +1225,9 @@ export default function HomePage(): JSX.Element {
       text: 'AI actions will appear here once the backend is connected. For now, suggestion chips can prefill a request and Send stores it in this workspace panel.',
     },
   ])
+  const [aiPendingSuggestion, setAiPendingSuggestion] = useState<AIEditSuggestion | null>(
+    null,
+  )
   const [subtitleSegments, setSubtitleSegments] = useState<SubtitleSegment[]>([])
   const [subtitleStatus, setSubtitleStatus] = useState<SubtitleStatus>('idle')
   const [subtitleError, setSubtitleError] = useState<string | null>(null)
@@ -3145,7 +3152,7 @@ export default function HomePage(): JSX.Element {
     setTimelineZoom((prev) => clamp(prev + direction * 0.5, 1, 4))
   }
 
-  const handleSendAIPrompt = () => {
+  const handleSendAIPrompt = async () => {
     const trimmed = aiPromptDraft.trim()
     if (!trimmed) return
 
@@ -3158,6 +3165,37 @@ export default function HomePage(): JSX.Element {
       },
     ])
     setAiPromptDraft('')
+
+    try {
+      const { suggestion } = await requestAIEditCommand({
+        prompt: trimmed,
+        videoDuration: formatEditableTimestamp(videoDuration ?? totalDuration),
+        transcript: subtitleSegments.map((segment) => ({
+          start: formatEditableTimestamp(segment.start),
+          end: formatEditableTimestamp(segment.end),
+          text: segment.text,
+        })),
+      })
+      setAiPendingSuggestion(suggestion)
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: `assistant-${Date.now()}`,
+          role: 'assistant',
+          text: `Intent: ${suggestion.intent}. Review the operations before applying.`,
+          suggestion,
+        },
+      ])
+    } catch (error) {
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: `assistant-error-${Date.now()}`,
+          role: 'assistant',
+          text: error instanceof Error ? error.message : 'AI request failed.',
+        },
+      ])
+    }
   }
 
   useEffect(() => {
@@ -3214,6 +3252,32 @@ export default function HomePage(): JSX.Element {
     setCutRange(buildFullCutRange(selectedCutDuration))
     setActiveCutHandle(null)
   }, [isCutModeEnabled, selectedCutScopeKey, selectedCutDuration])
+
+  const handleApplyAISuggestion = () => {
+    if (!aiPendingSuggestion) return
+    const notes = applyAISuggestionWithAdapters(aiPendingSuggestion, {
+      onRemoveRange: () => {
+        void handleCutRangeApply()
+      },
+      onSplitAt: () => {
+        void handleSplitAtPlayhead()
+      },
+    })
+
+    if (notes.length > 0) {
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: `assistant-note-${Date.now()}`,
+          role: 'assistant',
+          text: notes.join(' '),
+        },
+      ])
+    }
+    setAiPendingSuggestion(null)
+  }
+
+  const handleCancelAISuggestion = () => setAiPendingSuggestion(null)
 
   const progress = totalDuration > 0 ? currentTime / totalDuration : 0
   const topTabClass = ({ isActive }: { isActive: boolean }) =>
@@ -5603,6 +5667,47 @@ export default function HomePage(): JSX.Element {
                           {message.text}
                         </div>
                       ))}
+
+                      {aiPendingSuggestion && (
+                        <div className={`rounded-2xl border p-3 text-[12px] ${
+                          isDark
+                            ? 'border-[#31415a] bg-[#0f172a] text-[#c6d3eb]'
+                            : 'border-[#d9dde5] bg-[#f8fbff] text-[#334155]'
+                        }`}>
+                          <p className="font-semibold">
+                            Review AI suggestion ({aiPendingSuggestion.intent})
+                          </p>
+                          <ul className="mt-2 list-disc space-y-1 pl-4">
+                            {aiPendingSuggestion.operations.map((operation, index) => (
+                              <li key={`${operation.action}-${index}`}>
+                                {operation.action}: {operation.start ?? 'null'} →{' '}
+                                {operation.end ?? 'null'}
+                              </li>
+                            ))}
+                          </ul>
+                          {aiPendingSuggestion.notes.length > 0 && (
+                            <p className="mt-2">
+                              Notes: {aiPendingSuggestion.notes.join(' | ')}
+                            </p>
+                          )}
+                          <div className="mt-3 flex gap-2">
+                            <button
+                              type="button"
+                              onClick={handleApplyAISuggestion}
+                              className="rounded-lg bg-[#003fb1] px-3 py-1.5 text-white"
+                            >
+                              Apply
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleCancelAISuggestion}
+                              className="rounded-lg border px-3 py-1.5"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     <div
