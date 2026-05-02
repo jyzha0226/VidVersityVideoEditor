@@ -2,6 +2,7 @@
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -11,7 +12,9 @@ import {
   BookOpen,
   Brush,
   Check,
+  CheckCheck,
   Clapperboard,
+  CircleX,
   Files,
   FolderArchive,
   HelpCircle,
@@ -26,6 +29,7 @@ import {
   SkipForward,
   Sparkles,
   RotateCcw,
+  Redo2,
   Save,
   PanelRightClose,
   PanelRightOpen,
@@ -149,12 +153,18 @@ type EditorStatus = 'idle' | 'syncing' | 'ready' | 'error'
 type ExportStatus = 'idle' | 'processing' | 'error'
 type ExportKind = 'clip' | 'video'
 type AppendStatus = 'idle' | 'processing'
+type MergeStatus = 'idle' | 'processing'
 type SubtitleTimingField = 'start' | 'end'
 type SubtitleEntryStatus = 'idle' | 'uploading' | 'generating' | 'success'
-type RightPanelView = 'ai' | 'silence' | 'subtitles' | 'chapters' | 'clean' | 'done'
+type RightPanelView = 'ai' | 'silence' | 'subtitles' | 'chapters' | 'done'
 type CutHandle = 'start' | 'end'
 type PreviewPlaybackMode = 'edited' | 'original'
 type WorkflowStepId = 'clean' | 'polish' | 'chapters' | 'course' | ''
+type DoneActionKind =
+  | 'save-draft'
+  | 'archive-video'
+  | 'add-existing-course'
+  | 'add-new-course'
 
 const CUT_RANGE_MIN_GAP = 0.1
 
@@ -168,7 +178,9 @@ interface ToolbarButtonProps {
   disabled?: boolean
   danger?: boolean
   active?: boolean
+  emphasized?: boolean
   tone?: 'editor' | 'workspace' | 'global'
+  size?: 'default' | 'compact'
 }
 
 const AI_SUGGESTIONS: AISuggestion[] = [
@@ -204,8 +216,10 @@ const AI_QUICK_ACTIONS = [
 ]
 
 const CATEGORY_STORAGE_KEY = 'vidversity-video-categories'
+const DONE_METADATA_STORAGE_KEY = 'vidversity-done-action-metadata'
 const DEFAULT_CATEGORY_VALUE = '__none__'
 const NEW_CATEGORY_VALUE = '__new__'
+const EXISTING_COURSE_OPTIONS = ['Course 1', 'Course 2', 'Course 3']
 
 function normalizeCategoryName(category: string): string {
   return category.trim().replace(/\s+/g, ' ')
@@ -373,6 +387,32 @@ function parseEditableTimestamp(value: string): number | null {
   return Math.max(0, hours * 3600 + minutes * 60 + seconds)
 }
 
+function getVideoTitleFromSource(
+  file?: File | null,
+  sourceUrl?: string | null,
+  fallbackUrl?: string | null,
+): string {
+  const fileName = file?.name?.trim()
+  if (fileName) {
+    return fileName.replace(/\.[^.]+$/, '')
+  }
+
+  const url = sourceUrl || fallbackUrl
+  if (!url) {
+    return 'Untitled Video'
+  }
+
+  try {
+    const parsedUrl = new URL(url, window.location.href)
+    const pathName = decodeURIComponent(parsedUrl.pathname)
+    const baseName = pathName.split('/').filter(Boolean).at(-1)
+    return baseName?.replace(/\.[^.]+$/, '') || 'Untitled Video'
+  } catch {
+    const baseName = url.split('/').filter(Boolean).at(-1)
+    return baseName?.replace(/\.[^.]+$/, '') || 'Untitled Video'
+  }
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
@@ -401,6 +441,8 @@ function ToolbarButton({
   disabled = false,
   danger = false,
   active = false,
+  emphasized = false,
+  size = 'default',
 }: ToolbarButtonProps): JSX.Element {
   const styles = active
     ? danger
@@ -410,23 +452,39 @@ function ToolbarButton({
       : isDark
         ? 'bg-[#1b3566] text-[#cfe3ff] shadow-[0_10px_24px_rgba(26,86,219,0.22)]'
         : 'bg-[#e8f0ff] text-[#00308a] shadow-[0_10px_24px_rgba(0,63,177,0.16)]'
+    : emphasized
+      ? danger
+        ? isDark
+          ? 'text-[#ffb7c0] hover:bg-[#2a1820]'
+          : 'text-[#a23535] hover:bg-[#fff1f1]'
+        : isDark
+          ? 'text-[#e6efff] hover:bg-[#22314a]'
+          : 'text-[#26354a] hover:bg-[#f2f4f6]'
     : danger
       ? isDark
-        ? 'text-[#ff8f9a] hover:bg-[#2a1820]'
-        : 'text-[#a23535] hover:bg-[#fff1f1]'
+        ? 'text-[#ff8f9a]/75 hover:bg-[#2a1820] hover:text-[#ffb7c0]'
+        : 'text-[#a23535]/70 hover:bg-[#fff1f1] hover:text-[#a23535]'
       : isDark
-        ? 'text-[#d6deec] hover:bg-[#22314a] hover:text-[#f2f6ff]'
-        : 'text-[#5b687c] hover:bg-[#f2f4f6] hover:text-[#37465d]'
+        ? 'text-[#8fa2c2] hover:bg-[#22314a] hover:text-[#f2f6ff]'
+        : 'text-[#7a8798] hover:bg-[#f2f4f6] hover:text-[#37465d]'
 
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`group relative flex flex-col items-center gap-0.5 overflow-visible rounded-lg px-2.5 py-1.5 transition disabled:cursor-not-allowed disabled:opacity-40 ${styles}`}
+      className={`group relative flex flex-col items-center gap-0.5 overflow-visible rounded-lg transition disabled:cursor-not-allowed disabled:opacity-40 ${
+        size === 'compact' ? 'px-2 py-1' : 'px-2.5 py-1.5'
+      } ${styles}`}
     >
-      <Icon className="h-3.5 w-3.5" />
-      <span className="text-[8px] font-bold uppercase tracking-[0.18em]">
+      <Icon className={size === 'compact' ? 'h-3 w-3' : 'h-3.5 w-3.5'} />
+      <span
+        className={`${active || emphasized ? 'font-extrabold' : 'font-semibold'} uppercase ${
+          size === 'compact'
+            ? 'text-[7px] tracking-[0.14em]'
+            : 'text-[8px] tracking-[0.18em]'
+        }`}
+      >
         {label}
       </span>
       {guidedMode && (
@@ -676,7 +734,7 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
     return (
       <section className="flex flex-1 min-h-0 w-full items-center justify-center px-4 py-4 xl:px-6 xl:py-5">
         <div className="w-full max-w-[900px]">
-          <div className="mb-3 flex items-center justify-between">
+          <div className="mb-2 flex items-center justify-between">
             <span
               className={`rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-[0.18em] ${
                 playbackMode === 'original'
@@ -694,7 +752,7 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
           {videoUrl ? (
             <video
               ref={videoRef}
-              className="aspect-video max-h-[42vh] w-full bg-black object-contain"
+              className="aspect-video max-h-[44vh] w-full bg-black object-contain"
               src={videoUrl}
               playsInline
               onLoadedMetadata={(event) => {
@@ -732,7 +790,7 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
             <button
               type="button"
               onClick={handleUploadClick}
-              className="relative aspect-video max-h-[42vh] w-full overflow-hidden bg-black text-left transition hover:bg-[#05070b]"
+              className="relative aspect-video max-h-[44vh] w-full overflow-hidden bg-black text-left transition hover:bg-[#05070b]"
               aria-label="Upload video"
             >
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 text-white">
@@ -1254,6 +1312,7 @@ export default function HomePage(): JSX.Element {
   const [activeExportKind, setActiveExportKind] = useState<ExportKind | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
   const [appendStatus, setAppendStatus] = useState<AppendStatus>('idle')
+  const [mergeStatus, setMergeStatus] = useState<MergeStatus>('idle')
   const [timelineThumbnails, setTimelineThumbnails] = useState<TimelineThumbnail[]>([])
   const [waveformSamples, setWaveformSamples] = useState<number[]>([])
   const [timelineMediaReady, setTimelineMediaReady] = useState(false)
@@ -1264,6 +1323,7 @@ export default function HomePage(): JSX.Element {
   const [dragOverSegmentId, setDragOverSegmentId] = useState<number | null>(null)
   const [timelineZoom, setTimelineZoom] = useState(1)
   const [history, setHistory] = useState<EditorHistoryEntry[]>([])
+  const [redoHistory, setRedoHistory] = useState<EditorHistoryEntry[]>([])
   const [activeWorkflowStep, setActiveWorkflowStep] = useState<WorkflowStepId>('')
   const [previewPlaybackMode, setPreviewPlaybackMode] =
     useState<PreviewPlaybackMode>('edited')
@@ -1273,6 +1333,11 @@ export default function HomePage(): JSX.Element {
   )
   const [newCategoryDraft, setNewCategoryDraft] = useState('')
   const [isCreateCategoryModalOpen, setIsCreateCategoryModalOpen] = useState(false)
+  const [doneActionKind, setDoneActionKind] = useState<DoneActionKind | null>(null)
+  const [doneVideoTitleDraft, setDoneVideoTitleDraft] = useState('')
+  const [doneCategoryDraft, setDoneCategoryDraft] = useState('')
+  const [doneCourseDraft, setDoneCourseDraft] = useState(EXISTING_COURSE_OPTIONS[0])
+  const [doneNewCourseNameDraft, setDoneNewCourseNameDraft] = useState('')
   const [cutRange, setCutRange] = useState<{ start: number; end: number }>({
     start: 0,
     end: 180,
@@ -1280,10 +1345,12 @@ export default function HomePage(): JSX.Element {
   const [isCutModeEnabled, setIsCutModeEnabled] = useState(false)
 
   const videoPreviewRef = useRef<VideoPreviewHandle | null>(null)
+  const timelineScrollRef = useRef<HTMLDivElement | null>(null)
   const timelineTrackRef = useRef<HTMLDivElement | null>(null)
+  const shouldCenterPlayheadAfterZoomRef = useRef(false)
   const subtitleUploadInputRef = useRef<HTMLInputElement | null>(null)
   const appendVideoInputRef = useRef<HTMLInputElement | null>(null)
-  const previousWorkspaceViewRef = useRef<Exclude<RightPanelView, 'clean'>>('ai')
+  const previousWorkspaceViewRef = useRef<RightPanelView>('ai')
 
   const applyClipSelection = (
     nextSegments: ClipSegment[],
@@ -1327,6 +1394,7 @@ export default function HomePage(): JSX.Element {
     setSelectedId(initialSegments[0]?.id ?? null)
     setSelectedSegmentIds(initialSegments[0] ? [initialSegments[0].id] : [])
     setHistory([])
+    setRedoHistory([])
     setEditorError(null)
     setExportStatus('idle')
     setActiveExportKind(null)
@@ -1589,6 +1657,28 @@ export default function HomePage(): JSX.Element {
   const sourcePlayheadRatio =
     totalDuration > 0 ? clamp(currentTime / totalDuration, 0, 1) : 0
 
+  useLayoutEffect(() => {
+    if (!shouldCenterPlayheadAfterZoomRef.current) {
+      return
+    }
+
+    shouldCenterPlayheadAfterZoomRef.current = false
+    const scrollContainer = timelineScrollRef.current
+    if (!scrollContainer) {
+      return
+    }
+
+    const maxScrollLeft = Math.max(
+      0,
+      scrollContainer.scrollWidth - scrollContainer.clientWidth,
+    )
+    const playheadScrollLeft =
+      timelinePlayheadRatio * scrollContainer.scrollWidth -
+      scrollContainer.clientWidth / 2
+
+    scrollContainer.scrollLeft = clamp(playheadScrollLeft, 0, maxScrollLeft)
+  }, [timelinePlayheadRatio, timelineZoom])
+
   const silenceReviewItems = silenceSegments.map((segment, index) => ({
     ...segment,
     key: createSilenceSegmentKey(segment.start, segment.end, index),
@@ -1604,6 +1694,7 @@ export default function HomePage(): JSX.Element {
     Boolean(selectedVideoFile || videoSourceUrl || preloadedVideoUrl) &&
     (
       history.length > 0 ||
+      redoHistory.length > 0 ||
       Boolean(editorSessionId) ||
       Boolean(selectedCategory) ||
       subtitleSegments.length > 0 ||
@@ -1615,7 +1706,7 @@ export default function HomePage(): JSX.Element {
 	      id: 'clean',
 	      step: 'Step 1',
 	      label: 'Clean',
-	      tooltip: 'Remove unwanted sections, add videos, and undo edits.',
+	      tooltip: 'Use the toolbar below the video to cut, split, merge, delete, or arrange chapters.',
 	      icon: Brush,
 	    },
     {
@@ -1650,6 +1741,7 @@ export default function HomePage(): JSX.Element {
 
   const pushHistory = () => {
     setHistory((prev) => [...prev.slice(-29), captureEditorState()])
+    setRedoHistory([])
   }
 
   const confirmDiscardChanges = () => {
@@ -1714,25 +1806,21 @@ export default function HomePage(): JSX.Element {
     setDraggedSegmentId(null)
     setDragOverSegmentId(null)
     setHistory([])
+    setRedoHistory([])
     setPreviewPlaybackMode('edited')
     setSelectedCategory('')
     setNewCategoryDraft('')
     setCutRange(buildFullCutRange(editedDuration || videoDuration || 180))
   }
 
-	  const handleUndo = async () => {
-	    if (history.length === 0) return
-	    setActiveWorkflowStep('clean')
-
-    const previous = history[history.length - 1]
-    setHistory((prev) => prev.slice(0, -1))
-    setSegments(relabelSegmentsForChapters(previous.segments))
-    applyClipSelection(
-      relabelSegmentsForChapters(previous.segments),
-      previous.selectedIds,
-      previous.selectedId,
-    )
-    setSubtitleSegments(previous.subtitleSegments)
+  const restoreEditorState = async (
+    state: EditorHistoryEntry,
+    errorMessage: string,
+  ) => {
+    const localSegments = relabelSegmentsForChapters(state.segments)
+    setSegments(localSegments)
+    applyClipSelection(localSegments, state.selectedIds, state.selectedId)
+    setSubtitleSegments(state.subtitleSegments)
 
     if (!editorSessionId) return
 
@@ -1740,8 +1828,8 @@ export default function HomePage(): JSX.Element {
       setEditorStatus('syncing')
       const session = await replaceEditorSessionSegments(
         editorSessionId,
-        previous.segments,
-        previous.selectedId,
+        state.segments,
+        state.selectedId,
         selectedCategory,
       )
       const nextSegments = relabelSegmentsForChapters(session.segments)
@@ -1750,19 +1838,35 @@ export default function HomePage(): JSX.Element {
         nextSegments,
         session.selectedSegmentId != null
           ? [session.selectedSegmentId]
-          : previous.selectedIds,
-        session.selectedSegmentId ?? previous.selectedId,
+          : state.selectedIds,
+        session.selectedSegmentId ?? state.selectedId,
       )
       setEditorStatus('ready')
       setEditorError(null)
     } catch (error) {
       setEditorStatus('error')
-      setEditorError(
-        error instanceof Error
-          ? error.message
-          : 'Could not restore the previous editor state.',
-      )
+      setEditorError(error instanceof Error ? error.message : errorMessage)
     }
+  }
+
+	  const handleUndo = async () => {
+	    if (history.length === 0) return
+	    setActiveWorkflowStep('clean')
+
+    const previous = history[history.length - 1]
+    setRedoHistory((prev) => [...prev.slice(-29), captureEditorState()])
+    setHistory((prev) => prev.slice(0, -1))
+    await restoreEditorState(previous, 'Could not restore the previous editor state.')
+  }
+
+  const handleRedo = async () => {
+    if (redoHistory.length === 0) return
+    setActiveWorkflowStep('clean')
+
+    const next = redoHistory[redoHistory.length - 1]
+    setHistory((prev) => [...prev.slice(-29), captureEditorState()])
+    setRedoHistory((prev) => prev.slice(0, -1))
+    await restoreEditorState(next, 'Could not redo the editor state.')
   }
 
   const handleSeek = (timeInSeconds: number) => {
@@ -1833,26 +1937,6 @@ export default function HomePage(): JSX.Element {
     seekEditedTimelineToTime(ratio * editedDuration)
   }
 
-	  const handleOpenCleanPanel = () => {
-	    setActiveWorkflowStep('clean')
-	    if (rightPanelView === 'clean' && !isRightPanelCollapsed) {
-      setIsRightPanelCollapsed(true)
-      setIsCutModeEnabled(false)
-      setActiveCutHandle(null)
-      return
-    }
-
-    if (rightPanelView !== 'clean') {
-      previousWorkspaceViewRef.current = rightPanelView
-    }
-    setRightPanelView('clean')
-    setIsCutModeEnabled(false)
-    setActiveCutHandle(null)
-    setIsRightPanelCollapsed(false)
-    setEditorError(null)
-    setCutRange(buildFullCutRange(selectedCutDuration))
-  }
-
 	  const handleActivateCutMode = () => {
 	    setActiveWorkflowStep('clean')
 	    if (isCutModeEnabled) {
@@ -1861,12 +1945,6 @@ export default function HomePage(): JSX.Element {
       return
     }
 
-    if (rightPanelView !== 'clean') {
-      previousWorkspaceViewRef.current = rightPanelView
-      setRightPanelView('clean')
-    }
-
-    setIsRightPanelCollapsed(false)
     setEditorError(null)
     setCutRange(buildFullCutRange(selectedCutDuration))
     setIsArrangeModeEnabled(false)
@@ -2090,35 +2168,11 @@ export default function HomePage(): JSX.Element {
 	    setActiveWorkflowStep(stepId)
 	    setIsCutModeEnabled(false)
 	    setActiveCutHandle(null)
-	    setIsRightPanelCollapsed(false)
+	    setIsRightPanelCollapsed(true)
 
 	    if (stepId === 'clean') {
-	      if (rightPanelView !== 'clean') {
-	        previousWorkspaceViewRef.current = rightPanelView
-	      }
-	      setRightPanelView('clean')
 	      setEditorError(null)
 	      setCutRange(buildFullCutRange(selectedCutDuration))
-	      return
-	    }
-
-	    if (stepId === 'polish') {
-	      previousWorkspaceViewRef.current = 'subtitles'
-	      setRightPanelView('subtitles')
-	      setSubtitleError(null)
-	      return
-	    }
-
-	    if (stepId === 'chapters') {
-	      previousWorkspaceViewRef.current = 'chapters'
-	      setRightPanelView('chapters')
-	      setSceneStatus('pending')
-	      return
-	    }
-
-	    if (stepId === 'course') {
-	      previousWorkspaceViewRef.current = 'done'
-	      setRightPanelView('done')
 	    }
 	  }
 
@@ -2180,6 +2234,7 @@ export default function HomePage(): JSX.Element {
 
       const nextSegments = preserveChapterLabels(segments, nextSession.segments)
       setHistory((prev) => [...prev.slice(-29), previousState])
+      setRedoHistory([])
       setSegments(nextSegments)
       applyClipSelection(
         nextSegments,
@@ -2331,6 +2386,7 @@ export default function HomePage(): JSX.Element {
       )
 
       setHistory((prev) => [...prev.slice(-29), previousState])
+      setRedoHistory([])
       const nextSegments = preserveChapterLabels(segments, nextSession.segments)
       setEditorError(null)
       setSegments(nextSegments)
@@ -2423,6 +2479,7 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleSplitAtPlayhead = async () => {
+    setActiveWorkflowStep('clean')
     if (!selectedSegment || !hasSingleSelectedSegment) return
     const playhead = currentTime
     const minGap = 1
@@ -2448,6 +2505,7 @@ export default function HomePage(): JSX.Element {
 
       const nextSegments = preserveChapterLabels(segments, nextSession.segments)
       setHistory((prev) => [...prev.slice(-29), previousState])
+      setRedoHistory([])
       setSegments(nextSegments)
       applyClipSelection(
         nextSegments,
@@ -2509,14 +2567,17 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleMergeSelectedClips = async () => {
+    setActiveWorkflowStep('clean')
     if (!canMergeSelectedSegments) return
 
     const session = await ensureEditorSession()
     if (!session) return
 
     try {
+      setMergeStatus('processing')
       setEditorStatus('syncing')
       setEditorError(null)
+      const previousState = captureEditorState()
 
       const nextSession = await mergeEditorSessionSegments(
         session.sessionId,
@@ -2548,7 +2609,8 @@ export default function HomePage(): JSX.Element {
         nextSelectedSegment?.id ?? null,
       )
       setCurrentTime(nextSelectedSegment?.start ?? 0)
-      setHistory([])
+      setHistory((prev) => [...prev.slice(-29), previousState])
+      setRedoHistory([])
       setEditorStatus('ready')
       setIsPlaying(false)
       setSilenceStatus('idle')
@@ -2571,10 +2633,13 @@ export default function HomePage(): JSX.Element {
           ? error.message
           : 'Could not merge the selected chapters.',
       )
+    } finally {
+      setMergeStatus('idle')
     }
   }
 
   const handleDeleteSelectedClip = () => {
+    setActiveWorkflowStep('clean')
     if (!selectedSegment || !hasSingleSelectedSegment) return
     pushHistory()
 
@@ -2650,6 +2715,7 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleToggleArrangeMode = () => {
+    setActiveWorkflowStep('clean')
     const nextIsEnabled = !isArrangeModeEnabled
     if (nextIsEnabled) {
       setIsCutModeEnabled(false)
@@ -2979,6 +3045,7 @@ export default function HomePage(): JSX.Element {
       setEditorStatus('ready')
       setIsPlaying(false)
       setHistory([])
+      setRedoHistory([])
       setSubtitleSegments([])
       setSubtitleStatus('idle')
       setSubtitleError(null)
@@ -3027,9 +3094,78 @@ export default function HomePage(): JSX.Element {
 
     setCategoryOptions((prev) => mergeCategoryOptions(prev, nextCategory))
     setSelectedCategory(nextCategory)
+    setDoneCategoryDraft(nextCategory)
     setNewCategoryDraft('')
     setIsCreateCategoryModalOpen(false)
     setEditorError(null)
+  }
+
+  const getDoneActionLabel = (action: DoneActionKind): string => {
+    if (action === 'save-draft') return 'Save Draft'
+    if (action === 'archive-video') return 'Archive Video'
+    if (action === 'add-existing-course') return 'Add Video to Existing Course'
+    return 'Add Video to New Course'
+  }
+
+  const getDoneActionConfirmLabel = (action: DoneActionKind): string => {
+    if (action === 'save-draft') return 'Save'
+    if (action === 'archive-video') return 'Archive'
+    return 'Add'
+  }
+
+  const handleOpenDoneActionModal = (action: DoneActionKind) => {
+    setDoneActionKind(action)
+    setDoneVideoTitleDraft(
+      getVideoTitleFromSource(selectedVideoFile, videoSourceUrl, preloadedVideoUrl),
+    )
+    setDoneCategoryDraft(selectedCategory)
+    setDoneCourseDraft(EXISTING_COURSE_OPTIONS[0])
+    setDoneNewCourseNameDraft('')
+  }
+
+  const handleCloseDoneActionModal = () => {
+    setDoneActionKind(null)
+    setDoneVideoTitleDraft('')
+    setDoneCategoryDraft('')
+    setDoneCourseDraft(EXISTING_COURSE_OPTIONS[0])
+    setDoneNewCourseNameDraft('')
+  }
+
+  const handleDoneActionCategorySelect = (value: string) => {
+    if (value === NEW_CATEGORY_VALUE) {
+      setIsCreateCategoryModalOpen(true)
+      return
+    }
+
+    setDoneCategoryDraft(value === DEFAULT_CATEGORY_VALUE ? '' : value)
+  }
+
+  const handleSubmitDoneAction = () => {
+    if (!doneActionKind || typeof window === 'undefined') {
+      return
+    }
+
+    const nextTitle =
+      doneVideoTitleDraft.trim() ||
+      getVideoTitleFromSource(selectedVideoFile, videoSourceUrl, preloadedVideoUrl)
+    const nextCategory = normalizeCategoryName(doneCategoryDraft)
+    const record = {
+      action: doneActionKind,
+      actionLabel: getDoneActionLabel(doneActionKind),
+      title: nextTitle,
+      category: nextCategory,
+      course: doneActionKind === 'add-existing-course' ? doneCourseDraft : '',
+      newCourseName:
+        doneActionKind === 'add-new-course'
+          ? doneNewCourseNameDraft.trim()
+          : '',
+      savedAt: new Date().toISOString(),
+    }
+
+    window.localStorage.setItem(DONE_METADATA_STORAGE_KEY, JSON.stringify(record))
+    setSelectedCategory(nextCategory)
+    setCategoryOptions((prev) => mergeCategoryOptions(prev, nextCategory))
+    handleCloseDoneActionModal()
   }
 
   const handleSubtitleFileSelected = async (
@@ -3142,7 +3278,13 @@ export default function HomePage(): JSX.Element {
   }, [hasUnsavedChanges])
 
   const handleTimelineZoom = (direction: -1 | 1) => {
-    setTimelineZoom((prev) => clamp(prev + direction * 0.5, 1, 4))
+    const nextZoom = clamp(timelineZoom + direction * 0.5, 1, 4)
+    if (nextZoom === timelineZoom) {
+      return
+    }
+
+    shouldCenterPlayheadAfterZoomRef.current = true
+    setTimelineZoom(nextZoom)
   }
 
   const handleSendAIPrompt = () => {
@@ -3308,6 +3450,37 @@ export default function HomePage(): JSX.Element {
         </div>
       ) : null}
 
+      {mergeStatus === 'processing' ? (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-[#0b1220]/55 px-4 backdrop-blur-sm">
+          <div
+            className={`w-full max-w-sm rounded-[28px] border px-6 py-6 text-center shadow-[0_24px_80px_rgba(15,23,42,0.28)] ${
+              isDark
+                ? 'border-[#31415a] bg-[#111827] text-[#edf2ff]'
+                : 'border-[#d9dde5] bg-white text-[#191c1e]'
+            }`}
+          >
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-[rgba(26,86,219,0.12)]">
+              <span className="h-7 w-7 animate-spin rounded-full border-2 border-[#1a56db] border-t-transparent" />
+            </div>
+            <h2
+              className={`mt-4 text-[15px] font-bold uppercase tracking-[0.2em] ${
+                isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+              }`}
+            >
+              Merging Chapters
+            </h2>
+            <p
+              className={`mt-3 text-sm leading-6 ${
+                isDark ? 'text-[#c6d3eb]' : 'text-[#515f74]'
+              }`}
+            >
+              VidVersity is merging the selected chapters and rebuilding the
+              working video. This can take a moment.
+            </p>
+          </div>
+        </div>
+      ) : null}
+
       <header className="sticky top-0 z-40 flex items-center justify-between gap-3 bg-[#de34ab] px-5 py-3 text-white shadow-[0_12px_40px_rgba(222,52,171,0.28)] sm:items-end sm:pb-0 sm:pt-3">
         <div className="flex min-w-0 items-center gap-8 sm:items-end">
           <div className="shrink-0 font-['Manrope'] text-xl font-extrabold tracking-[-0.04em] sm:pb-3">
@@ -3407,9 +3580,13 @@ export default function HomePage(): JSX.Element {
 
       <div
         className={`grid h-[calc(100vh-68px)] grid-cols-1 overflow-visible ${
-          isRightPanelCollapsed
-            ? 'xl:grid-cols-[248px_minmax(0,1fr)_72px]'
-            : 'xl:grid-cols-[248px_minmax(0,1fr)_340px]'
+          guidedMode
+            ? isRightPanelCollapsed
+              ? 'xl:grid-cols-[248px_minmax(0,1fr)_72px]'
+              : 'xl:grid-cols-[248px_minmax(0,1fr)_340px]'
+            : isRightPanelCollapsed
+              ? 'xl:grid-cols-[minmax(0,1fr)_72px]'
+              : 'xl:grid-cols-[minmax(0,1fr)_340px]'
         } ${isDark ? 'bg-[#0b1220]' : 'bg-[#f7f9fb]'}`}
       >
         <Dialog
@@ -3462,6 +3639,174 @@ export default function HomePage(): JSX.Element {
           </DialogContent>
         </Dialog>
 
+        <Dialog
+          open={doneActionKind != null}
+          onOpenChange={(open) => {
+            if (!open) {
+              handleCloseDoneActionModal()
+            }
+          }}
+        >
+          <DialogContent
+            className={`sm:max-w-[460px] ${
+              isDark
+                ? 'border-[#243149] bg-[#0f172a] text-[#edf2ff]'
+                : 'border-[#e3e7ee] bg-white text-[#191c1e]'
+            }`}
+          >
+            <DialogHeader>
+              <DialogTitle>
+                {doneActionKind ? getDoneActionLabel(doneActionKind) : 'Video Details'}
+              </DialogTitle>
+            </DialogHeader>
+
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <label
+                  className={`block text-[10px] font-bold uppercase tracking-[0.18em] ${
+                    isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+                  }`}
+                  htmlFor="done-video-title"
+                >
+                  Video Title
+                </label>
+                <Input
+                  id="done-video-title"
+                  value={doneVideoTitleDraft}
+                  onChange={(event) => setDoneVideoTitleDraft(event.target.value)}
+                  className={`h-10 rounded-xl text-sm ${
+                    isDark
+                      ? 'border-[#31415a] bg-[#111827] text-[#edf2ff] placeholder:text-[#64748b]'
+                      : 'border-[#d9dde5] bg-white text-[#191c1e] placeholder:text-[#8a94a6]'
+                  }`}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label
+                  className={`block text-[10px] font-bold uppercase tracking-[0.18em] ${
+                    isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+                  }`}
+                >
+                  Video Category
+                </label>
+                <Select
+                  value={doneCategoryDraft || DEFAULT_CATEGORY_VALUE}
+                  onValueChange={handleDoneActionCategorySelect}
+                >
+                  <SelectTrigger
+                    className={`h-10 rounded-xl border text-sm ${
+                      isDark
+                        ? 'border-[#31415a] bg-[#111827] text-[#edf2ff]'
+                        : 'border-[#d9dde5] bg-white text-[#191c1e]'
+                    }`}
+                  >
+                    <SelectValue placeholder="Select a category" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={DEFAULT_CATEGORY_VALUE}>
+                      No category
+                    </SelectItem>
+                    <SelectItem value={NEW_CATEGORY_VALUE}>
+                      New category
+                    </SelectItem>
+                    {categoryOptions.map((category) => (
+                      <SelectItem key={category} value={category}>
+                        {category}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {doneActionKind === 'add-existing-course' ? (
+                <div className="space-y-2">
+                  <label
+                    className={`block text-[10px] font-bold uppercase tracking-[0.18em] ${
+                      isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+                    }`}
+                  >
+                    Course
+                  </label>
+                  <Select
+                    value={doneCourseDraft}
+                    onValueChange={setDoneCourseDraft}
+                  >
+                    <SelectTrigger
+                      className={`h-10 rounded-xl border text-sm ${
+                        isDark
+                          ? 'border-[#31415a] bg-[#111827] text-[#edf2ff]'
+                          : 'border-[#d9dde5] bg-white text-[#191c1e]'
+                      }`}
+                    >
+                      <SelectValue placeholder="Select a course" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {EXISTING_COURSE_OPTIONS.map((course) => (
+                        <SelectItem key={course} value={course}>
+                          {course}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : null}
+
+              {doneActionKind === 'add-new-course' ? (
+                <div className="space-y-2">
+                  <label
+                    className={`block text-[10px] font-bold uppercase tracking-[0.18em] ${
+                      isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+                    }`}
+                    htmlFor="done-new-course-name"
+                  >
+                    New Course Name
+                  </label>
+                  <Input
+                    id="done-new-course-name"
+                    value={doneNewCourseNameDraft}
+                    onChange={(event) =>
+                      setDoneNewCourseNameDraft(event.target.value)
+                    }
+                    placeholder="e.g. Biology 101"
+                    className={`h-10 rounded-xl text-sm ${
+                      isDark
+                        ? 'border-[#31415a] bg-[#111827] text-[#edf2ff] placeholder:text-[#64748b]'
+                        : 'border-[#d9dde5] bg-white text-[#191c1e] placeholder:text-[#8a94a6]'
+                    }`}
+                  />
+                </div>
+              ) : null}
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={handleCloseDoneActionModal}
+                  className={`flex h-10 items-center justify-center rounded-xl border px-4 text-sm font-semibold transition ${
+                    isDark
+                      ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb] hover:bg-[#182238]'
+                      : 'border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb]'
+                  }`}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSubmitDoneAction}
+                  disabled={doneVideoTitleDraft.trim().length === 0}
+                  className={`flex h-10 items-center justify-center rounded-xl px-4 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                    isDark
+                      ? 'bg-[#1a56db] text-white hover:bg-[#2b67ec]'
+                      : 'bg-[#003fb1] text-white hover:bg-[#1a56db]'
+                  }`}
+                >
+                  {doneActionKind ? getDoneActionConfirmLabel(doneActionKind) : 'Save'}
+                </button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
+
         <input
           ref={subtitleUploadInputRef}
           type="file"
@@ -3477,13 +3822,14 @@ export default function HomePage(): JSX.Element {
           onChange={handleAppendVideoSelected}
         />
 
-        <aside
-          className={`hidden min-h-0 overflow-visible border-r px-4 py-4 xl:flex xl:flex-col xl:justify-between ${
-            isDark
-              ? 'border-[#243149] bg-[#121a2b]'
-              : 'border-[#d9dde5] bg-[#f2f4f6]'
-          }`}
-        >
+        {guidedMode ? (
+          <aside
+            className={`hidden min-h-0 overflow-visible border-r px-4 py-4 xl:flex xl:flex-col xl:justify-between ${
+              isDark
+                ? 'border-[#243149] bg-[#121a2b]'
+                : 'border-[#d9dde5] bg-[#f2f4f6]'
+            }`}
+          >
 	          <div className="space-y-5">
 	            <div
 	              className={`rounded-[20px] border px-3 py-3 ${
@@ -3578,119 +3924,21 @@ export default function HomePage(): JSX.Element {
 	              </div>
 	            </div>
 
-            <div
-              className={`rounded-[20px] border px-4 py-4 ${
-                isDark
-                  ? 'border-[#243149] bg-[#0f172a]'
-                  : 'border-[#e3e7ee] bg-white'
-              }`}
-            >
-	              <p
-	                className={`text-[11px] font-bold uppercase tracking-[0.18em] ${
-	                  isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
-	                }`}
-	              >
-	                Video Category
-	              </p>
-
-              <div className="mt-4">
-                <Select
-                  value={selectedCategory || DEFAULT_CATEGORY_VALUE}
-                  onValueChange={handleCategorySelect}
-                >
-                  <SelectTrigger
-                    className={`h-10 rounded-xl border text-sm ${
-                      isDark
-                        ? 'border-[#31415a] bg-[#111827] text-[#edf2ff]'
-                        : 'border-[#d9dde5] bg-white text-[#191c1e]'
-                    }`}
-                  >
-                    <SelectValue placeholder="Select a category" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={DEFAULT_CATEGORY_VALUE}>
-                      No category
-                    </SelectItem>
-                    <SelectItem value={NEW_CATEGORY_VALUE}>
-                      New category
-                    </SelectItem>
-                    {categoryOptions.map((category) => (
-                      <SelectItem key={category} value={category}>
-                        {category}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-	            </div>
-	          </div>
-
-	          <div
-	            className={`mt-5 rounded-[20px] border px-4 py-4 ${
-	              isDark
-	                ? 'border-[#243149] bg-[#0f172a]'
-	                : 'border-[#e3e7ee] bg-white'
-	            }`}
-	          >
-	            <p
-	              className={`text-[11px] font-bold uppercase tracking-[0.18em] ${
-	                isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
-	              }`}
-	            >
-	              Session Status
-	            </p>
-	            <div className="mt-3 space-y-3">
-	              <div className="flex items-center justify-between text-[12px]">
-	                <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
-	                  Video loaded
-	                </span>
-	                <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
-	                  {selectedVideoFile || videoSourceUrl ? 'Ready' : 'Waiting'}
-	                </span>
-	              </div>
-	              <div className="flex items-center justify-between text-[12px]">
-	                <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
-	                  Subtitles
-	                </span>
-	                <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
-	                  {subtitleSegments.length > 0
-	                    ? `${subtitleSegments.length} loaded`
-	                    : subtitleStatus === 'processing'
-	                      ? 'Processing'
-	                      : 'Not added'}
-	                </span>
-	              </div>
-	              <div className="flex items-center justify-between text-[12px]">
-	                <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
-	                  Silence cleanup
-	                </span>
-	                <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
-	                  {silenceStatus === 'processing'
-	                    ? 'Analyzing'
-	                    : silenceStatus === 'success'
-	                      ? `${selectedSilenceCount}/${silenceSegments.length} selected`
-	                      : 'Ready'}
-	                </span>
-	              </div>
-	              <div className="flex items-center justify-between text-[12px]">
-	                <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
-	                  Guided mode
-	                </span>
-	                <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
-	                  {guidedMode ? 'On' : 'Off'}
-	                </span>
-	              </div>
-	            </div>
 	          </div>
 
 	        </aside>
+        ) : null}
 
         <main
           className={`min-h-0 min-w-0 overflow-y-auto overflow-x-hidden ${
             isDark ? 'bg-[#0b1220]' : 'bg-[#f7f9fb]'
           }`}
         >
-          <div className="mx-auto flex min-h-full w-full max-w-[1120px] flex-col px-3 py-3 xl:px-4 xl:py-4">
+          <div
+            className={`mx-auto flex min-h-full w-full flex-col px-3 py-2.5 xl:px-4 xl:py-3 ${
+              guidedMode ? 'max-w-[1120px]' : 'max-w-[1368px]'
+            }`}
+          >
             <div
               className={`flex min-h-0 flex-1 flex-col overflow-visible rounded-[32px] border shadow-[0_20px_60px_rgba(15,23,42,0.08)] ${
                 isDark
@@ -3764,16 +4012,16 @@ export default function HomePage(): JSX.Element {
 		                    </span>
 		                  ) : null}
 		                </button>
-	                <div className="mx-auto w-full max-w-[1040px] px-4 py-3">
+	                <div className="mx-auto w-full max-w-[1040px] px-4 py-2.5">
                   <div
-                    className={`rounded-[24px] border px-4 py-2.5 shadow-[0_18px_50px_rgba(15,23,42,0.06)] ${
+                    className={`rounded-[20px] border px-3 py-2 shadow-[0_14px_36px_rgba(15,23,42,0.05)] ${
                       isDark
                         ? 'border-[#243149] bg-[#0f172a]'
                         : 'border-[#d9dde5] bg-white'
                     }`}
                   >
                     <div
-                      className={`mb-2.5 flex flex-wrap items-center justify-center gap-3 border-b pb-2.5 ${
+                      className={`mb-2 flex flex-wrap items-center justify-center gap-2.5 border-b pb-2 ${
                         isDark ? 'border-[#243149]' : 'border-[#edf0f4]'
                       }`}
                     >
@@ -3866,65 +4114,142 @@ export default function HomePage(): JSX.Element {
                       </div>
                     </div>
 
-	                    <div className="flex flex-wrap items-center justify-center gap-2">
+	                    <div className="flex flex-wrap items-stretch justify-center gap-1.5">
 	                      <div
-	                        className={`flex items-center gap-1 rounded-2xl border px-1.5 py-1 ${
-	                          activeWorkflowStep === 'clean'
-	                            ? isDark
-	                              ? 'border-[#8bb8ff] bg-[#182238]'
-	                              : 'border-[#7aa4ff] bg-[#eef3ff]'
-	                            : isDark
-	                              ? 'border-[#243149] bg-[#111827]'
-	                              : 'border-[#e3e7ee] bg-[#fbfcfd]'
-	                        }`}
+	                        className="flex items-start gap-1 px-1 py-1"
 	                      >
+	                        <div className="flex flex-col items-center gap-1">
+	                          <ToolbarButton
+	                            label="Cut"
+	                            tooltip={
+	                              isCutModeEnabled
+	                                ? 'Turn off cut mode without applying the selected range.'
+	                                : 'Activate cut mode so you can drag the pink range handles across the selected clips on the timeline.'
+	                            }
+	                            guidedMode={guidedMode}
+	                            isDark={isDark}
+	                            onClick={handleActivateCutMode}
+	                            icon={Scissors}
+	                            disabled={!canCutSelectedSegments}
+	                            active={isCutModeEnabled}
+	                            emphasized={activeWorkflowStep === 'clean'}
+	                            tone="workspace"
+	                          />
+	                          {isCutModeEnabled ? (
+	                            <div className="flex items-center gap-1">
+	                              <ToolbarButton
+	                                label="Apply Cut"
+	                                tooltip="Apply the selected cut range and remove everything outside it from the selected clips."
+	                                guidedMode={guidedMode}
+	                                isDark={isDark}
+	                                onClick={() => {
+	                                  void handleCutVideo()
+	                                }}
+	                                icon={CheckCheck}
+	                                disabled={!canCutSelectedSegments}
+	                                emphasized={activeWorkflowStep === 'clean'}
+	                                tone="workspace"
+	                                size="compact"
+	                              />
+	                              <ToolbarButton
+	                                label="Cancel"
+	                                tooltip="Cancel cut mode and keep the timeline unchanged."
+	                                guidedMode={guidedMode}
+	                                isDark={isDark}
+	                                onClick={handleActivateCutMode}
+	                                icon={CircleX}
+	                                emphasized={activeWorkflowStep === 'clean'}
+	                                tone="workspace"
+	                                size="compact"
+	                              />
+	                            </div>
+	                          ) : null}
+	                        </div>
 	                        <ToolbarButton
-	                          label="Clean"
-	                          tooltip="Open cleaning tools to keep a range, split at the playhead, or delete a selected section."
+	                          label="Split"
+	                          tooltip="Split the selected chapter at the playhead."
 	                          guidedMode={guidedMode}
 	                          isDark={isDark}
-	                          onClick={handleOpenCleanPanel}
-	                          icon={Brush}
-	                          active={rightPanelView === 'clean' && !isRightPanelCollapsed}
-	                          tone="editor"
+	                          onClick={() => {
+	                            void handleSplitAtPlayhead()
+	                          }}
+	                          icon={Split}
+	                          disabled={!selectedSegment || !hasSingleSelectedSegment}
+	                          emphasized={activeWorkflowStep === 'clean'}
+	                          tone="workspace"
 	                        />
 	                        <ToolbarButton
-	                          label="Add Video"
-	                          tooltip="Add another video to the end of the timeline."
+	                          label="Merge"
+	                          tooltip="Merge works when two or more adjacent chapters are selected on the timeline. Use Shift-click for a range, or Cmd/Ctrl-click to add chapters to the selection."
 	                          guidedMode={guidedMode}
 	                          isDark={isDark}
-	                          onClick={handleAppendVideoClick}
-	                          icon={Plus}
-	                          disabled={
-	                            appendStatus === 'processing' ||
-	                            exportStatus === 'processing' ||
-	                            editorStatus === 'syncing' ||
-	                            (!selectedVideoFile && !videoSourceUrl && !preloadedVideoUrl)
-	                          }
-	                          tone="global"
+	                          onClick={() => {
+	                            void handleMergeSelectedClips()
+	                          }}
+	                          icon={Clapperboard}
+	                          disabled={!canMergeSelectedSegments}
+	                          emphasized={activeWorkflowStep === 'clean'}
+	                          tone="workspace"
+	                        />
+	                        <ToolbarButton
+	                          label="Delete"
+	                          tooltip="Delete the selected chapter from the timeline."
+	                          guidedMode={guidedMode}
+	                          isDark={isDark}
+	                          onClick={handleDeleteSelectedClip}
+	                          icon={Trash2}
+	                          disabled={!selectedSegment || !hasSingleSelectedSegment}
+	                          danger
+	                          emphasized={activeWorkflowStep === 'clean'}
+	                          tone="workspace"
+	                        />
+	                        <ToolbarButton
+	                          label="Arrange"
+	                          tooltip="Enable drag-and-drop so you can reorder chapters directly on the timeline."
+	                          guidedMode={guidedMode}
+	                          isDark={isDark}
+	                          onClick={handleToggleArrangeMode}
+	                          icon={Files}
+	                          active={isArrangeModeEnabled}
+	                          emphasized={activeWorkflowStep === 'clean'}
+	                          tone="workspace"
 	                        />
 	                        <ToolbarButton
 	                          label="Undo"
 	                          tooltip="Undo your last change."
 	                          guidedMode={guidedMode}
 	                          isDark={isDark}
-	                          onClick={handleUndo}
+	                          onClick={() => {
+	                            void handleUndo()
+	                          }}
 	                          icon={RotateCcw}
 	                          disabled={history.length === 0}
+	                          emphasized={activeWorkflowStep === 'clean'}
+	                          tone="global"
+	                        />
+	                        <ToolbarButton
+	                          label="Redo"
+	                          tooltip="Redo the last change you undid."
+	                          guidedMode={guidedMode}
+	                          isDark={isDark}
+	                          onClick={() => {
+	                            void handleRedo()
+	                          }}
+	                          icon={Redo2}
+	                          disabled={redoHistory.length === 0}
+	                          emphasized={activeWorkflowStep === 'clean'}
 	                          tone="global"
 	                        />
 	                      </div>
+	                      <span
+	                        className={`my-2 w-px self-stretch ${
+	                          isDark ? 'bg-[#31415a]' : 'bg-[#d9dde5]'
+	                        }`}
+	                        aria-hidden="true"
+	                      />
 
 	                      <div
-	                        className={`flex items-center gap-1 rounded-2xl border px-1.5 py-1 ${
-	                          activeWorkflowStep === 'polish'
-	                            ? isDark
-	                              ? 'border-[#8bb8ff] bg-[#182238]'
-	                              : 'border-[#7aa4ff] bg-[#eef3ff]'
-	                            : isDark
-	                              ? 'border-[#243149] bg-[#111827]'
-	                              : 'border-[#e3e7ee] bg-[#fbfcfd]'
-	                        }`}
+	                        className="flex items-start gap-1 px-1 py-1"
 	                      >
 	                        <ToolbarButton
 	                          label="Silencer"
@@ -3935,6 +4260,7 @@ export default function HomePage(): JSX.Element {
 	                          icon={Mic}
 	                          disabled={silenceStatus === 'processing'}
 	                          active={rightPanelView === 'silence' && !isRightPanelCollapsed}
+	                          emphasized={activeWorkflowStep === 'polish'}
 	                          tone="editor"
 	                        />
 	                        <ToolbarButton
@@ -3950,20 +4276,19 @@ export default function HomePage(): JSX.Element {
 	                          icon={Subtitles}
 	                          disabled={subtitleStatus === 'processing'}
 	                          active={rightPanelView === 'subtitles' && !isRightPanelCollapsed}
+	                          emphasized={activeWorkflowStep === 'polish'}
 	                          tone="workspace"
 	                        />
 	                      </div>
+	                      <span
+	                        className={`my-2 w-px self-stretch ${
+	                          isDark ? 'bg-[#31415a]' : 'bg-[#d9dde5]'
+	                        }`}
+	                        aria-hidden="true"
+	                      />
 
 	                      <div
-	                        className={`flex items-center gap-1 rounded-2xl border px-1.5 py-1 ${
-	                          activeWorkflowStep === 'chapters'
-	                            ? isDark
-	                              ? 'border-[#8bb8ff] bg-[#182238]'
-	                              : 'border-[#7aa4ff] bg-[#eef3ff]'
-	                            : isDark
-	                              ? 'border-[#243149] bg-[#111827]'
-	                              : 'border-[#e3e7ee] bg-[#fbfcfd]'
-	                        }`}
+	                        className="flex items-start gap-1 px-1 py-1"
 	                      >
 	                        <ToolbarButton
 	                          label="Chapters"
@@ -3973,20 +4298,19 @@ export default function HomePage(): JSX.Element {
 	                          onClick={handleOpenChaptersPanel}
 	                          icon={Clapperboard}
 	                          active={rightPanelView === 'chapters' && !isRightPanelCollapsed}
+	                          emphasized={activeWorkflowStep === 'chapters'}
 	                          tone="workspace"
 	                        />
 	                      </div>
+	                      <span
+	                        className={`my-2 w-px self-stretch ${
+	                          isDark ? 'bg-[#31415a]' : 'bg-[#d9dde5]'
+	                        }`}
+	                        aria-hidden="true"
+	                      />
 
 	                      <div
-	                        className={`flex items-center gap-1 rounded-2xl border px-1.5 py-1 ${
-	                          activeWorkflowStep === 'course'
-	                            ? isDark
-	                              ? 'border-[#8bb8ff] bg-[#182238]'
-	                              : 'border-[#7aa4ff] bg-[#eef3ff]'
-	                            : isDark
-	                              ? 'border-[#243149] bg-[#111827]'
-	                              : 'border-[#e3e7ee] bg-[#fbfcfd]'
-	                        }`}
+	                        className="flex items-start gap-1 px-1 py-1"
 	                      >
 	                        <ToolbarButton
 	                          label="Done"
@@ -3996,6 +4320,7 @@ export default function HomePage(): JSX.Element {
 	                          onClick={handleOpenDonePanel}
 	                          icon={Check}
 	                          active={rightPanelView === 'done' && !isRightPanelCollapsed}
+	                          emphasized={activeWorkflowStep === 'course'}
 	                          tone="global"
 	                        />
 	                      </div>
@@ -4004,7 +4329,7 @@ export default function HomePage(): JSX.Element {
                 </div>
 
                 {subtitleError ? (
-                  <div className="mx-auto w-full max-w-[1040px] px-4 pb-4">
+                  <div className="mx-auto w-full max-w-[1040px] px-4 pb-2">
                     <div
                       className={`max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-[20px] border px-4 py-3 text-[12px] leading-5 ${
                         isDark
@@ -4018,7 +4343,7 @@ export default function HomePage(): JSX.Element {
                 ) : null}
 
                 {silenceError ? (
-                  <div className="mx-auto w-full max-w-[1040px] px-4 pb-4">
+                  <div className="mx-auto w-full max-w-[1040px] px-4 pb-2">
                     <div
                       className={`max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-[20px] border px-4 py-3 text-[12px] leading-5 ${
                         isDark
@@ -4032,7 +4357,7 @@ export default function HomePage(): JSX.Element {
                 ) : null}
 
                 {editorError ? (
-                  <div className="mx-auto w-full max-w-[1040px] px-4 pb-4">
+                  <div className="mx-auto w-full max-w-[1040px] px-4 pb-2">
                     <div
                       className={`max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-[20px] border px-4 py-3 text-[12px] leading-5 ${
                         isDark
@@ -4046,7 +4371,7 @@ export default function HomePage(): JSX.Element {
                 ) : null}
 
                 {exportError ? (
-                  <div className="mx-auto w-full max-w-[1040px] px-4 pb-4">
+                  <div className="mx-auto w-full max-w-[1040px] px-4 pb-2">
                     <div
                       className={`max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-[20px] border px-4 py-3 text-[12px] leading-5 ${
                         isDark
@@ -4059,15 +4384,15 @@ export default function HomePage(): JSX.Element {
                   </div>
                 ) : null}
 
-                <div className="mx-auto w-full max-w-[1040px] px-4 pb-4">
+                <div className="mx-auto w-full max-w-[1040px] px-4 pb-2.5">
                   <div
-                    className={`rounded-[24px] border px-4 py-3 shadow-[0_18px_50px_rgba(15,23,42,0.06)] ${
+                    className={`rounded-[20px] border px-3 py-2.5 shadow-[0_14px_36px_rgba(15,23,42,0.05)] ${
                       isDark
                         ? 'border-[#243149] bg-[#0f172a]'
                         : 'border-[#d9dde5] bg-white'
                     }`}
                   >
-                    <div className="overflow-x-auto pb-1">
+                    <div ref={timelineScrollRef} className="overflow-x-auto pb-1">
                       <div className="relative min-w-full" style={{ width: `${timelineZoom * 100}%` }}>
                         <div className="relative">
                           <div
@@ -4080,7 +4405,7 @@ export default function HomePage(): JSX.Element {
                             }}
                           >
                             <div
-                              className={`relative flex min-h-[84px] items-stretch overflow-hidden rounded-2xl border ${
+                              className={`relative flex min-h-[58px] items-stretch overflow-hidden rounded-xl border ${
                                 isDark
                                   ? 'border-[#2b3950] bg-[#1a2435]'
                                   : 'border-[#dfe5ec] bg-[#eff3f8]'
@@ -4272,13 +4597,13 @@ export default function HomePage(): JSX.Element {
                                       </span>
                                     ) : null}
 
-                                    <div className="relative z-10 px-3 py-2">
-                                      <div className="px-2 py-2 drop-shadow-[0_2px_8px_rgba(15,23,42,0.55)]">
-                                        <span className="block min-w-0 truncate text-[10px] font-bold uppercase tracking-[0.18em]">
+                                    <div className="relative z-10 px-2 py-1.5">
+                                      <div className="px-1.5 py-1.5 drop-shadow-[0_2px_8px_rgba(15,23,42,0.55)]">
+                                        <span className="block min-w-0 truncate text-[9px] font-bold uppercase tracking-[0.16em]">
                                           {segment.label}
                                         </span>
                                         <span
-                                          className={`mt-1 block text-[11px] ${
+                                          className={`mt-0.5 block text-[10px] ${
                                             isSelected
                                               ? isPrimarySelected
                                                 ? 'text-white'
@@ -4310,7 +4635,7 @@ export default function HomePage(): JSX.Element {
                                     style={{ left: `${timelinePlayheadRatio * 100}%` }}
                                   />
                                   <span
-                                    className="absolute bottom-7 rounded-full bg-[#111827] px-2 py-0.5 text-[9px] font-mono text-white shadow-sm"
+                                    className="absolute bottom-5 rounded-full bg-[#111827] px-2 py-0.5 text-[9px] font-mono text-white shadow-sm"
                                     style={getTimelineTimestampStyle(timelinePlayheadRatio)}
                                   >
                                     {formatEditableTimestamp(timelinePlayheadEditedTime)}
@@ -4436,18 +4761,9 @@ export default function HomePage(): JSX.Element {
                             </div>
                           </div>
 
-                          <div className="mt-3 px-1">
+                          <div className="mt-2 px-1">
                             <div
-                              className={`mb-1 flex items-center justify-between px-1 text-[9px] font-bold uppercase tracking-[0.18em] ${
-                                isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
-                              }`}
-                            >
-                              <span>Original Video Reference</span>
-                              <span>{formatClock(totalDuration)}</span>
-                            </div>
-
-                            <div
-                              className={`relative h-8 overflow-hidden rounded-xl border ${
+                              className={`relative h-5 overflow-hidden rounded-lg border ${
                                 isDark
                                   ? 'border-[#2b3950] bg-[#101827]'
                                   : 'border-[#dfe5ec] bg-[#f6f8fb]'
@@ -4516,7 +4832,7 @@ export default function HomePage(): JSX.Element {
                                     style={{ left: `${sourcePlayheadRatio * 100}%` }}
                                   />
                                   <span
-                                    className="absolute -top-7 rounded-full bg-[#111827] px-2 py-0.5 text-[9px] font-mono text-white shadow-sm"
+                                    className="absolute -top-6 rounded-full bg-[#111827] px-2 py-0.5 text-[9px] font-mono text-white shadow-sm"
                                     style={getTimelineTimestampStyle(sourcePlayheadRatio)}
                                   >
                                     {formatEditableTimestamp(currentTime)}
@@ -4528,35 +4844,6 @@ export default function HomePage(): JSX.Element {
                         </div>
 
                         <div className="pt-1">
-                          <div
-                            className={`mb-1 flex items-center justify-between px-2 text-[9px] font-bold uppercase tracking-[0.18em] ${
-                              isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
-                            }`}
-                          >
-                            <span>
-                              {segments.length} chapter{segments.length === 1 ? '' : 's'}
-                              {selectedSegments.length > 1
-                                ? ` · ${selectedSegments.length} selected`
-                                : ''}
-                            </span>
-                            <span>
-                              {editorStatus === 'syncing'
-                                ? 'Syncing editor'
-                                : editorSessionId
-                                  ? 'Editor session active'
-                                  : selectedVideoFile
-                                    ? 'Ready to create editor session'
-                                    : 'Upload a local video to edit'}
-                            </span>
-                          </div>
-                          <div
-                            className={`mb-1 flex items-center justify-between px-2 text-[9px] font-bold uppercase tracking-[0.18em] ${
-                              isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
-                            }`}
-                          >
-                            <span>Edited Timeline</span>
-                            <span>{formatClock(editedDuration)}</span>
-                          </div>
                           <div
                             className={`flex justify-between px-2 text-[9px] font-mono ${
                               isDark ? 'text-[#8fa2c2]' : 'text-[#737686]'
@@ -4590,9 +4877,7 @@ export default function HomePage(): JSX.Element {
 	          >
 	            {!isRightPanelCollapsed ? (
 	              <div className="flex items-center gap-2">
-                {rightPanelView === 'clean' ? (
-                  <Brush className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
-                ) : rightPanelView === 'silence' ? (
+                {rightPanelView === 'silence' ? (
                   <Mic className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
                 ) : rightPanelView === 'chapters' ? (
                   <Clapperboard className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
@@ -4607,10 +4892,8 @@ export default function HomePage(): JSX.Element {
                   className={`text-[12px] font-bold uppercase tracking-[0.18em] ${
                     isDark ? 'text-[#c6d3eb]' : 'text-[#515f74]'
                   }`}
-                >
-                  {rightPanelView === 'clean'
-                    ? 'Clean'
-                    : rightPanelView === 'silence'
+	                >
+                  {rightPanelView === 'silence'
                     ? 'Silence Review'
                     : rightPanelView === 'chapters'
                       ? 'Chapters'
@@ -4649,186 +4932,7 @@ export default function HomePage(): JSX.Element {
                   : 'border-[#d9dde5] bg-[linear-gradient(180deg,#ffffff_0%,#f7f9fb_100%)]'
               }`}
             >
-                {rightPanelView === 'clean' ? (
-                  <div className="flex min-h-0 flex-1 flex-col overflow-visible">
-                    <div
-                      className={`mb-4 rounded-2xl border p-2 ${
-                        isDark
-                          ? 'border-[#243149] bg-[#111827]'
-                          : 'border-[#e3e7ee] bg-[#fbfcfd]'
-                      }`}
-                    >
-                      <div className="grid grid-cols-3 gap-2">
-                        <ToolbarButton
-                          label="Cut"
-                          tooltip="Activate cut mode so you can drag the pink range handles across the selected clips on the timeline."
-                          guidedMode
-                          isDark={isDark}
-                          onClick={handleActivateCutMode}
-                          icon={Scissors}
-                          disabled={!canCutSelectedSegments}
-                          active={isCutModeEnabled}
-                          tone="workspace"
-                        />
-                        <ToolbarButton
-                          label="Split"
-                          tooltip="Split the selected chapter at the playhead."
-                          guidedMode
-                          isDark={isDark}
-                          onClick={() => {
-                            void handleSplitAtPlayhead()
-                          }}
-                          icon={Split}
-                          disabled={!selectedSegment || !hasSingleSelectedSegment}
-                          tone="workspace"
-                        />
-                        <ToolbarButton
-                          label="Arrange"
-                          tooltip="Enable drag-and-drop so you can reorder chapters directly on the timeline."
-                          guidedMode
-                          isDark={isDark}
-                          onClick={handleToggleArrangeMode}
-                          icon={Files}
-                          active={isArrangeModeEnabled}
-                          tone="workspace"
-                        />
-                      </div>
-                      <div className="mt-2 grid grid-cols-2 gap-2">
-                        <ToolbarButton
-                          label="Merge"
-                          tooltip="Merge works when two or more adjacent chapters are selected on the timeline. Use Shift-click for a range, or Cmd/Ctrl-click to add chapters to the selection."
-                          guidedMode
-                          isDark={isDark}
-                          onClick={() => {
-                            void handleMergeSelectedClips()
-                          }}
-                          icon={Clapperboard}
-                          disabled={!canMergeSelectedSegments}
-                          tone="workspace"
-                        />
-                        <ToolbarButton
-                          label="Delete"
-                          tooltip="Delete the selected chapter from the timeline."
-                          guidedMode
-                          isDark={isDark}
-                          onClick={handleDeleteSelectedClip}
-                          icon={Trash2}
-                          disabled={!selectedSegment || !hasSingleSelectedSegment}
-                          danger
-                          tone="workspace"
-                        />
-                      </div>
-                    </div>
-
-                    {isCutModeEnabled ? (
-                      <>
-                        <div
-                          className={`mb-4 rounded-2xl border px-4 py-3 text-[12px] leading-5 ${
-                            isDark
-                              ? 'border-[#243149] bg-[#111827] text-[#9fb0ca]'
-                              : 'border-[#e3e7ee] bg-[#fbfcfd] text-[#57657a]'
-                          }`}
-                        >
-                          Cut mode is active. Drag the two pink range handles across
-                          the selected clips to keep one continuous section from that
-                          selection. Unselected clips will stay unchanged.
-                        </div>
-
-                        <div className="mb-4">
-                          <ToolbarButton
-                            label="Apply Cut"
-                            tooltip="Apply the selected cut range and remove everything outside it from the selected clips."
-                            guidedMode
-                            isDark={isDark}
-                            onClick={() => {
-                              void handleCutVideo()
-                            }}
-                            icon={Scissors}
-                            disabled={!canCutSelectedSegments}
-                            tone="workspace"
-                          />
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-3">
-                          <div
-                            className={`rounded-2xl border px-4 py-3 ${
-                              isDark
-                                ? 'border-[#243149] bg-[#111827]'
-                                : 'border-[#e3e7ee] bg-[#fbfcfd]'
-                            }`}
-                          >
-                            <span
-                              className={`block text-[9px] font-bold uppercase tracking-[0.14em] ${
-                                isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
-                              }`}
-                            >
-                              Keep From
-                            </span>
-                            <span
-                              className={`mt-2 block text-[14px] font-semibold ${
-                                isDark ? 'text-[#e5edf9]' : 'text-[#233147]'
-                              }`}
-                            >
-                              {formatEditableTimestamp(normalizedCutRange.start)}
-                            </span>
-                          </div>
-
-                          <div
-                            className={`rounded-2xl border px-4 py-3 ${
-                              isDark
-                                ? 'border-[#243149] bg-[#111827]'
-                                : 'border-[#e3e7ee] bg-[#fbfcfd]'
-                            }`}
-                          >
-                            <span
-                              className={`block text-[9px] font-bold uppercase tracking-[0.14em] ${
-                                isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
-                              }`}
-                            >
-                              Keep To
-                            </span>
-                            <span
-                              className={`mt-2 block text-[14px] font-semibold ${
-                                isDark ? 'text-[#e5edf9]' : 'text-[#233147]'
-                              }`}
-                            >
-                              {formatEditableTimestamp(normalizedCutRange.end)}
-                            </span>
-                          </div>
-                        </div>
-
-                        <div
-                          className={`mt-4 rounded-2xl border border-dashed px-5 py-5 text-[12px] leading-6 ${
-                            isDark
-                              ? 'border-[#31415a] bg-[#111827] text-[#8fa2c2]'
-                              : 'border-[#c3c5d7] bg-[#fbfcfd] text-[#737686]'
-                          }`}
-                        >
-                          Remaining kept selection length:{' '}
-                          {formatEditableTimestamp(
-                            Math.max(
-                              CUT_RANGE_MIN_GAP,
-                              normalizedCutRange.end - normalizedCutRange.start,
-                            ),
-                          )}
-                        </div>
-                      </>
-                    ) : null}
-
-                    {isArrangeModeEnabled ? (
-                      <div
-                        className={`mt-4 rounded-2xl border px-4 py-3 text-[12px] leading-5 ${
-                          isDark
-                            ? 'border-[#5d2d56] bg-[#231321] text-[#ffb3de]'
-                            : 'border-[#f2b6d9] bg-[#fff4fa] text-[#a20f66]'
-                        }`}
-                      >
-                        Arrange mode is active. Drag chapters on the timeline to
-                        reorder them, and their current names will stay attached.
-                      </div>
-                    ) : null}
-                  </div>
-                ) : rightPanelView === 'silence' ? (
+                {rightPanelView === 'silence' ? (
                   <div className="flex min-h-0 flex-1 flex-col overflow-visible">
                   <div
                     className={`relative z-20 mb-4 overflow-visible rounded-2xl border p-2 ${
@@ -5027,54 +5131,7 @@ export default function HomePage(): JSX.Element {
                 </div>
               ) : rightPanelView === 'chapters' ? (
                   <div className="flex min-h-0 flex-1 flex-col overflow-visible">
-                  <div
-                    className={`relative z-20 mb-4 overflow-visible rounded-2xl border p-2 ${
-                      isDark
-                        ? 'border-[#243149] bg-[#111827]'
-                        : 'border-[#e3e7ee] bg-[#fbfcfd]'
-                    }`}
-                  >
-                    <div className="grid grid-cols-2 gap-2">
-                      <ToolbarButton
-                        label="Split"
-                        tooltip="Split the selected chapter at the playhead."
-                        guidedMode={guidedMode}
-                        isDark={isDark}
-                        onClick={() => {
-                          void handleSplitAtPlayhead()
-                        }}
-                        icon={Split}
-                        disabled={!selectedSegment || !hasSingleSelectedSegment}
-                        tone="workspace"
-                      />
-                      <ToolbarButton
-                        label="Merge"
-                        tooltip="Merge the selected adjacent chapters into one chapter."
-                        guidedMode={guidedMode}
-                        isDark={isDark}
-                        onClick={() => {
-                          void handleMergeSelectedClips()
-                        }}
-                        icon={Clapperboard}
-                        disabled={!canMergeSelectedSegments}
-                        tone="workspace"
-                      />
-                    </div>
-                  </div>
-
                   <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                    <div
-                      className={`mb-4 rounded-2xl border px-4 py-3 text-[12px] leading-5 ${
-                        isDark
-                          ? 'border-[#243149] bg-[#111827] text-[#9fb0ca]'
-                          : 'border-[#e3e7ee] bg-[#fbfcfd] text-[#57657a]'
-                      }`}
-                    >
-                      {sceneStatus === 'pending'
-                        ? 'Split the full video into chapters, rename them, and jump to any chapter from this panel.'
-                        : 'Open Chapters to organize the video into named sections.'}
-                    </div>
-
                     {segments.length === 0 ? (
                       <div
                         className={`rounded-2xl border border-dashed px-5 py-5 text-[12px] leading-6 ${
@@ -5456,6 +5513,7 @@ export default function HomePage(): JSX.Element {
                     <div className="grid grid-cols-1 gap-2">
                       <button
                         type="button"
+                        onClick={() => handleOpenDoneActionModal('save-draft')}
                         className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${
                           isDark
                             ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
@@ -5467,6 +5525,7 @@ export default function HomePage(): JSX.Element {
                       </button>
                       <button
                         type="button"
+                        onClick={() => handleOpenDoneActionModal('archive-video')}
                         className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${
                           isDark
                             ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
@@ -5529,7 +5588,7 @@ export default function HomePage(): JSX.Element {
                     <div className="grid grid-cols-1 gap-2">
                       <button
                         type="button"
-                        onClick={() => {}}
+                        onClick={() => handleOpenDoneActionModal('add-existing-course')}
                         className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${
                           isDark
                             ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
@@ -5541,7 +5600,7 @@ export default function HomePage(): JSX.Element {
                       </button>
                       <button
                         type="button"
-                        onClick={() => {}}
+                        onClick={() => handleOpenDoneActionModal('add-new-course')}
                         className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${
                           isDark
                             ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
