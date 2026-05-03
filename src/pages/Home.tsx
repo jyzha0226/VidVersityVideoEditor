@@ -2010,7 +2010,28 @@ export default function HomePage(): JSX.Element {
         syncedSession.sessionId,
         silenceDetectionOptions,
       )
-      const nextSilenceSegments = detection.silenceSegments
+      let nextSilenceSegments = detection.silenceSegments
+      if (nextSilenceSegments.length === 0) {
+        const videoFile = await ensureVideoFile()
+        if (videoFile) {
+          const sourceDetection = await detectSilenceFromVideo(
+            videoFile,
+            silenceDetectionOptions,
+          )
+          nextSilenceSegments = sourceDetection.silenceSegments
+            .map((silence) => {
+              for (const segment of segments) {
+                const start = Math.max(silence.start, segment.start)
+                const end = Math.min(silence.end, segment.end)
+                if (end - start >= silenceDetectionOptions.minSilenceDuration) {
+                  return { start, end }
+                }
+              }
+              return null
+            })
+            .filter((segment): segment is { start: number; end: number } => segment != null)
+        }
+      }
       setSilenceSegments(nextSilenceSegments)
       setSelectedSilenceSegmentKeys([])
       setStagedSilenceSegmentKeys([])
@@ -3433,17 +3454,46 @@ export default function HomePage(): JSX.Element {
                         ? thresholdSeconds
                         : undefined,
                   })
-          const candidateDurations = detection.silenceSegments.map((segment) =>
+          let resolvedSilenceSegments = detection.silenceSegments
+          if (
+            resolvedSilenceSegments.length === 0 &&
+            !isTimelineUnedited(segments, videoDuration)
+          ) {
+            const videoFile = await ensureVideoFile()
+            if (videoFile) {
+              const sourceDetection = await detectSilenceFromVideo(videoFile, {
+                noiseThresholdDb: -35,
+                minSilenceDuration:
+                  thresholdSeconds != null && Number.isFinite(thresholdSeconds)
+                    ? thresholdSeconds
+                    : 0.6,
+                minSegmentDuration: 0.25,
+              })
+              resolvedSilenceSegments = sourceDetection.silenceSegments
+                .map((silence) => {
+                  for (const segment of segments) {
+                    const start = Math.max(silence.start, segment.start)
+                    const end = Math.min(silence.end, segment.end)
+                    if (end - start >= 0.6) {
+                      return { start, end }
+                    }
+                  }
+                  return null
+                })
+                .filter((segment): segment is { start: number; end: number } => segment != null)
+            }
+          }
+          const candidateDurations = resolvedSilenceSegments.map((segment) =>
             Number((segment.end - segment.start).toFixed(2)),
           )
           const targetSilenceSegments =
             thresholdSeconds != null && Number.isFinite(thresholdSeconds)
-              ? detection.silenceSegments.filter(
+              ? resolvedSilenceSegments.filter(
                   (segment) => segment.end - segment.start >= thresholdSeconds,
                 )
-              : detection.silenceSegments
+              : resolvedSilenceSegments
           executionNotes.push(
-            `Silence debug: candidates=${detection.silenceSegments.length}, durations=[${candidateDurations.join(
+            `Silence debug: candidates=${resolvedSilenceSegments.length}, durations=[${candidateDurations.join(
               ', ',
             )}], threshold=${thresholdSeconds ?? 'none'}.`,
           )
@@ -3517,12 +3567,14 @@ export default function HomePage(): JSX.Element {
 
         try {
           setEditorStatus('syncing')
+          const previousState = captureEditorState()
           const nextSession = await cutEditorSessionToRange(
             session.sessionId,
             cutStartSeconds,
             cutEndSeconds,
             selectedForCut,
           )
+          setHistory((prev) => [...prev.slice(-29), previousState])
           const nextSegments = preserveChapterLabels(segments, nextSession.segments)
           setSegments(nextSegments)
           applyClipSelection(
