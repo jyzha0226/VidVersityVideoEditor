@@ -65,6 +65,8 @@ import {
 import { importSubtitlesFromFile } from '../subtitles/import'
 import type { SubtitleSegment } from '../subtitles/types'
 import { Input } from '../components/ui/input'
+import { requestAIEditCommand } from '../ai/api'
+import type { AIEditSuggestion } from '../ai/types'
 import {
   Dialog,
   DialogContent,
@@ -141,6 +143,7 @@ interface AIDraftMessage {
   id: string
   role: 'user' | 'assistant'
   text: string
+  suggestion?: AIEditSuggestion
 }
 
 type SubtitleStatus = 'idle' | 'processing' | 'success' | 'error'
@@ -1221,6 +1224,13 @@ export default function HomePage(): JSX.Element {
       text: 'AI actions will appear here once the backend is connected. For now, suggestion chips can prefill a request and Send stores it in this workspace panel.',
     },
   ])
+  const [aiPendingSuggestion, setAiPendingSuggestion] = useState<AIEditSuggestion | null>(
+    null,
+  )
+  const [aiRequestStatus, setAiRequestStatus] = useState<
+    'idle' | 'sending' | 'success' | 'error'
+  >('idle')
+  const [aiResponseJson, setAiResponseJson] = useState<string>('')
   const [subtitleSegments, setSubtitleSegments] = useState<SubtitleSegment[]>([])
   const [subtitleStatus, setSubtitleStatus] = useState<SubtitleStatus>('idle')
   const [subtitleError, setSubtitleError] = useState<string | null>(null)
@@ -2000,7 +2010,28 @@ export default function HomePage(): JSX.Element {
         syncedSession.sessionId,
         silenceDetectionOptions,
       )
-      const nextSilenceSegments = detection.silenceSegments
+      let nextSilenceSegments = detection.silenceSegments
+      if (nextSilenceSegments.length === 0) {
+        const videoFile = await ensureVideoFile()
+        if (videoFile) {
+          const sourceDetection = await detectSilenceFromVideo(
+            videoFile,
+            silenceDetectionOptions,
+          )
+          nextSilenceSegments = sourceDetection.silenceSegments
+            .map((silence) => {
+              for (const segment of segments) {
+                const start = Math.max(silence.start, segment.start)
+                const end = Math.min(silence.end, segment.end)
+                if (end - start >= silenceDetectionOptions.minSilenceDuration) {
+                  return { start, end }
+                }
+              }
+              return null
+            })
+            .filter((segment): segment is { start: number; end: number } => segment != null)
+        }
+      }
       setSilenceSegments(nextSilenceSegments)
       setSelectedSilenceSegmentKeys([])
       setStagedSilenceSegmentKeys([])
@@ -3145,9 +3176,21 @@ export default function HomePage(): JSX.Element {
     setTimelineZoom((prev) => clamp(prev + direction * 0.5, 1, 4))
   }
 
-  const handleSendAIPrompt = () => {
+  const handleSendAIPrompt = async () => {
     const trimmed = aiPromptDraft.trim()
     if (!trimmed) return
+    if (!videoSourceUrl && !selectedVideoFile) {
+      setAiRequestStatus('error')
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: `assistant-video-required-${Date.now()}`,
+          role: 'assistant',
+          text: 'Please upload or select a video before using AI Workspace.',
+        },
+      ])
+      return
+    }
 
     setAiMessages((prev) => [
       ...prev,
@@ -3158,6 +3201,66 @@ export default function HomePage(): JSX.Element {
       },
     ])
     setAiPromptDraft('')
+    setAiRequestStatus('sending')
+
+    try {
+      const shouldSuggestChapters = /chapter|chapters|topic/i.test(trimmed)
+      let transcriptForAI = subtitleSegments.map((segment) => ({
+        start: formatEditableTimestamp(segment.start),
+        end: formatEditableTimestamp(segment.end),
+        text: segment.text,
+      }))
+
+      if (shouldSuggestChapters && transcriptForAI.length === 0) {
+        const videoFile = await ensureVideoFile()
+        if (!videoFile) {
+          throw new Error(
+            'Chapter suggestion requires a loaded video. Upload a local video first.',
+          )
+        }
+
+        setSubtitleStatus('processing')
+        const generated = await generateSubtitlesFromVideo(videoFile, {
+          model: 'tiny.en',
+          language: 'en',
+        })
+        setSubtitleSegments(generated)
+        setSubtitleStatus('success')
+        transcriptForAI = generated.map((segment) => ({
+          start: formatEditableTimestamp(segment.start),
+          end: formatEditableTimestamp(segment.end),
+          text: segment.text,
+        }))
+      }
+
+      const { suggestion } = await requestAIEditCommand({
+        prompt: trimmed,
+        videoDuration: formatEditableTimestamp(videoDuration ?? totalDuration),
+        transcript: transcriptForAI,
+      })
+      setAiPendingSuggestion(suggestion)
+      setAiResponseJson(JSON.stringify(suggestion, null, 2))
+      setAiRequestStatus('success')
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: `assistant-${Date.now()}`,
+          role: 'assistant',
+          text: `Intent: ${suggestion.intent}. Review the operations before applying.`,
+          suggestion,
+        },
+      ])
+    } catch (error) {
+      setAiRequestStatus('error')
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: `assistant-error-${Date.now()}`,
+          role: 'assistant',
+          text: error instanceof Error ? error.message : 'AI request failed.',
+        },
+      ])
+    }
   }
 
   useEffect(() => {
@@ -3214,6 +3317,316 @@ export default function HomePage(): JSX.Element {
     setCutRange(buildFullCutRange(selectedCutDuration))
     setActiveCutHandle(null)
   }, [isCutModeEnabled, selectedCutScopeKey, selectedCutDuration])
+
+  const handleApplyAISuggestion = async () => {
+    if (!aiPendingSuggestion) return
+    const executionNotes: string[] = []
+
+    for (const operation of aiPendingSuggestion.operations) {
+      if (operation.action === 'split_at') {
+        const splitAtSeconds = operation.start
+          ? parseEditableTimestamp(operation.start)
+          : null
+        if (splitAtSeconds == null) {
+          executionNotes.push('Split operation skipped: invalid or missing split timestamp.')
+          continue
+        }
+
+        const containingSegment = segments.find(
+          (segment) =>
+            splitAtSeconds > segment.start + 0.1 &&
+            splitAtSeconds < segment.end - 0.1,
+        )
+        if (!containingSegment) {
+          executionNotes.push(
+            `Split skipped: ${operation.start} is outside a splittable segment.`,
+          )
+          continue
+        }
+
+        const session = await ensureEditorSession()
+        if (!session) {
+          executionNotes.push('Split skipped: editor session is unavailable.')
+          continue
+        }
+
+        try {
+          setEditorStatus('syncing')
+          const nextSession = await splitEditorSessionAtTime(
+            session.sessionId,
+            containingSegment.id,
+            splitAtSeconds,
+          )
+          const nextSegments = preserveChapterLabels(segments, nextSession.segments)
+          setSegments(nextSegments)
+          applyClipSelection(
+            nextSegments,
+            nextSession.selectedSegmentId != null
+              ? [nextSession.selectedSegmentId]
+              : [],
+            nextSession.selectedSegmentId ?? nextSegments[0]?.id ?? null,
+          )
+          setEditorStatus('ready')
+          handleSeek(splitAtSeconds)
+          executionNotes.push(`Split applied at ${operation.start}.`)
+        } catch (error) {
+          setEditorStatus('error')
+          executionNotes.push(
+            error instanceof Error
+              ? `Split failed: ${error.message}`
+              : 'Split failed unexpectedly.',
+          )
+        }
+        continue
+      }
+
+      if (operation.action === 'add_subtitle') {
+        if (subtitleSegments.length === 0) {
+          void handleGenerateSubtitlesFromPanel()
+          executionNotes.push(
+            'Subtitle generation started because no subtitle track existed.',
+          )
+        } else {
+          executionNotes.push(
+            'TODO: range-based subtitle insertion adapter is not connected yet.',
+          )
+        }
+        continue
+      }
+
+      if (operation.action === 'trim_silence') {
+        const session = await ensureEditorSession()
+        if (!session) {
+          executionNotes.push('Silence trim skipped: editor session is unavailable.')
+          continue
+        }
+        try {
+          setEditorStatus('syncing')
+          const parsePositiveSeconds = (value: unknown): number | null => {
+            if (typeof value === 'number') {
+              return Number.isFinite(value) && value > 0 ? value : null
+            }
+            if (typeof value === 'string') {
+              const direct = Number(value)
+              if (Number.isFinite(direct) && direct > 0) {
+                return direct
+              }
+              const matched = value.match(/(\d+(?:\.\d+)?)/)
+              if (!matched) return null
+              const parsed = Number(matched[1])
+              return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+            }
+            return null
+          }
+          const rawThreshold = aiPendingSuggestion.parameters?.minSilenceSeconds
+          const fallbackThreshold = parsePositiveSeconds(operation.text)
+          const thresholdSeconds =
+            parsePositiveSeconds(rawThreshold) ?? fallbackThreshold
+          const detection =
+            silenceSegments.length > 0
+              ? {
+                  audioDuration:
+                    silenceSegments[silenceSegments.length - 1]?.end ??
+                    session.duration,
+                  silenceSegments,
+                  speechSegments: [],
+                }
+              : isTimelineUnedited(segments, videoDuration)
+                ? await (async () => {
+                    const videoFile = await ensureVideoFile()
+                    if (!videoFile) {
+                      throw new Error(
+                        'Upload a local video file before trimming silence with AI.',
+                      )
+                    }
+                    return detectSilenceFromVideo(videoFile, {
+                      noiseThresholdDb: -35,
+                      minSilenceDuration:
+                        thresholdSeconds != null && Number.isFinite(thresholdSeconds)
+                          ? thresholdSeconds
+                          : 0.6,
+                      minSegmentDuration: 0.25,
+                    })
+                  })()
+                : await detectSilenceInEditorSession(session.sessionId, {
+                    minSilenceDuration:
+                      thresholdSeconds != null && Number.isFinite(thresholdSeconds)
+                        ? thresholdSeconds
+                        : undefined,
+                  })
+          let resolvedSilenceSegments = detection.silenceSegments
+          if (
+            resolvedSilenceSegments.length === 0 &&
+            !isTimelineUnedited(segments, videoDuration)
+          ) {
+            const videoFile = await ensureVideoFile()
+            if (videoFile) {
+              const sourceDetection = await detectSilenceFromVideo(videoFile, {
+                noiseThresholdDb: -35,
+                minSilenceDuration:
+                  thresholdSeconds != null && Number.isFinite(thresholdSeconds)
+                    ? thresholdSeconds
+                    : 0.6,
+                minSegmentDuration: 0.25,
+              })
+              resolvedSilenceSegments = sourceDetection.silenceSegments
+                .map((silence) => {
+                  for (const segment of segments) {
+                    const start = Math.max(silence.start, segment.start)
+                    const end = Math.min(silence.end, segment.end)
+                    if (end - start >= 0.6) {
+                      return { start, end }
+                    }
+                  }
+                  return null
+                })
+                .filter((segment): segment is { start: number; end: number } => segment != null)
+            }
+          }
+          const candidateDurations = resolvedSilenceSegments.map((segment) =>
+            Number((segment.end - segment.start).toFixed(2)),
+          )
+          const targetSilenceSegments =
+            thresholdSeconds != null && Number.isFinite(thresholdSeconds)
+              ? resolvedSilenceSegments.filter(
+                  (segment) => segment.end - segment.start >= thresholdSeconds,
+                )
+              : resolvedSilenceSegments
+          executionNotes.push(
+            `Silence debug: candidates=${resolvedSilenceSegments.length}, durations=[${candidateDurations.join(
+              ', ',
+            )}], threshold=${thresholdSeconds ?? 'none'}.`,
+          )
+          if (targetSilenceSegments.length === 0) {
+            executionNotes.push('No silence segments detected to remove.')
+            setEditorStatus('ready')
+            continue
+          }
+
+          const nextSession = await deleteSilenceRangesFromEditorSession(
+            session.sessionId,
+            targetSilenceSegments,
+          )
+          const nextSegments = preserveChapterLabels(segments, nextSession.segments)
+          setSegments(nextSegments)
+          applyClipSelection(
+            nextSegments,
+            nextSession.selectedSegmentId != null
+              ? [nextSession.selectedSegmentId]
+              : [],
+            nextSession.selectedSegmentId ?? nextSegments[0]?.id ?? null,
+          )
+          setEditorStatus('ready')
+          setSilenceSegments([])
+          setSelectedSilenceSegmentKeys([])
+          setStagedSilenceSegmentKeys([])
+          executionNotes.push(
+            `Silence trim applied to ${targetSilenceSegments.length} detected ranges.`,
+          )
+        } catch (error) {
+          setEditorStatus('error')
+          executionNotes.push(
+            error instanceof Error
+              ? `Silence trim failed: ${error.message}`
+              : 'Silence trim failed unexpectedly.',
+          )
+        }
+        continue
+      }
+
+      if (operation.action === 'keep' || operation.action === 'remove') {
+        const cutStartSeconds = operation.start
+          ? parseEditableTimestamp(operation.start)
+          : null
+        const cutEndSeconds = operation.end
+          ? parseEditableTimestamp(operation.end)
+          : null
+        if (
+          cutStartSeconds == null ||
+          cutEndSeconds == null ||
+          !Number.isFinite(cutStartSeconds) ||
+          !Number.isFinite(cutEndSeconds) ||
+          cutEndSeconds <= cutStartSeconds
+        ) {
+          executionNotes.push(
+            'Cut skipped: keep/remove operation is missing a valid start/end range.',
+          )
+          continue
+        }
+
+        const session = await ensureEditorSession()
+        if (!session) {
+          executionNotes.push('Cut skipped: editor session is unavailable.')
+          continue
+        }
+
+        const selectedForCut =
+          selectedSegments.length > 0
+            ? [...orderedSelectedSegmentIds]
+            : segments.map((segment) => segment.id)
+
+        try {
+          setEditorStatus('syncing')
+          const previousState = captureEditorState()
+          const nextSession = await cutEditorSessionToRange(
+            session.sessionId,
+            cutStartSeconds,
+            cutEndSeconds,
+            selectedForCut,
+          )
+          setHistory((prev) => [...prev.slice(-29), previousState])
+          const nextSegments = preserveChapterLabels(segments, nextSession.segments)
+          setSegments(nextSegments)
+          applyClipSelection(
+            nextSegments,
+            nextSession.selectedSegmentId != null
+              ? [nextSession.selectedSegmentId]
+              : [],
+            nextSession.selectedSegmentId ?? nextSegments[0]?.id ?? null,
+          )
+          setCutRange(buildFullCutRange(cutEndSeconds - cutStartSeconds))
+          setIsCutModeEnabled(false)
+          setActiveCutHandle(null)
+          setEditorStatus('ready')
+          executionNotes.push(
+            `${operation.action === 'remove' ? 'Cut' : 'Keep'} applied for ${operation.start} to ${operation.end} (outside removed).`,
+          )
+        } catch (error) {
+          setEditorStatus('error')
+          executionNotes.push(
+            error instanceof Error
+              ? `Cut failed: ${error.message}`
+              : 'Cut failed unexpectedly.',
+          )
+        }
+        continue
+      }
+
+      if (operation.action === 'mute') {
+        executionNotes.push('TODO: mute adapter is not connected yet.')
+        continue
+      }
+
+      if (operation.action === 'suggest_chapter') {
+        executionNotes.push('Chapter suggestions are review-only and are not auto-applied.')
+      }
+    }
+
+    setAiMessages((prev) => [
+      ...prev,
+      {
+        id: `assistant-loop-${Date.now()}`,
+        role: 'assistant',
+        text:
+          executionNotes.length > 0
+            ? executionNotes.join(' ')
+            : 'No executable AI operations were found in this suggestion.',
+      },
+    ])
+    setAiPendingSuggestion(null)
+  }
+
+  const handleCancelAISuggestion = () => setAiPendingSuggestion(null)
 
   const progress = totalDuration > 0 ? currentTime / totalDuration : 0
   const topTabClass = ({ isActive }: { isActive: boolean }) =>
@@ -5573,12 +5986,13 @@ export default function HomePage(): JSX.Element {
                       <button
                         key={item}
                         type="button"
+                        disabled={!videoSourceUrl && !selectedVideoFile}
                         onClick={() => setAiPromptDraft(item)}
                         className={`rounded-full border px-3 py-2 text-left text-[12px] transition ${
                           isDark
                             ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb] hover:border-[#4b6388] hover:bg-[#131f33]'
                             : 'border-[#d9dde5] bg-white text-[#515f74] hover:border-[#7aa4ff] hover:bg-[#f6f9ff]'
-                        }`}
+                        } disabled:cursor-not-allowed disabled:opacity-45`}
                       >
                         {item}
                       </button>
@@ -5603,6 +6017,55 @@ export default function HomePage(): JSX.Element {
                           {message.text}
                         </div>
                       ))}
+
+                      {aiPendingSuggestion && (
+                        <div className={`rounded-2xl border p-3 text-[12px] ${
+                          isDark
+                            ? 'border-[#31415a] bg-[#0f172a] text-[#c6d3eb]'
+                            : 'border-[#d9dde5] bg-[#f8fbff] text-[#334155]'
+                        }`}>
+                          <p className="font-semibold">
+                            Review AI suggestion ({aiPendingSuggestion.intent})
+                          </p>
+                          <ul className="mt-2 list-disc space-y-1 pl-4">
+                            {aiPendingSuggestion.operations.map((operation, index) => (
+                              <li key={`${operation.action}-${index}`}>
+                                {operation.action}: {operation.start ?? 'null'} →{' '}
+                                {operation.end ?? 'null'}
+                              </li>
+                            ))}
+                          </ul>
+                          {aiPendingSuggestion.notes.length > 0 && (
+                            <p className="mt-2">
+                              Notes: {aiPendingSuggestion.notes.join(' | ')}
+                            </p>
+                          )}
+                          <div className="mt-3 flex gap-2">
+                            <button
+                              type="button"
+                              onClick={handleApplyAISuggestion}
+                              className="rounded-lg bg-[#003fb1] px-3 py-1.5 text-white"
+                            >
+                              Apply
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleCancelAISuggestion}
+                              className="rounded-lg border px-3 py-1.5"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                          <div className="mt-3">
+                            <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide opacity-70">
+                              Backend JSON response
+                            </p>
+                            <pre className="max-h-40 overflow-auto rounded-lg border p-2 text-[11px] leading-4">
+{aiResponseJson}
+                            </pre>
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     <div
@@ -5631,7 +6094,11 @@ export default function HomePage(): JSX.Element {
                       <button
                         type="button"
                         onClick={handleSendAIPrompt}
-                        disabled={aiPromptDraft.trim().length === 0}
+                        disabled={
+                          aiPromptDraft.trim().length === 0 ||
+                          aiRequestStatus === 'sending' ||
+                          (!videoSourceUrl && !selectedVideoFile)
+                        }
                         className={`flex h-11 w-11 items-center justify-center rounded-2xl transition disabled:cursor-not-allowed disabled:opacity-40 ${
                           isDark
                             ? 'bg-[#1b3566] text-[#edf2ff] hover:bg-[#234178]'
@@ -5642,6 +6109,17 @@ export default function HomePage(): JSX.Element {
                         <Send className="h-4 w-4" />
                       </button>
                     </div>
+                    <p className="mt-2 text-[11px] opacity-70">
+                      {aiRequestStatus === 'sending' && 'Sending request: chat box → backend endpoint → Ollama...'}
+                      {aiRequestStatus === 'success' && 'Response received: Ollama JSON has been validated and shown above.'}
+                      {aiRequestStatus === 'error' && 'Request failed. Check backend server logs and Ollama status.'}
+                      {aiRequestStatus === 'idle' && 'Submit a prompt to test the AI request/response loop.'}
+                    </p>
+                    {!videoSourceUrl && !selectedVideoFile && (
+                      <p className="mt-1 text-[11px] font-medium text-amber-500">
+                        Upload a video first to enable AI Workspace suggestions.
+                      </p>
+                    )}
                   </div>
                 </>
               )}
