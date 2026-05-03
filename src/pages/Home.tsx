@@ -3352,11 +3352,13 @@ export default function HomePage(): JSX.Element {
 
         try {
           setEditorStatus('syncing')
+          const previousState = captureEditorState()
           const nextSession = await splitEditorSessionAtTime(
             session.sessionId,
             containingSegment.id,
             splitAtSeconds,
           )
+          setHistory((prev) => [...prev.slice(-29), previousState])
           const nextSegments = preserveChapterLabels(segments, nextSession.segments)
           setSegments(nextSegments)
           applyClipSelection(
@@ -3402,6 +3404,7 @@ export default function HomePage(): JSX.Element {
         }
         try {
           setEditorStatus('syncing')
+          const previousState = captureEditorState()
           const parsePositiveSeconds = (value: unknown): number | null => {
             if (typeof value === 'number') {
               return Number.isFinite(value) && value > 0 ? value : null
@@ -3507,6 +3510,7 @@ export default function HomePage(): JSX.Element {
             session.sessionId,
             targetSilenceSegments,
           )
+          setHistory((prev) => [...prev.slice(-29), previousState])
           const nextSegments = preserveChapterLabels(segments, nextSession.segments)
           setSegments(nextSegments)
           applyClipSelection(
