@@ -65,7 +65,7 @@ import {
 import { importSubtitlesFromFile } from '../subtitles/import'
 import type { SubtitleSegment } from '../subtitles/types'
 import { Input } from '../components/ui/input'
-import { requestAIEditCommand } from '../ai/api'
+import { requestAIChapterSuggestions, requestAIEditCommand } from '../ai/api'
 import type { AIEditSuggestion } from '../ai/types'
 import {
   Dialog,
@@ -1227,6 +1227,7 @@ export default function HomePage(): JSX.Element {
   const [aiPendingSuggestion, setAiPendingSuggestion] = useState<AIEditSuggestion | null>(
     null,
   )
+  const [isApplyingAISuggestion, setIsApplyingAISuggestion] = useState(false)
   const [aiRequestStatus, setAiRequestStatus] = useState<
     'idle' | 'sending' | 'success' | 'error'
   >('idle')
@@ -3204,34 +3205,11 @@ export default function HomePage(): JSX.Element {
     setAiRequestStatus('sending')
 
     try {
-      const shouldSuggestChapters = /chapter|chapters|topic/i.test(trimmed)
       let transcriptForAI = subtitleSegments.map((segment) => ({
         start: formatEditableTimestamp(segment.start),
         end: formatEditableTimestamp(segment.end),
         text: segment.text,
       }))
-
-      if (shouldSuggestChapters && transcriptForAI.length === 0) {
-        const videoFile = await ensureVideoFile()
-        if (!videoFile) {
-          throw new Error(
-            'Chapter suggestion requires a loaded video. Upload a local video first.',
-          )
-        }
-
-        setSubtitleStatus('processing')
-        const generated = await generateSubtitlesFromVideo(videoFile, {
-          model: 'tiny.en',
-          language: 'en',
-        })
-        setSubtitleSegments(generated)
-        setSubtitleStatus('success')
-        transcriptForAI = generated.map((segment) => ({
-          start: formatEditableTimestamp(segment.start),
-          end: formatEditableTimestamp(segment.end),
-          text: segment.text,
-        }))
-      }
 
       const { suggestion } = await requestAIEditCommand({
         prompt: trimmed,
@@ -3319,10 +3297,11 @@ export default function HomePage(): JSX.Element {
   }, [isCutModeEnabled, selectedCutScopeKey, selectedCutDuration])
 
   const handleApplyAISuggestion = async () => {
-    if (!aiPendingSuggestion) return
+    if (!aiPendingSuggestion || isApplyingAISuggestion) return
+    setIsApplyingAISuggestion(true)
     const executionNotes: string[] = []
-
-    for (const operation of aiPendingSuggestion.operations) {
+    try {
+      for (const operation of aiPendingSuggestion.operations) {
       if (operation.action === 'split_at') {
         const splitAtSeconds = operation.start
           ? parseEditableTimestamp(operation.start)
@@ -3612,7 +3591,40 @@ export default function HomePage(): JSX.Element {
       }
 
       if (operation.action === 'suggest_chapter') {
-        executionNotes.push('Chapter suggestions are review-only and are not auto-applied.')
+        if (subtitleSegments.length === 0) {
+          const shouldGenerate = window.confirm(
+            'Chapter suggestions require subtitles/transcript. No subtitles found. Generate subtitles now?',
+          )
+          executionNotes.push(
+            shouldGenerate
+              ? 'Please generate subtitles first, then re-run chapter suggestion apply.'
+              : 'Chapter suggestion skipped: subtitles are required.',
+          )
+          continue
+        }
+
+        const allowShareTranscript = window.confirm(
+          'Allow sharing current subtitles transcript with AI model for chapter analysis?',
+        )
+        if (!allowShareTranscript) {
+          executionNotes.push('Chapter suggestion skipped: transcript sharing was not allowed.')
+          continue
+        }
+
+        const transcript = subtitleSegments.map((segment) => ({
+          start: formatEditableTimestamp(segment.start),
+          end: formatEditableTimestamp(segment.end),
+          text: segment.text,
+        }))
+        const { suggestion } = await requestAIChapterSuggestions({
+          videoDuration: formatEditableTimestamp(videoDuration ?? totalDuration),
+          transcript,
+        })
+        setAiPendingSuggestion(suggestion)
+        setAiResponseJson(JSON.stringify(suggestion, null, 2))
+        executionNotes.push(
+          `Chapter suggestion refreshed with transcript context (${transcript.length} subtitle lines). Review updated suggestions.`,
+        )
       }
     }
 
@@ -3628,6 +3640,9 @@ export default function HomePage(): JSX.Element {
       },
     ])
     setAiPendingSuggestion(null)
+    } finally {
+      setIsApplyingAISuggestion(false)
+    }
   }
 
   const handleCancelAISuggestion = () => setAiPendingSuggestion(null)
@@ -6048,9 +6063,10 @@ export default function HomePage(): JSX.Element {
                             <button
                               type="button"
                               onClick={handleApplyAISuggestion}
+                              disabled={isApplyingAISuggestion}
                               className="rounded-lg bg-[#003fb1] px-3 py-1.5 text-white"
                             >
-                              Apply
+                              {isApplyingAISuggestion ? 'Applying…' : 'Apply'}
                             </button>
                             <button
                               type="button"
