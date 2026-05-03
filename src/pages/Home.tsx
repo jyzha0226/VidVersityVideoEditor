@@ -3381,13 +3381,26 @@ export default function HomePage(): JSX.Element {
         }
         try {
           setEditorStatus('syncing')
+          const parsePositiveSeconds = (value: unknown): number | null => {
+            if (typeof value === 'number') {
+              return Number.isFinite(value) && value > 0 ? value : null
+            }
+            if (typeof value === 'string') {
+              const direct = Number(value)
+              if (Number.isFinite(direct) && direct > 0) {
+                return direct
+              }
+              const matched = value.match(/(\d+(?:\.\d+)?)/)
+              if (!matched) return null
+              const parsed = Number(matched[1])
+              return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+            }
+            return null
+          }
           const rawThreshold = aiPendingSuggestion.parameters?.minSilenceSeconds
+          const fallbackThreshold = parsePositiveSeconds(operation.text)
           const thresholdSeconds =
-            typeof rawThreshold === 'number'
-              ? rawThreshold
-              : typeof rawThreshold === 'string'
-                ? Number(rawThreshold)
-                : null
+            parsePositiveSeconds(rawThreshold) ?? fallbackThreshold
           const detection =
             silenceSegments.length > 0
               ? {
@@ -3403,12 +3416,20 @@ export default function HomePage(): JSX.Element {
                       ? thresholdSeconds
                       : undefined,
                 })
+          const candidateDurations = detection.silenceSegments.map((segment) =>
+            Number((segment.end - segment.start).toFixed(2)),
+          )
           const targetSilenceSegments =
             thresholdSeconds != null && Number.isFinite(thresholdSeconds)
               ? detection.silenceSegments.filter(
                   (segment) => segment.end - segment.start >= thresholdSeconds,
                 )
               : detection.silenceSegments
+          executionNotes.push(
+            `Silence debug: candidates=${detection.silenceSegments.length}, durations=[${candidateDurations.join(
+              ', ',
+            )}], threshold=${thresholdSeconds ?? 'none'}.`,
+          )
           if (targetSilenceSegments.length === 0) {
             executionNotes.push('No silence segments detected to remove.')
             setEditorStatus('ready')
