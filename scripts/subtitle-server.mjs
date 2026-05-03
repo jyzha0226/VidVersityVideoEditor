@@ -1084,6 +1084,50 @@ function normalizeAISuggestion(input) {
   }
 }
 
+function buildChapterSuggestionFromTranscript(transcript) {
+  const normalizedTranscript = Array.isArray(transcript)
+    ? transcript
+        .map((segment) => ({
+          start: typeof segment?.start === 'string' ? segment.start : null,
+          end: typeof segment?.end === 'string' ? segment.end : null,
+          text: typeof segment?.text === 'string' ? segment.text.trim() : '',
+        }))
+        .filter((segment) => segment.start && segment.text.length > 0)
+    : []
+
+  if (normalizedTranscript.length === 0) {
+    return buildSafeAISuggestion('Transcript or timestamps are required for chapter suggestion.')
+  }
+
+  const chapterCount = Math.min(6, Math.max(2, Math.ceil(normalizedTranscript.length / 25)))
+  const chunkSize = Math.max(1, Math.ceil(normalizedTranscript.length / chapterCount))
+  const chapters = []
+
+  for (let index = 0; index < normalizedTranscript.length; index += chunkSize) {
+    const chunk = normalizedTranscript.slice(index, index + chunkSize)
+    const chapterIndex = chapters.length + 1
+    chapters.push({
+      title: `Chapter ${chapterIndex}`,
+      start: chunk[0]?.start ?? null,
+      end: chunk[chunk.length - 1]?.end ?? null,
+      summary: chunk
+        .map((segment) => segment.text)
+        .join(' ')
+        .slice(0, 180),
+      thumbnailTime: chunk[0]?.start ?? null,
+    })
+  }
+
+  return {
+    intent: 'chapter_suggest',
+    needs_review: true,
+    parameters: { source: 'transcript_fallback' },
+    operations: [{ action: 'suggest_chapter', start: null, end: null, text: null }],
+    chapters,
+    notes: ['Generated chapter suggestions from transcript fallback logic.'],
+  }
+}
+
 async function callOllamaChat(messages) {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), Number(process.env.OLLAMA_TIMEOUT_MS || 30000))
@@ -1221,8 +1265,13 @@ const server = createServer(async (request, response) => {
               },
             ]
         const modelResponse = await callOllamaChat(messages)
-        const suggestion = normalizeAISuggestion(modelResponse.parsed)
-        if (url.pathname === '/api/ai/chapter-suggestions') suggestion.intent = 'chapter_suggest'
+        let suggestion = normalizeAISuggestion(modelResponse.parsed)
+        if (url.pathname === '/api/ai/chapter-suggestions') {
+          suggestion.intent = 'chapter_suggest'
+          if (suggestion.chapters.length === 0 && transcript.length > 0) {
+            suggestion = buildChapterSuggestionFromTranscript(transcript)
+          }
+        }
         const debugEnabled = process.env.AI_DEBUG === '1'
         sendJson(
           response,
