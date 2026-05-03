@@ -3388,12 +3388,21 @@ export default function HomePage(): JSX.Element {
               : typeof rawThreshold === 'string'
                 ? Number(rawThreshold)
                 : null
-          const detection = await detectSilenceInEditorSession(session.sessionId, {
-            minSilenceDuration:
-              thresholdSeconds != null && Number.isFinite(thresholdSeconds)
-                ? thresholdSeconds
-                : undefined,
-          })
+          const detection =
+            silenceSegments.length > 0
+              ? {
+                  audioDuration:
+                    silenceSegments[silenceSegments.length - 1]?.end ??
+                    session.duration,
+                  silenceSegments,
+                  speechSegments: [],
+                }
+              : await detectSilenceInEditorSession(session.sessionId, {
+                  minSilenceDuration:
+                    thresholdSeconds != null && Number.isFinite(thresholdSeconds)
+                      ? thresholdSeconds
+                      : undefined,
+                })
           const targetSilenceSegments =
             thresholdSeconds != null && Number.isFinite(thresholdSeconds)
               ? detection.silenceSegments.filter(
