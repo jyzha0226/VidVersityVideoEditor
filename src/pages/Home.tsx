@@ -3410,12 +3410,29 @@ export default function HomePage(): JSX.Element {
                   silenceSegments,
                   speechSegments: [],
                 }
-              : await detectSilenceInEditorSession(session.sessionId, {
-                  minSilenceDuration:
-                    thresholdSeconds != null && Number.isFinite(thresholdSeconds)
-                      ? thresholdSeconds
-                      : undefined,
-                })
+              : isTimelineUnedited(segments, videoDuration)
+                ? await (async () => {
+                    const videoFile = await ensureVideoFile()
+                    if (!videoFile) {
+                      throw new Error(
+                        'Upload a local video file before trimming silence with AI.',
+                      )
+                    }
+                    return detectSilenceFromVideo(videoFile, {
+                      noiseThresholdDb: -35,
+                      minSilenceDuration:
+                        thresholdSeconds != null && Number.isFinite(thresholdSeconds)
+                          ? thresholdSeconds
+                          : 0.6,
+                      minSegmentDuration: 0.25,
+                    })
+                  })()
+                : await detectSilenceInEditorSession(session.sessionId, {
+                    minSilenceDuration:
+                      thresholdSeconds != null && Number.isFinite(thresholdSeconds)
+                        ? thresholdSeconds
+                        : undefined,
+                  })
           const candidateDurations = detection.silenceSegments.map((segment) =>
             Number((segment.end - segment.start).toFixed(2)),
           )
