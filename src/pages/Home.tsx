@@ -3485,9 +3485,68 @@ export default function HomePage(): JSX.Element {
       }
 
       if (operation.action === 'keep' || operation.action === 'remove') {
-        executionNotes.push(
-          'TODO: keep/remove range adapter is pending connection to timeline cut range execution.',
-        )
+        const cutStartSeconds = operation.start
+          ? parseEditableTimestamp(operation.start)
+          : null
+        const cutEndSeconds = operation.end
+          ? parseEditableTimestamp(operation.end)
+          : null
+        if (
+          cutStartSeconds == null ||
+          cutEndSeconds == null ||
+          !Number.isFinite(cutStartSeconds) ||
+          !Number.isFinite(cutEndSeconds) ||
+          cutEndSeconds <= cutStartSeconds
+        ) {
+          executionNotes.push(
+            'Cut skipped: keep/remove operation is missing a valid start/end range.',
+          )
+          continue
+        }
+
+        const session = await ensureEditorSession()
+        if (!session) {
+          executionNotes.push('Cut skipped: editor session is unavailable.')
+          continue
+        }
+
+        const selectedForCut =
+          selectedSegments.length > 0
+            ? [...orderedSelectedSegmentIds]
+            : segments.map((segment) => segment.id)
+
+        try {
+          setEditorStatus('syncing')
+          const nextSession = await cutEditorSessionToRange(
+            session.sessionId,
+            cutStartSeconds,
+            cutEndSeconds,
+            selectedForCut,
+          )
+          const nextSegments = preserveChapterLabels(segments, nextSession.segments)
+          setSegments(nextSegments)
+          applyClipSelection(
+            nextSegments,
+            nextSession.selectedSegmentId != null
+              ? [nextSession.selectedSegmentId]
+              : [],
+            nextSession.selectedSegmentId ?? nextSegments[0]?.id ?? null,
+          )
+          setCutRange(buildFullCutRange(cutEndSeconds - cutStartSeconds))
+          setIsCutModeEnabled(false)
+          setActiveCutHandle(null)
+          setEditorStatus('ready')
+          executionNotes.push(
+            `${operation.action === 'remove' ? 'Cut' : 'Keep'} applied for ${operation.start} to ${operation.end} (outside removed).`,
+          )
+        } catch (error) {
+          setEditorStatus('error')
+          executionNotes.push(
+            error instanceof Error
+              ? `Cut failed: ${error.message}`
+              : 'Cut failed unexpectedly.',
+          )
+        }
         continue
       }
 
