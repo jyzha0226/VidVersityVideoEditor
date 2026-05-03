@@ -3300,7 +3300,44 @@ export default function HomePage(): JSX.Element {
     if (!aiPendingSuggestion || isApplyingAISuggestion) return
     setIsApplyingAISuggestion(true)
     const executionNotes: string[] = []
+    let shouldClearPendingSuggestion = true
     try {
+      if (
+        aiPendingSuggestion.intent === 'chapter_suggest' &&
+        aiPendingSuggestion.operations.length === 0
+      ) {
+        if (subtitleSegments.length === 0) {
+          executionNotes.push(
+            'Chapter suggestion requires subtitles/transcript. Please generate subtitles first, then apply again.',
+          )
+        } else {
+          const allowShareTranscript = window.confirm(
+            'Allow sharing current subtitles transcript with AI model for chapter analysis?',
+          )
+          if (!allowShareTranscript) {
+            executionNotes.push(
+              'Chapter suggestion skipped: transcript sharing was not allowed.',
+            )
+          } else {
+            const transcript = subtitleSegments.map((segment) => ({
+              start: formatEditableTimestamp(segment.start),
+              end: formatEditableTimestamp(segment.end),
+              text: segment.text,
+            }))
+            const { suggestion } = await requestAIChapterSuggestions({
+              videoDuration: formatEditableTimestamp(videoDuration ?? totalDuration),
+              transcript,
+            })
+            setAiPendingSuggestion(suggestion)
+            setAiResponseJson(JSON.stringify(suggestion, null, 2))
+            shouldClearPendingSuggestion = false
+            executionNotes.push(
+              `Chapter suggestion generated with transcript context (${transcript.length} subtitle lines). Review the updated suggestions before applying any edits.`,
+            )
+          }
+        }
+      }
+
       for (const operation of aiPendingSuggestion.operations) {
       if (operation.action === 'split_at') {
         const splitAtSeconds = operation.start
@@ -3622,6 +3659,7 @@ export default function HomePage(): JSX.Element {
         })
         setAiPendingSuggestion(suggestion)
         setAiResponseJson(JSON.stringify(suggestion, null, 2))
+        shouldClearPendingSuggestion = false
         executionNotes.push(
           `Chapter suggestion refreshed with transcript context (${transcript.length} subtitle lines). Review updated suggestions.`,
         )
@@ -3639,7 +3677,9 @@ export default function HomePage(): JSX.Element {
             : 'No executable AI operations were found in this suggestion.',
       },
     ])
-    setAiPendingSuggestion(null)
+    if (shouldClearPendingSuggestion) {
+      setAiPendingSuggestion(null)
+    }
     } finally {
       setIsApplyingAISuggestion(false)
     }
