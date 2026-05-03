@@ -3299,12 +3299,70 @@ export default function HomePage(): JSX.Element {
 
   const handleApplyAISuggestion = () => {
     if (!aiPendingSuggestion) return
+    const executionNotes: string[] = []
+
+    aiPendingSuggestion.operations.forEach((operation) => {
+      if (operation.action === 'split_at') {
+        const splitAtSeconds = operation.start
+          ? parseEditableTimestamp(operation.start)
+          : null
+        if (splitAtSeconds == null) {
+          executionNotes.push('Split operation skipped: invalid or missing split timestamp.')
+          return
+        }
+
+        handleSeek(splitAtSeconds)
+        void handleSplitAtPlayhead()
+        executionNotes.push(`Split requested at ${operation.start}.`)
+        return
+      }
+
+      if (operation.action === 'add_subtitle') {
+        if (subtitleSegments.length === 0) {
+          void handleGenerateSubtitlesFromPanel()
+          executionNotes.push(
+            'Subtitle generation started because no subtitle track existed.',
+          )
+        } else {
+          executionNotes.push(
+            'TODO: range-based subtitle insertion adapter is not connected yet.',
+          )
+        }
+        return
+      }
+
+      if (operation.action === 'trim_silence') {
+        void handleRemoveSilence()
+        executionNotes.push('Silence cleanup workflow started.')
+        return
+      }
+
+      if (operation.action === 'keep' || operation.action === 'remove') {
+        executionNotes.push(
+          'TODO: keep/remove range adapter is pending connection to timeline cut range execution.',
+        )
+        return
+      }
+
+      if (operation.action === 'mute') {
+        executionNotes.push('TODO: mute adapter is not connected yet.')
+        return
+      }
+
+      if (operation.action === 'suggest_chapter') {
+        executionNotes.push('Chapter suggestions are review-only and are not auto-applied.')
+      }
+    })
+
     setAiMessages((prev) => [
       ...prev,
       {
         id: `assistant-loop-${Date.now()}`,
         role: 'assistant',
-        text: 'JSON suggestion confirmed. Next step is wiring JSON operations to timeline adapters.',
+        text:
+          executionNotes.length > 0
+            ? executionNotes.join(' ')
+            : 'No executable AI operations were found in this suggestion.',
       },
     ])
     setAiPendingSuggestion(null)
