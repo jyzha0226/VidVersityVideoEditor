@@ -3297,24 +3297,66 @@ export default function HomePage(): JSX.Element {
     setActiveCutHandle(null)
   }, [isCutModeEnabled, selectedCutScopeKey, selectedCutDuration])
 
-  const handleApplyAISuggestion = () => {
+  const handleApplyAISuggestion = async () => {
     if (!aiPendingSuggestion) return
     const executionNotes: string[] = []
 
-    aiPendingSuggestion.operations.forEach((operation) => {
+    for (const operation of aiPendingSuggestion.operations) {
       if (operation.action === 'split_at') {
         const splitAtSeconds = operation.start
           ? parseEditableTimestamp(operation.start)
           : null
         if (splitAtSeconds == null) {
           executionNotes.push('Split operation skipped: invalid or missing split timestamp.')
-          return
+          continue
         }
 
-        handleSeek(splitAtSeconds)
-        void handleSplitAtPlayhead()
-        executionNotes.push(`Split requested at ${operation.start}.`)
-        return
+        const containingSegment = segments.find(
+          (segment) =>
+            splitAtSeconds > segment.start + 0.1 &&
+            splitAtSeconds < segment.end - 0.1,
+        )
+        if (!containingSegment) {
+          executionNotes.push(
+            `Split skipped: ${operation.start} is outside a splittable segment.`,
+          )
+          continue
+        }
+
+        const session = await ensureEditorSession()
+        if (!session) {
+          executionNotes.push('Split skipped: editor session is unavailable.')
+          continue
+        }
+
+        try {
+          setEditorStatus('syncing')
+          const nextSession = await splitEditorSessionAtTime(
+            session.sessionId,
+            containingSegment.id,
+            splitAtSeconds,
+          )
+          const nextSegments = preserveChapterLabels(segments, nextSession.segments)
+          setSegments(nextSegments)
+          applyClipSelection(
+            nextSegments,
+            nextSession.selectedSegmentId != null
+              ? [nextSession.selectedSegmentId]
+              : [],
+            nextSession.selectedSegmentId ?? nextSegments[0]?.id ?? null,
+          )
+          setEditorStatus('ready')
+          handleSeek(splitAtSeconds)
+          executionNotes.push(`Split applied at ${operation.start}.`)
+        } catch (error) {
+          setEditorStatus('error')
+          executionNotes.push(
+            error instanceof Error
+              ? `Split failed: ${error.message}`
+              : 'Split failed unexpectedly.',
+          )
+        }
+        continue
       }
 
       if (operation.action === 'add_subtitle') {
@@ -3328,31 +3370,71 @@ export default function HomePage(): JSX.Element {
             'TODO: range-based subtitle insertion adapter is not connected yet.',
           )
         }
-        return
+        continue
       }
 
       if (operation.action === 'trim_silence') {
-        void handleRemoveSilence()
-        executionNotes.push('Silence cleanup workflow started.')
-        return
+        const session = await ensureEditorSession()
+        if (!session) {
+          executionNotes.push('Silence trim skipped: editor session is unavailable.')
+          continue
+        }
+        try {
+          setEditorStatus('syncing')
+          const detection = await detectSilenceInEditorSession(session.sessionId)
+          if (detection.silenceSegments.length === 0) {
+            executionNotes.push('No silence segments detected to remove.')
+            setEditorStatus('ready')
+            continue
+          }
+
+          const nextSession = await deleteSilenceRangesFromEditorSession(
+            session.sessionId,
+            detection.silenceSegments,
+          )
+          const nextSegments = preserveChapterLabels(segments, nextSession.segments)
+          setSegments(nextSegments)
+          applyClipSelection(
+            nextSegments,
+            nextSession.selectedSegmentId != null
+              ? [nextSession.selectedSegmentId]
+              : [],
+            nextSession.selectedSegmentId ?? nextSegments[0]?.id ?? null,
+          )
+          setEditorStatus('ready')
+          setSilenceSegments([])
+          setSelectedSilenceSegmentKeys([])
+          setStagedSilenceSegmentKeys([])
+          executionNotes.push(
+            `Silence trim applied to ${detection.silenceSegments.length} detected ranges.`,
+          )
+        } catch (error) {
+          setEditorStatus('error')
+          executionNotes.push(
+            error instanceof Error
+              ? `Silence trim failed: ${error.message}`
+              : 'Silence trim failed unexpectedly.',
+          )
+        }
+        continue
       }
 
       if (operation.action === 'keep' || operation.action === 'remove') {
         executionNotes.push(
           'TODO: keep/remove range adapter is pending connection to timeline cut range execution.',
         )
-        return
+        continue
       }
 
       if (operation.action === 'mute') {
         executionNotes.push('TODO: mute adapter is not connected yet.')
-        return
+        continue
       }
 
       if (operation.action === 'suggest_chapter') {
         executionNotes.push('Chapter suggestions are review-only and are not auto-applied.')
       }
-    })
+    }
 
     setAiMessages((prev) => [
       ...prev,
