@@ -3381,8 +3381,26 @@ export default function HomePage(): JSX.Element {
         }
         try {
           setEditorStatus('syncing')
-          const detection = await detectSilenceInEditorSession(session.sessionId)
-          if (detection.silenceSegments.length === 0) {
+          const rawThreshold = aiPendingSuggestion.parameters?.minSilenceSeconds
+          const thresholdSeconds =
+            typeof rawThreshold === 'number'
+              ? rawThreshold
+              : typeof rawThreshold === 'string'
+                ? Number(rawThreshold)
+                : null
+          const detection = await detectSilenceInEditorSession(session.sessionId, {
+            minSilenceDuration:
+              thresholdSeconds != null && Number.isFinite(thresholdSeconds)
+                ? thresholdSeconds
+                : undefined,
+          })
+          const targetSilenceSegments =
+            thresholdSeconds != null && Number.isFinite(thresholdSeconds)
+              ? detection.silenceSegments.filter(
+                  (segment) => segment.end - segment.start >= thresholdSeconds,
+                )
+              : detection.silenceSegments
+          if (targetSilenceSegments.length === 0) {
             executionNotes.push('No silence segments detected to remove.')
             setEditorStatus('ready')
             continue
@@ -3390,7 +3408,7 @@ export default function HomePage(): JSX.Element {
 
           const nextSession = await deleteSilenceRangesFromEditorSession(
             session.sessionId,
-            detection.silenceSegments,
+            targetSilenceSegments,
           )
           const nextSegments = preserveChapterLabels(segments, nextSession.segments)
           setSegments(nextSegments)
@@ -3406,7 +3424,7 @@ export default function HomePage(): JSX.Element {
           setSelectedSilenceSegmentKeys([])
           setStagedSilenceSegmentKeys([])
           executionNotes.push(
-            `Silence trim applied to ${detection.silenceSegments.length} detected ranges.`,
+            `Silence trim applied to ${targetSilenceSegments.length} detected ranges.`,
           )
         } catch (error) {
           setEditorStatus('error')
