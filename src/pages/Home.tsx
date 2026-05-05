@@ -3308,8 +3308,17 @@ export default function HomePage(): JSX.Element {
       ) {
         if (subtitleSegments.length === 0) {
           executionNotes.push(
-            'Chapter suggestion requires subtitles/transcript. Please generate subtitles first, then apply again.',
+            'Chapter suggestion requires subtitles/transcript. Do you require assistance in adding subtitles?',
           )
+          setAiPendingSuggestion({
+            intent: 'subtitle',
+            needs_review: true,
+            parameters: { sourceIntent: 'chapter_suggest' },
+            operations: [{ action: 'add_subtitle', start: null, end: null, text: null }],
+            chapters: [],
+            notes: ['Subtitles are required before chapter suggestion can run.'],
+          })
+          shouldClearPendingSuggestion = false
         } else {
           const allowShareTranscript = window.confirm(
             'Allow sharing current subtitles transcript with AI model for chapter analysis?',
@@ -3775,6 +3784,32 @@ export default function HomePage(): JSX.Element {
             >
               VidVersity is adding the uploaded video to the end of your current
               timeline. This can take a moment for larger files.
+            </p>
+          </div>
+        </div>
+      ) : null}
+
+      {subtitleStatus === 'processing' ? (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-[#0b1220]/55 px-4 backdrop-blur-sm">
+          <div
+            className={`w-full max-w-sm rounded-[28px] border px-6 py-6 text-center shadow-[0_24px_80px_rgba(15,23,42,0.28)] ${
+              isDark
+                ? 'border-[#31415a] bg-[#111827] text-[#edf2ff]'
+                : 'border-[#d9dde5] bg-white text-[#191c1e]'
+            }`}
+          >
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-[rgba(222,52,171,0.12)]">
+              <span className="h-7 w-7 animate-spin rounded-full border-2 border-[#de34ab] border-t-transparent" />
+            </div>
+            <h2 className={`mt-4 text-[15px] font-bold uppercase tracking-[0.2em] ${
+              isDark ? 'text-[#ff9dd7]' : 'text-[#c2187a]'
+            }`}>
+              Processing Subtitles
+            </h2>
+            <p className={`mt-3 text-sm leading-6 ${
+              isDark ? 'text-[#c6d3eb]' : 'text-[#515f74]'
+            }`}>
+              VidVersity is generating subtitle scripts for your video. This can take a moment for larger files.
             </p>
           </div>
         </div>

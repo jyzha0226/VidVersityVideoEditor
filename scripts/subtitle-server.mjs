@@ -1128,6 +1128,38 @@ function buildChapterSuggestionFromTranscript(transcript) {
   }
 }
 
+function preprocessTranscriptForChapterPrompt(transcript) {
+  const cleaned = (Array.isArray(transcript) ? transcript : [])
+    .map((segment) => ({
+      start: typeof segment?.start === 'string' ? segment.start : null,
+      end: typeof segment?.end === 'string' ? segment.end : null,
+      text: typeof segment?.text === 'string' ? segment.text.trim() : '',
+    }))
+    .filter(
+      (segment) =>
+        segment.start &&
+        segment.end &&
+        segment.text.length >= 3 &&
+        /[a-zA-Z0-9]/.test(segment.text),
+    )
+
+  if (cleaned.length <= 1) {
+    return cleaned
+  }
+
+  const merged = []
+  const chunkSize = 4
+  for (let index = 0; index < cleaned.length; index += chunkSize) {
+    const chunk = cleaned.slice(index, index + chunkSize)
+    merged.push({
+      start: chunk[0]?.start ?? null,
+      end: chunk[chunk.length - 1]?.end ?? null,
+      text: chunk.map((item) => item.text).join(' ').slice(0, 280),
+    })
+  }
+  return merged
+}
+
 async function callOllamaChat(messages) {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), Number(process.env.OLLAMA_TIMEOUT_MS || 30000))
@@ -1243,6 +1275,10 @@ const server = createServer(async (request, response) => {
     if (url.pathname === '/api/ai/edit-command' || url.pathname === '/api/ai/chapter-suggestions') {
       const payload = parseJsonBody(body)
       const transcript = Array.isArray(payload?.transcript) ? payload.transcript : []
+      const transcriptForPrompt =
+        url.pathname === '/api/ai/chapter-suggestions'
+          ? preprocessTranscriptForChapterPrompt(transcript)
+          : transcript
       const prompt = url.pathname === '/api/ai/chapter-suggestions'
         ? 'Suggest chapters by topic from the transcript and timestamps.'
         : `${payload?.prompt || ''}`
@@ -1260,7 +1296,7 @@ const server = createServer(async (request, response) => {
                 content: [
                   `Prompt: ${prompt}`,
                   `VideoDuration: ${payload?.videoDuration || 'unknown'}`,
-                  `Transcript: ${JSON.stringify(transcript)}`,
+                  `Transcript: ${JSON.stringify(transcriptForPrompt)}`,
                 ].join('\n'),
               },
             ]
