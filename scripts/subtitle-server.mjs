@@ -976,6 +976,235 @@ function runAudioActivityDetection(
   return runPythonWorker(AUDIO_ACTIVITY_WORKER_PATH, args)
 }
 
+
+function buildSafeAISuggestion(message) {
+  return {
+    intent: 'unknown',
+    needs_review: true,
+    parameters: {},
+    operations: [],
+    chapters: [],
+    notes: [message],
+  }
+}
+
+function normalizeAISuggestion(input) {
+  const parseLooseTime = (value) => {
+    if (typeof value !== 'string' || value.trim().length === 0) return null
+    if (value === 'END') return Number.POSITIVE_INFINITY
+    const parts = value.split(':').map((item) => Number(item))
+    if (parts.some((item) => Number.isNaN(item))) return null
+    if (parts.length === 2) return parts[0] * 60 + parts[1]
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    return null
+  }
+  const allowedIntents = new Set(['cut','split','merge','mute','subtitle','trim_silence','chapter_suggest','unknown'])
+  const allowedActions = new Set(['remove','keep','split_at','mute','add_subtitle','trim_silence','suggest_chapter'])
+  const suggestion = input && typeof input === 'object' ? input : {}
+  const notes = Array.isArray(suggestion.notes) ? suggestion.notes.map((n) => `${n}`) : []
+  const operations = Array.isArray(suggestion.operations) ? suggestion.operations : []
+  const normalizedOperations = operations
+    .map((operation) => {
+      if (!allowedActions.has(operation?.action)) {
+        notes.push('One or more operations used unsupported actions and were removed.')
+        return null
+      }
+      return {
+        action: operation.action,
+        start: typeof operation?.start === 'string' ? operation.start : null,
+        end: typeof operation?.end === 'string' ? operation.end : null,
+        text: typeof operation?.text === 'string' ? operation.text : null,
+      }
+    })
+    .filter(Boolean)
+  normalizedOperations.forEach((operation) => {
+    const requiresBothBounds =
+      operation.action === 'remove' ||
+      operation.action === 'keep' ||
+      operation.action === 'mute' ||
+      operation.action === 'add_subtitle'
+    const requiresStartOnly = operation.action === 'split_at'
+    if (
+      (requiresBothBounds && (operation.start == null || operation.end == null)) ||
+      (requiresStartOnly && operation.start == null)
+    ) {
+      notes.push('One or more operation timestamps are missing and require manual review.')
+    }
+  })
+  const chapters = Array.isArray(suggestion.chapters)
+    ? suggestion.chapters
+        .map((chapter) => ({
+          title:
+            typeof chapter?.title === 'string' && chapter.title.trim()
+              ? chapter.title.trim()
+              : 'Untitled chapter',
+          start: typeof chapter?.start === 'string' ? chapter.start : null,
+          end: typeof chapter?.end === 'string' ? chapter.end : null,
+          summary: typeof chapter?.summary === 'string' ? chapter.summary : '',
+          thumbnailTime:
+            typeof chapter?.thumbnailTime === 'string' ? chapter.thumbnailTime : null,
+        }))
+        .sort((left, right) => {
+          const leftValue = parseLooseTime(left.start) ?? Number.POSITIVE_INFINITY
+          const rightValue = parseLooseTime(right.start) ?? Number.POSITIVE_INFINITY
+          return leftValue - rightValue
+        })
+    : []
+  if (chapters.length > 1) {
+    for (let index = 1; index < chapters.length; index += 1) {
+      const previousEnd = parseLooseTime(chapters[index - 1].end)
+      const currentStart = parseLooseTime(chapters[index].start)
+      if (
+        previousEnd != null &&
+        currentStart != null &&
+        Number.isFinite(previousEnd) &&
+        Number.isFinite(currentStart) &&
+        currentStart < previousEnd
+      ) {
+        notes.push('Chapter boundaries overlap; review continuity before applying.')
+        break
+      }
+    }
+  }
+  const normalizedIntent = allowedIntents.has(suggestion.intent)
+    ? suggestion.intent
+    : 'unknown'
+  const safeOperations =
+    normalizedIntent === 'unknown' ? [] : normalizedOperations
+  if (normalizedIntent === 'unknown' && normalizedOperations.length > 0) {
+    notes.push('Ambiguous intent detected; operations were cleared for safety.')
+  }
+  return {
+    intent: normalizedIntent,
+    needs_review: true,
+    parameters: suggestion.parameters && typeof suggestion.parameters === 'object' ? suggestion.parameters : {},
+    operations: safeOperations,
+    chapters,
+    notes,
+  }
+}
+
+function buildChapterSuggestionFromTranscript(transcript) {
+  const normalizedTranscript = Array.isArray(transcript)
+    ? transcript
+        .map((segment) => ({
+          start: typeof segment?.start === 'string' ? segment.start : null,
+          end: typeof segment?.end === 'string' ? segment.end : null,
+          text: typeof segment?.text === 'string' ? segment.text.trim() : '',
+        }))
+        .filter((segment) => segment.start && segment.text.length > 0)
+    : []
+
+  if (normalizedTranscript.length === 0) {
+    return buildSafeAISuggestion('Transcript or timestamps are required for chapter suggestion.')
+  }
+
+  const chapterCount = Math.min(6, Math.max(2, Math.ceil(normalizedTranscript.length / 25)))
+  const chunkSize = Math.max(1, Math.ceil(normalizedTranscript.length / chapterCount))
+  const chapters = []
+
+  for (let index = 0; index < normalizedTranscript.length; index += chunkSize) {
+    const chunk = normalizedTranscript.slice(index, index + chunkSize)
+    const chapterIndex = chapters.length + 1
+    chapters.push({
+      title: `Chapter ${chapterIndex}`,
+      start: chunk[0]?.start ?? null,
+      end: chunk[chunk.length - 1]?.end ?? null,
+      summary: chunk
+        .map((segment) => segment.text)
+        .join(' ')
+        .slice(0, 180),
+      thumbnailTime: chunk[0]?.start ?? null,
+    })
+  }
+
+  return {
+    intent: 'chapter_suggest',
+    needs_review: true,
+    parameters: { source: 'transcript_fallback' },
+    operations: [{ action: 'suggest_chapter', start: null, end: null, text: null }],
+    chapters,
+    notes: ['Generated chapter suggestions from transcript fallback logic.'],
+  }
+}
+
+function preprocessTranscriptForChapterPrompt(transcript) {
+  const cleaned = (Array.isArray(transcript) ? transcript : [])
+    .map((segment) => ({
+      start: typeof segment?.start === 'string' ? segment.start : null,
+      end: typeof segment?.end === 'string' ? segment.end : null,
+      text: typeof segment?.text === 'string' ? segment.text.trim() : '',
+    }))
+    .filter(
+      (segment) =>
+        segment.start &&
+        segment.end &&
+        segment.text.length >= 3 &&
+        /[a-zA-Z0-9]/.test(segment.text),
+    )
+
+  if (cleaned.length <= 1) {
+    return cleaned
+  }
+
+  const merged = []
+  const chunkSize = 4
+  for (let index = 0; index < cleaned.length; index += chunkSize) {
+    const chunk = cleaned.slice(index, index + chunkSize)
+    merged.push({
+      start: chunk[0]?.start ?? null,
+      end: chunk[chunk.length - 1]?.end ?? null,
+      text: chunk.map((item) => item.text).join(' ').slice(0, 280),
+    })
+  }
+  return merged
+}
+
+function hasUsableChapters(chapters) {
+  if (!Array.isArray(chapters) || chapters.length === 0) return false
+  const usableCount = chapters.filter((chapter) => {
+    const hasRealTitle =
+      typeof chapter?.title === 'string' &&
+      chapter.title.trim().length > 0 &&
+      chapter.title.trim().toLowerCase() !== 'untitled chapter'
+    const hasTiming =
+      typeof chapter?.start === 'string' ||
+      typeof chapter?.end === 'string'
+    const hasSummary =
+      typeof chapter?.summary === 'string' && chapter.summary.trim().length > 0
+    return hasRealTitle || hasTiming || hasSummary
+  }).length
+  return usableCount > 0
+}
+
+async function callOllamaChat(messages) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.OLLAMA_TIMEOUT_MS || 30000))
+  const baseUrl = (process.env.OLLAMA_BASE_URL || 'http://localhost:11434').replace(/\/$/, '')
+  const model = process.env.OLLAMA_MODEL || 'vidversity-edit'
+  try {
+    const response = await fetch(`${baseUrl}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        stream: false,
+        format: 'json',
+        options: {
+          temperature: Number(process.env.OLLAMA_TEMPERATURE || 0),
+          top_p: Number(process.env.OLLAMA_TOP_P || 0.9),
+        },
+        messages,
+      }),
+      signal: controller.signal,
+    })
+    const payload = await response.json().catch(() => null)
+    if (!response.ok) throw new Error(payload?.error || `Ollama request failed (${response.status}).`)
+    const content = payload?.message?.content
+    if (typeof content !== 'string') throw new Error('Ollama response did not include JSON content.')
+    return { parsed: JSON.parse(content), rawContent: content }
+  } finally { clearTimeout(timeout) }
+}
 await mkdir(TEMP_DIR, { recursive: true })
 await mkdir(EDITOR_SESSION_DIR, { recursive: true })
 
@@ -1020,6 +1249,8 @@ const server = createServer(async (request, response) => {
       cutEditorSession: '/api/editor/cut',
       deleteEditorSilence: '/api/editor/delete-silence',
       exportEditorSession: '/api/editor/export',
+      aiEditCommand: '/api/ai/edit-command',
+      aiChapterSuggestions: '/api/ai/chapter-suggestions',
       python: PYTHON_BIN,
     })
     return
@@ -1057,6 +1288,74 @@ const server = createServer(async (request, response) => {
 
   try {
     const body = await readRequestBody(request)
+
+    if (url.pathname === '/api/ai/edit-command' || url.pathname === '/api/ai/chapter-suggestions') {
+      const payload = parseJsonBody(body)
+      const transcript = Array.isArray(payload?.transcript) ? payload.transcript : []
+      const transcriptForPrompt =
+        url.pathname === '/api/ai/chapter-suggestions'
+          ? preprocessTranscriptForChapterPrompt(transcript)
+          : transcript
+      const prompt = url.pathname === '/api/ai/chapter-suggestions'
+        ? 'Suggest chapters by topic from the transcript and timestamps.'
+        : `${payload?.prompt || ''}`
+      const systemPrompt = 'Return JSON only. needs_review must always be true. Never execute edits; only suggest operations. If intent is unknown, operations must be [].'
+      try {
+        const shouldMatchLocal =
+          process.env.AI_MATCH_LOCAL === '1' &&
+          url.pathname === '/api/ai/edit-command'
+        const messages = shouldMatchLocal
+          ? [{ role: 'user', content: prompt }]
+          : [
+              { role: 'system', content: systemPrompt },
+              {
+                role: 'user',
+                content: [
+                  `Prompt: ${prompt}`,
+                  `VideoDuration: ${payload?.videoDuration || 'unknown'}`,
+                  `Transcript: ${JSON.stringify(transcriptForPrompt)}`,
+                ].join('\n'),
+              },
+            ]
+        const modelResponse = await callOllamaChat(messages)
+        let suggestion = normalizeAISuggestion(modelResponse.parsed)
+        if (url.pathname === '/api/ai/chapter-suggestions') {
+          suggestion.intent = 'chapter_suggest'
+          if (!hasUsableChapters(suggestion.chapters) && transcript.length > 0) {
+            suggestion = buildChapterSuggestionFromTranscript(transcript)
+          }
+          if (suggestion.operations.length === 0) {
+            suggestion.operations = [
+              { action: 'suggest_chapter', start: null, end: null, text: null },
+            ]
+          }
+        }
+        const debugEnabled = process.env.AI_DEBUG === '1'
+        sendJson(
+          response,
+          200,
+          debugEnabled
+            ? {
+                suggestion,
+                debug: { rawModelContent: modelResponse.rawContent, messages },
+              }
+            : { suggestion },
+        )
+      } catch (error) {
+        const reason =
+          error instanceof Error ? error.message : 'AI service unavailable.'
+        const debugEnabled = process.env.AI_DEBUG === '1'
+        sendJson(
+          response,
+          200,
+          debugEnabled
+            ? { suggestion: buildSafeAISuggestion(reason), debug: { error: reason } }
+            : { suggestion: buildSafeAISuggestion(reason) },
+        )
+      }
+      return
+    }
+
     if (body.length === 0) {
       sendJson(response, 400, { error: 'No video bytes were uploaded.' })
       return
