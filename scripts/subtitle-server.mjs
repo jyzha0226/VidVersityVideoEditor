@@ -1160,6 +1160,23 @@ function preprocessTranscriptForChapterPrompt(transcript) {
   return merged
 }
 
+function hasUsableChapters(chapters) {
+  if (!Array.isArray(chapters) || chapters.length === 0) return false
+  const usableCount = chapters.filter((chapter) => {
+    const hasRealTitle =
+      typeof chapter?.title === 'string' &&
+      chapter.title.trim().length > 0 &&
+      chapter.title.trim().toLowerCase() !== 'untitled chapter'
+    const hasTiming =
+      typeof chapter?.start === 'string' ||
+      typeof chapter?.end === 'string'
+    const hasSummary =
+      typeof chapter?.summary === 'string' && chapter.summary.trim().length > 0
+    return hasRealTitle || hasTiming || hasSummary
+  }).length
+  return usableCount > 0
+}
+
 async function callOllamaChat(messages) {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), Number(process.env.OLLAMA_TIMEOUT_MS || 30000))
@@ -1304,8 +1321,13 @@ const server = createServer(async (request, response) => {
         let suggestion = normalizeAISuggestion(modelResponse.parsed)
         if (url.pathname === '/api/ai/chapter-suggestions') {
           suggestion.intent = 'chapter_suggest'
-          if (suggestion.chapters.length === 0 && transcript.length > 0) {
+          if (!hasUsableChapters(suggestion.chapters) && transcript.length > 0) {
             suggestion = buildChapterSuggestionFromTranscript(transcript)
+          }
+          if (suggestion.operations.length === 0) {
+            suggestion.operations = [
+              { action: 'suggest_chapter', start: null, end: null, text: null },
+            ]
           }
         }
         const debugEnabled = process.env.AI_DEBUG === '1'
