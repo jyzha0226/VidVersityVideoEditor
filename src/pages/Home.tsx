@@ -3702,6 +3702,74 @@ export default function HomePage(): JSX.Element {
       }
 
       if (operation.action === 'suggest_chapter') {
+        if (
+          aiPendingSuggestion.intent === 'chapter_suggest' &&
+          aiPendingSuggestion.chapters.length > 0
+        ) {
+          const session = await ensureEditorSession()
+          if (!session) {
+            executionNotes.push('Chapter suggestion skipped: editor session is unavailable.')
+            continue
+          }
+          try {
+            setEditorStatus('syncing')
+            let workingSession = await replaceEditorSessionSegments(
+              session.sessionId,
+              segments,
+              selectedId,
+            )
+            const splitPoints = aiPendingSuggestion.chapters
+              .map((chapter) => chapter.start)
+              .filter((start): start is string => typeof start === 'string')
+              .map((start) => parseEditableTimestamp(start))
+              .filter((value): value is number => value != null && Number.isFinite(value))
+              .filter((value) => value > 0)
+              .sort((a, b) => a - b)
+            for (const splitAtSeconds of splitPoints.slice(1)) {
+              const containing = workingSession.segments.find(
+                (segment) => splitAtSeconds > segment.start + 0.1 && splitAtSeconds < segment.end - 0.1,
+              )
+              if (!containing) continue
+              workingSession = await splitEditorSessionAtTime(
+                session.sessionId,
+                containing.id,
+                splitAtSeconds,
+              )
+            }
+            const nextSegments = preserveChapterLabels(segments, workingSession.segments)
+            const renamedSegments = nextSegments.map((segment, index) => ({
+              ...segment,
+              label: aiPendingSuggestion.chapters[index]?.title?.trim() || segment.label,
+            }))
+            setSegments(renamedSegments)
+            setChapterSummaryDrafts(
+              Object.fromEntries(
+                renamedSegments.map((segment, index) => [
+                  segment.id,
+                  aiPendingSuggestion.chapters[index]?.summary ?? '',
+                ]),
+              ),
+            )
+            setChapterThumbnailDrafts(
+              Object.fromEntries(
+                renamedSegments.map((segment, index) => [
+                  segment.id,
+                  aiPendingSuggestion.chapters[index]?.thumbnailTime ?? aiPendingSuggestion.chapters[index]?.start ?? null,
+                ]),
+              ),
+            )
+            setRightPanelView('chapters')
+            setActiveWorkflowStep('chapters')
+            setEditorStatus('ready')
+            executionNotes.push('AI chapter suggestions applied to timeline splits and chapter metadata.')
+          } catch (error) {
+            setEditorStatus('error')
+            executionNotes.push(
+              error instanceof Error ? `Chapter apply failed: ${error.message}` : 'Chapter apply failed unexpectedly.',
+            )
+          }
+          continue
+        }
         if (subtitleSegments.length === 0) {
           const shouldGenerate = window.confirm(
             'Chapter suggestions require subtitles/transcript. No subtitles found. Generate subtitles now?',
@@ -5745,9 +5813,36 @@ export default function HomePage(): JSX.Element {
                                     }`}
                                   />
                                 </label>
-                                <p className={`text-[11px] ${isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'}`}>
-                                  Thumbnail: {chapterThumbnailDrafts[segment.id] ?? formatEditableTimestamp(segment.start)}
-                                </p>
+                                {(() => {
+                                  const thumbnailTimeDraft =
+                                    chapterThumbnailDrafts[segment.id] ??
+                                    formatEditableTimestamp(segment.start)
+                                  const thumbnailSeconds =
+                                    parseEditableTimestamp(thumbnailTimeDraft) ??
+                                    segment.start
+                                  const thumbnail = timelineThumbnails.reduce<TimelineThumbnail | null>(
+                                    (closest, frame) => {
+                                      const distance = Math.abs(frame.time - thumbnailSeconds)
+                                      if (!closest) return frame
+                                      const bestDistance = Math.abs(
+                                        closest.time - thumbnailSeconds,
+                                      )
+                                      return distance < bestDistance ? frame : closest
+                                    },
+                                    null,
+                                  )
+                                  return thumbnail ? (
+                                    <img
+                                      src={thumbnail.src}
+                                      alt={`Thumbnail for ${getChapterNameDraft(segment, index)}`}
+                                      className="h-20 w-full rounded-lg object-cover"
+                                    />
+                                  ) : (
+                                    <p className={`text-[11px] ${isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'}`}>
+                                      Thumbnail frame is unavailable.
+                                    </p>
+                                  )
+                                })()}
 
                                 <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3 ${
                                   isDark ? 'border-[#243149]' : 'border-[#e3e7ee]'
