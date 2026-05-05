@@ -199,11 +199,11 @@ const AI_SUGGESTIONS: AISuggestion[] = [
 ]
 
 const AI_QUICK_ACTIONS = [
+  'Cut the introduction from 00:00 to 01:30',
+  'Split the video at 04:20',
+  'Remove silent parts longer than 3 seconds',
+  'Help me add subtitles',
   'Split the video into chapters',
-  'Trim the first 10 seconds',
-  'Find the cleanest opening sentence',
-  'Remove long pauses across the edit',
-  'Rewrite subtitles for readability',
 ]
 
 const CATEGORY_STORAGE_KEY = 'vidversity-video-categories'
