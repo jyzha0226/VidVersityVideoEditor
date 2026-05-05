@@ -220,6 +220,8 @@ const DONE_METADATA_STORAGE_KEY = 'vidversity-done-action-metadata'
 const DEFAULT_CATEGORY_VALUE = '__none__'
 const NEW_CATEGORY_VALUE = '__new__'
 const EXISTING_COURSE_OPTIONS = ['Course 1', 'Course 2', 'Course 3']
+const EDITOR_HOTKEY_TEXT_ENTRY_TARGET_SELECTOR =
+  'input, textarea, select, [role="textbox"], [contenteditable]:not([contenteditable="false"])'
 
 function normalizeCategoryName(category: string): string {
   return category.trim().replace(/\s+/g, ' ')
@@ -347,6 +349,13 @@ function formatEditableTimestamp(seconds: number): string {
   return `${minutes.toString().padStart(2, '0')}:${remainingSeconds
     .toFixed(1)
     .padStart(4, '0')}`
+}
+
+function isEditorHotkeyTextEntryTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    Boolean(target.closest(EDITOR_HOTKEY_TEXT_ENTRY_TARGET_SELECTOR))
+  )
 }
 
 function parseEditableTimestamp(value: string): number | null {
@@ -1351,6 +1360,11 @@ export default function HomePage(): JSX.Element {
   const subtitleUploadInputRef = useRef<HTMLInputElement | null>(null)
   const appendVideoInputRef = useRef<HTMLInputElement | null>(null)
   const previousWorkspaceViewRef = useRef<RightPanelView>('ai')
+  const clipHotkeyNavigationSegmentIdRef = useRef<number | null>(null)
+
+  const resetClipHotkeyNavigation = () => {
+    clipHotkeyNavigationSegmentIdRef.current = null
+  }
 
   const applyClipSelection = (
     nextSegments: ClipSegment[],
@@ -1376,7 +1390,12 @@ export default function HomePage(): JSX.Element {
   const selectSingleClip = (
     segmentId: number | null,
     nextSegments: ClipSegment[] = segments,
+    options: { preserveClipHotkeyNavigation?: boolean } = {},
   ) => {
+    if (!options.preserveClipHotkeyNavigation) {
+      resetClipHotkeyNavigation()
+    }
+
     applyClipSelection(
       nextSegments,
       segmentId != null ? [segmentId] : [],
@@ -1870,6 +1889,7 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleSeek = (timeInSeconds: number) => {
+    resetClipHotkeyNavigation()
     setPreviewPlaybackMode('edited')
     const safeTime = Math.max(0, Math.min(timeInSeconds, totalDuration))
     const containingSegment = segments.find(
@@ -1888,6 +1908,7 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleSeekOriginal = (timeInSeconds: number, shouldPlay = false) => {
+    resetClipHotkeyNavigation()
     const safeTime = Math.max(0, Math.min(timeInSeconds, totalDuration))
     setPreviewPlaybackMode('original')
     videoPreviewRef.current?.seekTo(safeTime)
@@ -2679,6 +2700,8 @@ export default function HomePage(): JSX.Element {
     segmentId: number,
     options: { extendSelection?: boolean; toggleSelection?: boolean } = {},
   ) => {
+    resetClipHotkeyNavigation()
+
     const anchorId =
       selectedId ??
       orderedSelectedSegmentIds[orderedSelectedSegmentIds.length - 1] ??
@@ -3225,6 +3248,7 @@ export default function HomePage(): JSX.Element {
           currentPreviewTime < selectedSegment.start ||
           currentPreviewTime >= clipEndBoundary
         ) {
+          resetClipHotkeyNavigation()
           videoPreviewRef.current.seekTo(selectedSegment.start)
           setCurrentTime(selectedSegment.start)
         }
@@ -3234,8 +3258,203 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleStepFrame = (direction: -1 | 1) => {
+    resetClipHotkeyNavigation()
     videoPreviewRef.current?.stepFrame(direction)
   }
+
+  const handleJumpSeconds = (direction: -1 | 1) => {
+    if (previewPlaybackMode === 'original') {
+      handleSeekOriginal(clamp(currentTime + direction, 0, totalDuration))
+      return
+    }
+
+    if (activeTimelineSegment && editedDuration > 0) {
+      seekEditedTimelineToTime(timelinePlayheadEditedTime + direction)
+      return
+    }
+
+    handleSeek(currentTime + direction)
+  }
+
+  const handleSelectClipBesidePlayhead = (side: 'next' | 'previous') => {
+    if (segments.length === 0 || segmentTimelineLayouts.length === 0) return
+
+    const hotkeyNavigationIndex =
+      clipHotkeyNavigationSegmentIdRef.current == null
+        ? -1
+        : segments.findIndex(
+            (segment) => segment.id === clipHotkeyNavigationSegmentIdRef.current,
+          )
+    const targetSegment = hotkeyNavigationIndex >= 0
+      ? (() => {
+          const nextIndex =
+            hotkeyNavigationIndex + (side === 'next' ? 1 : -1)
+          return nextIndex >= 0 && nextIndex < segments.length
+            ? segments[nextIndex]
+            : null
+        })()
+      : (() => {
+          const playheadTime = clamp(timelinePlayheadEditedTime, 0, editedDuration)
+          const boundaryTolerance = 0.001
+          const targetLayout =
+            side === 'next'
+              ? segmentTimelineLayouts.find(
+                  (layout) =>
+                    layout.duration > 0 &&
+                    layout.globalStart >= playheadTime - boundaryTolerance,
+                )
+              : [...segmentTimelineLayouts]
+                  .reverse()
+                  .find(
+                    (layout) =>
+                      layout.duration > 0 &&
+                      layout.globalEnd <= playheadTime + boundaryTolerance,
+                  )
+
+          if (!targetLayout) return null
+
+          return (
+            segments.find((segment) => segment.id === targetLayout.segmentId) ??
+            null
+          )
+        })()
+
+    if (!targetSegment) return
+
+    setActiveWorkflowStep('clean')
+    setIsCutModeEnabled(false)
+    setActiveCutHandle(null)
+    selectSingleClip(targetSegment.id, segments, {
+      preserveClipHotkeyNavigation: true,
+    })
+    clipHotkeyNavigationSegmentIdRef.current = targetSegment.id
+  }
+
+  const handleSelectAllClips = () => {
+    if (segments.length === 0) return
+
+    const allSegmentIds = segments.map((segment) => segment.id)
+    resetClipHotkeyNavigation()
+    setActiveWorkflowStep('clean')
+    setIsCutModeEnabled(false)
+    setActiveCutHandle(null)
+    applyClipSelection(segments, allSegmentIds, selectedId ?? allSegmentIds[0] ?? null)
+  }
+
+  const handleDeselectClips = () => {
+    resetClipHotkeyNavigation()
+    setSelectedId(null)
+    setSelectedSegmentIds([])
+    setIsCutModeEnabled(false)
+    setActiveCutHandle(null)
+  }
+
+  useEffect(() => {
+    const handleEditorKeyDown = (event: KeyboardEvent) => {
+      if (
+        doneActionKind != null ||
+        isCreateCategoryModalOpen ||
+        isEditorHotkeyTextEntryTarget(event.target)
+      ) {
+        return
+      }
+
+      const key = event.key.toLowerCase()
+      const hasPrimaryModifier = event.ctrlKey || event.metaKey
+      const hasNoSystemModifier = !event.ctrlKey && !event.metaKey && !event.altKey
+      const isArrowKey =
+        event.key === 'ArrowLeft' ||
+        event.key === 'ArrowRight' ||
+        event.key === 'ArrowUp' ||
+        event.key === 'ArrowDown'
+
+      if (event.repeat && !isArrowKey) {
+        return
+      }
+
+      if (hasPrimaryModifier && !event.altKey && key === 'z') {
+        event.preventDefault()
+        if (event.shiftKey) {
+          void handleRedo()
+        } else {
+          void handleUndo()
+        }
+        return
+      }
+
+      if (hasPrimaryModifier && !event.altKey && !event.shiftKey && key === 'e') {
+        event.preventDefault()
+        if (exportStatus !== 'processing' && editorStatus !== 'syncing') {
+          void handleExportVideo()
+        }
+        return
+      }
+
+      if (hasPrimaryModifier && !event.altKey && !event.shiftKey && key === 'a') {
+        event.preventDefault()
+        handleSelectAllClips()
+        return
+      }
+
+      if (hasNoSystemModifier && !event.shiftKey && event.code === 'Space') {
+        event.preventDefault()
+        handleTogglePlayback()
+        return
+      }
+
+      if (
+        hasNoSystemModifier &&
+        (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
+      ) {
+        event.preventDefault()
+        const direction = event.key === 'ArrowLeft' ? -1 : 1
+        if (event.shiftKey) {
+          handleJumpSeconds(direction)
+        } else {
+          handleStepFrame(direction)
+        }
+        return
+      }
+
+      if (
+        hasNoSystemModifier &&
+        !event.shiftKey &&
+        (event.key === 'ArrowUp' || event.key === 'ArrowDown')
+      ) {
+        event.preventDefault()
+        handleSelectClipBesidePlayhead(
+          event.key === 'ArrowUp' ? 'next' : 'previous',
+        )
+        return
+      }
+
+      if (hasNoSystemModifier && !event.shiftKey && key === 's') {
+        event.preventDefault()
+        void handleSplitAtPlayhead()
+        return
+      }
+
+      if (
+        hasNoSystemModifier &&
+        !event.shiftKey &&
+        (event.key === 'Delete' || event.key === 'Backspace')
+      ) {
+        event.preventDefault()
+        handleDeleteSelectedClip()
+        return
+      }
+
+      if (hasNoSystemModifier && !event.shiftKey && event.key === 'Escape') {
+        event.preventDefault()
+        handleDeselectClips()
+      }
+    }
+
+    window.addEventListener('keydown', handleEditorKeyDown)
+    return () => {
+      window.removeEventListener('keydown', handleEditorKeyDown)
+    }
+  })
 
   useEffect(() => {
     if (
