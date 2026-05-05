@@ -3328,7 +3328,7 @@ export default function HomePage(): JSX.Element {
                 .filter((value): value is number => value != null && Number.isFinite(value))
                 .filter((value) => value > 0)
                 .sort((a, b) => a - b)
-              for (const splitAtSeconds of splitPoints.slice(1)) {
+              for (const splitAtSeconds of splitPoints) {
                 const containing = workingSession.segments.find(
                   (segment) => splitAtSeconds > segment.start + 0.1 && splitAtSeconds < segment.end - 0.1,
                 )
@@ -3725,7 +3725,7 @@ export default function HomePage(): JSX.Element {
               .filter((value): value is number => value != null && Number.isFinite(value))
               .filter((value) => value > 0)
               .sort((a, b) => a - b)
-            for (const splitAtSeconds of splitPoints.slice(1)) {
+            for (const splitAtSeconds of splitPoints) {
               const containing = workingSession.segments.find(
                 (segment) => splitAtSeconds > segment.start + 0.1 && splitAtSeconds < segment.end - 0.1,
               )
