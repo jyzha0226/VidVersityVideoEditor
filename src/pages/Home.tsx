@@ -1252,6 +1252,10 @@ export default function HomePage(): JSX.Element {
     Record<string, string>
   >({})
   const [chapterNameDrafts, setChapterNameDrafts] = useState<Record<number, string>>({})
+  const [chapterSummaryDrafts, setChapterSummaryDrafts] = useState<Record<number, string>>({})
+  const [chapterThumbnailDrafts, setChapterThumbnailDrafts] = useState<
+    Record<number, string | null>
+  >({})
   const [sceneStatus, setSceneStatus] = useState<'idle' | 'pending'>('idle')
   const [segments, setSegments] = useState<ClipSegment[]>(
     relabelSegmentsForChapters(createInitialSegments(180)),
@@ -3301,11 +3305,72 @@ export default function HomePage(): JSX.Element {
     setIsApplyingAISuggestion(true)
     const executionNotes: string[] = []
     let shouldClearPendingSuggestion = true
+    let skipOperationLoop = false
     try {
       if (
         aiPendingSuggestion.intent === 'chapter_suggest' &&
         aiPendingSuggestion.operations.length === 0
       ) {
+        if (aiPendingSuggestion.chapters.length > 0) {
+          const session = await ensureEditorSession()
+          if (session) {
+            try {
+              setEditorStatus('syncing')
+              let workingSession = await replaceEditorSessionSegments(
+                session.sessionId,
+                segments,
+                selectedId,
+              )
+              const splitPoints = aiPendingSuggestion.chapters
+                .map((chapter) => chapter.start)
+                .filter((start): start is string => typeof start === 'string')
+                .map((start) => parseEditableTimestamp(start))
+                .filter((value): value is number => value != null && Number.isFinite(value))
+                .filter((value) => value > 0)
+                .sort((a, b) => a - b)
+              for (const splitAtSeconds of splitPoints.slice(1)) {
+                const containing = workingSession.segments.find(
+                  (segment) => splitAtSeconds > segment.start + 0.1 && splitAtSeconds < segment.end - 0.1,
+                )
+                if (!containing) continue
+                workingSession = await splitEditorSessionAtTime(
+                  session.sessionId,
+                  containing.id,
+                  splitAtSeconds,
+                )
+              }
+              const nextSegments = preserveChapterLabels(segments, workingSession.segments)
+              const renamedSegments = nextSegments.map((segment, index) => ({
+                ...segment,
+                label: aiPendingSuggestion.chapters[index]?.title?.trim() || segment.label,
+              }))
+              setSegments(renamedSegments)
+              setChapterSummaryDrafts(
+                Object.fromEntries(
+                  renamedSegments.map((segment, index) => [
+                    segment.id,
+                    aiPendingSuggestion.chapters[index]?.summary ?? '',
+                  ]),
+                ),
+              )
+              setChapterThumbnailDrafts(
+                Object.fromEntries(
+                  renamedSegments.map((segment, index) => [
+                    segment.id,
+                    aiPendingSuggestion.chapters[index]?.thumbnailTime ?? aiPendingSuggestion.chapters[index]?.start ?? null,
+                  ]),
+                ),
+              )
+              setRightPanelView('chapters')
+              setActiveWorkflowStep('chapters')
+              setEditorStatus('ready')
+              executionNotes.push('AI chapter suggestions applied to timeline splits and chapter metadata.')
+              skipOperationLoop = true
+            } catch (error) {
+              setEditorStatus('error')
+            }
+          }
+        }
         if (subtitleSegments.length === 0) {
           executionNotes.push(
             'Chapter suggestion requires subtitles/transcript. Do you require assistance in adding subtitles?',
@@ -3347,7 +3412,7 @@ export default function HomePage(): JSX.Element {
         }
       }
 
-      for (const operation of aiPendingSuggestion.operations) {
+      if (!skipOperationLoop) for (const operation of aiPendingSuggestion.operations) {
       if (operation.action === 'split_at') {
         const splitAtSeconds = operation.start
           ? parseEditableTimestamp(operation.start)
@@ -5664,6 +5729,25 @@ export default function HomePage(): JSX.Element {
                                     }`}
                                   />
                                 </label>
+                                <label className="block">
+                                  <span className={`mb-1.5 block text-[10px] font-bold uppercase tracking-[0.14em] ${
+                                    isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
+                                  }`}>Summary</span>
+                                  <textarea
+                                    value={chapterSummaryDrafts[segment.id] ?? ''}
+                                    onChange={(event) =>
+                                      setChapterSummaryDrafts((prev) => ({ ...prev, [segment.id]: event.target.value }))
+                                    }
+                                    className={`w-full rounded-2xl border px-4 py-3 text-[12px] outline-none transition ${
+                                      isDark
+                                        ? 'border-[#31415a] bg-[#0f172a] text-[#edf2ff] focus:border-[#60a5fa]'
+                                        : 'border-[#d9dde5] bg-white text-[#191c1e] focus:border-[#1a56db]'
+                                    }`}
+                                  />
+                                </label>
+                                <p className={`text-[11px] ${isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'}`}>
+                                  Thumbnail: {chapterThumbnailDrafts[segment.id] ?? formatEditableTimestamp(segment.start)}
+                                </p>
 
                                 <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3 ${
                                   isDark ? 'border-[#243149]' : 'border-[#e3e7ee]'
