@@ -6303,8 +6303,17 @@ export default function HomePage(): JSX.Element {
                           <ul className="mt-2 list-disc space-y-1 pl-4">
                             {aiPendingSuggestion.operations.map((operation, index) => (
                               <li key={`${operation.action}-${index}`}>
-                                {operation.action}: {operation.start ?? 'null'} →{' '}
-                                {operation.end ?? 'null'}
+                                {operation.action === 'remove' || operation.action === 'keep'
+                                  ? `Keep chapter range ${operation.start ?? 'start'} to ${operation.end ?? 'end'}`
+                                  : operation.action === 'split_at'
+                                    ? `Split at ${operation.start ?? 'the suggested time'}`
+                                    : operation.action === 'trim_silence'
+                                      ? 'Remove long silent sections'
+                                      : operation.action === 'add_subtitle'
+                                        ? 'Generate subtitles for this video'
+                                        : operation.action === 'suggest_chapter'
+                                          ? 'Create chapter suggestions from transcript'
+                                          : operation.action}
                               </li>
                             ))}
                           </ul>
@@ -6329,14 +6338,6 @@ export default function HomePage(): JSX.Element {
                             >
                               Cancel
                             </button>
-                          </div>
-                          <div className="mt-3">
-                            <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide opacity-70">
-                              Backend JSON response
-                            </p>
-                            <pre className="max-h-40 overflow-auto rounded-lg border p-2 text-[11px] leading-4">
-{aiResponseJson}
-                            </pre>
                           </div>
                         </div>
                       )}
@@ -6384,10 +6385,10 @@ export default function HomePage(): JSX.Element {
                       </button>
                     </div>
                     <p className="mt-2 text-[11px] opacity-70">
-                      {aiRequestStatus === 'sending' && 'Sending request: chat box → backend endpoint → Ollama...'}
-                      {aiRequestStatus === 'success' && 'Response received: Ollama JSON has been validated and shown above.'}
-                      {aiRequestStatus === 'error' && 'Request failed. Check backend server logs and Ollama status.'}
-                      {aiRequestStatus === 'idle' && 'Submit a prompt to test the AI request/response loop.'}
+                      {aiRequestStatus === 'sending' && 'AI is preparing your suggestion...'}
+                      {aiRequestStatus === 'success' && 'Suggestion is ready. Review it and choose Apply or Cancel.'}
+                      {aiRequestStatus === 'error' && 'AI request failed. Please try again.'}
+                      {aiRequestStatus === 'idle' && 'Enter your request and click Send.'}
                     </p>
                     {!videoSourceUrl && !selectedVideoFile && (
                       <p className="mt-1 text-[11px] font-medium text-amber-500">

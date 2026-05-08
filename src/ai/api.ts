@@ -1,6 +1,6 @@
 import type { AIEditCommandRequest, AIEditSuggestion } from './types'
 
-const DEFAULT_SUBTITLE_API_URL = 'http://localhost:8787'
+const DEFAULT_SUBTITLE_API_URL = 'http://192.168.0.6:8787'
 
 function resolveApiUrl() {
   const configured = (globalThis as typeof globalThis & {
