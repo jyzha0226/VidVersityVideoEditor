@@ -1091,7 +1091,7 @@ function normalizeAISuggestion(input, sourcePrompt = '') {
   const normalizedPrompt = `${sourcePrompt}`.toLowerCase()
   let fallbackIntent = normalizedIntent
   let fallbackOperations = safeOperations
-  if (normalizedIntent === 'unknown' && safeOperations.length === 0) {
+  if (safeOperations.length === 0) {
     if (/cut|remove/.test(normalizedPrompt) && /\d{1,2}:\d{2}/.test(normalizedPrompt)) {
       const times = normalizedPrompt.match(/\d{1,2}:\d{2}(?:\.\d+)?/g) || []
       fallbackIntent = 'cut'
@@ -1108,6 +1108,14 @@ function normalizeAISuggestion(input, sourcePrompt = '') {
     } else if (/silent|silence/.test(normalizedPrompt)) {
       fallbackIntent = 'trim_silence'
       fallbackOperations = [{ action: 'trim_silence', start: null, end: null, text: null }]
+      notes.push('Fallback intent mapping used from prompt keywords.')
+    } else if (/subtitle/.test(normalizedPrompt)) {
+      fallbackIntent = 'subtitle'
+      fallbackOperations = [{ action: 'add_subtitle', start: null, end: null, text: null }]
+      notes.push('Fallback intent mapping used from prompt keywords.')
+    } else if (/chapter/.test(normalizedPrompt)) {
+      fallbackIntent = 'chapter_suggest'
+      fallbackOperations = [{ action: 'suggest_chapter', start: null, end: null, text: null }]
       notes.push('Fallback intent mapping used from prompt keywords.')
     }
   }
