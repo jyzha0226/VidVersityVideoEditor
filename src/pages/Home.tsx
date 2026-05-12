@@ -65,6 +65,8 @@ import {
 import { importSubtitlesFromFile } from '../subtitles/import'
 import type { SubtitleSegment } from '../subtitles/types'
 import { Input } from '../components/ui/input'
+import { requestAIChapterSuggestions, requestAIEditCommand } from '../ai/api'
+import type { AIEditSuggestion } from '../ai/types'
 import {
   Dialog,
   DialogContent,
@@ -141,6 +143,7 @@ interface AIDraftMessage {
   id: string
   role: 'user' | 'assistant'
   text: string
+  suggestion?: AIEditSuggestion
 }
 
 type SubtitleStatus = 'idle' | 'processing' | 'success' | 'error'
@@ -196,11 +199,11 @@ const AI_SUGGESTIONS: AISuggestion[] = [
 ]
 
 const AI_QUICK_ACTIONS = [
+  'Cut the introduction from 00:00 to 01:30',
+  'Split the video at 04:20',
+  'Remove silent parts longer than 3 seconds',
+  'Help me add subtitles',
   'Split the video into chapters',
-  'Trim the first 10 seconds',
-  'Find the cleanest opening sentence',
-  'Remove long pauses across the edit',
-  'Rewrite subtitles for readability',
 ]
 
 const CATEGORY_STORAGE_KEY = 'vidversity-video-categories'
@@ -1221,6 +1224,14 @@ export default function HomePage(): JSX.Element {
       text: 'AI actions will appear here once the backend is connected. For now, suggestion chips can prefill a request and Send stores it in this workspace panel.',
     },
   ])
+  const [aiPendingSuggestion, setAiPendingSuggestion] = useState<AIEditSuggestion | null>(
+    null,
+  )
+  const [isApplyingAISuggestion, setIsApplyingAISuggestion] = useState(false)
+  const [aiRequestStatus, setAiRequestStatus] = useState<
+    'idle' | 'sending' | 'success' | 'error'
+  >('idle')
+  const [aiResponseJson, setAiResponseJson] = useState<string>('')
   const [subtitleSegments, setSubtitleSegments] = useState<SubtitleSegment[]>([])
   const [subtitleStatus, setSubtitleStatus] = useState<SubtitleStatus>('idle')
   const [subtitleError, setSubtitleError] = useState<string | null>(null)
@@ -1241,6 +1252,10 @@ export default function HomePage(): JSX.Element {
     Record<string, string>
   >({})
   const [chapterNameDrafts, setChapterNameDrafts] = useState<Record<number, string>>({})
+  const [chapterSummaryDrafts, setChapterSummaryDrafts] = useState<Record<number, string>>({})
+  const [chapterThumbnailDrafts, setChapterThumbnailDrafts] = useState<
+    Record<number, string | null>
+  >({})
   const [sceneStatus, setSceneStatus] = useState<'idle' | 'pending'>('idle')
   const [segments, setSegments] = useState<ClipSegment[]>(
     relabelSegmentsForChapters(createInitialSegments(180)),
@@ -2000,7 +2015,28 @@ export default function HomePage(): JSX.Element {
         syncedSession.sessionId,
         silenceDetectionOptions,
       )
-      const nextSilenceSegments = detection.silenceSegments
+      let nextSilenceSegments = detection.silenceSegments
+      if (nextSilenceSegments.length === 0) {
+        const videoFile = await ensureVideoFile()
+        if (videoFile) {
+          const sourceDetection = await detectSilenceFromVideo(
+            videoFile,
+            silenceDetectionOptions,
+          )
+          nextSilenceSegments = sourceDetection.silenceSegments
+            .map((silence) => {
+              for (const segment of segments) {
+                const start = Math.max(silence.start, segment.start)
+                const end = Math.min(silence.end, segment.end)
+                if (end - start >= silenceDetectionOptions.minSilenceDuration) {
+                  return { start, end }
+                }
+              }
+              return null
+            })
+            .filter((segment): segment is { start: number; end: number } => segment != null)
+        }
+      }
       setSilenceSegments(nextSilenceSegments)
       setSelectedSilenceSegmentKeys([])
       setStagedSilenceSegmentKeys([])
@@ -3145,9 +3181,21 @@ export default function HomePage(): JSX.Element {
     setTimelineZoom((prev) => clamp(prev + direction * 0.5, 1, 4))
   }
 
-  const handleSendAIPrompt = () => {
+  const handleSendAIPrompt = async () => {
     const trimmed = aiPromptDraft.trim()
     if (!trimmed) return
+    if (!videoSourceUrl && !selectedVideoFile) {
+      setAiRequestStatus('error')
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: `assistant-video-required-${Date.now()}`,
+          role: 'assistant',
+          text: 'Please upload or select a video before using AI Workspace.',
+        },
+      ])
+      return
+    }
 
     setAiMessages((prev) => [
       ...prev,
@@ -3158,6 +3206,43 @@ export default function HomePage(): JSX.Element {
       },
     ])
     setAiPromptDraft('')
+    setAiRequestStatus('sending')
+
+    try {
+      let transcriptForAI = subtitleSegments.map((segment) => ({
+        start: formatEditableTimestamp(segment.start),
+        end: formatEditableTimestamp(segment.end),
+        text: segment.text,
+      }))
+
+      const { suggestion } = await requestAIEditCommand({
+        prompt: trimmed,
+        videoDuration: formatEditableTimestamp(videoDuration ?? totalDuration),
+        transcript: transcriptForAI,
+      })
+      setAiPendingSuggestion(suggestion)
+      setAiResponseJson(JSON.stringify(suggestion, null, 2))
+      setAiRequestStatus('success')
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: `assistant-${Date.now()}`,
+          role: 'assistant',
+          text: `Intent: ${suggestion.intent}. Review the operations before applying.`,
+          suggestion,
+        },
+      ])
+    } catch (error) {
+      setAiRequestStatus('error')
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: `assistant-error-${Date.now()}`,
+          role: 'assistant',
+          text: error instanceof Error ? error.message : 'AI request failed.',
+        },
+      ])
+    }
   }
 
   useEffect(() => {
@@ -3214,6 +3299,535 @@ export default function HomePage(): JSX.Element {
     setCutRange(buildFullCutRange(selectedCutDuration))
     setActiveCutHandle(null)
   }, [isCutModeEnabled, selectedCutScopeKey, selectedCutDuration])
+
+  const handleApplyAISuggestion = async () => {
+    if (!aiPendingSuggestion || isApplyingAISuggestion) return
+    setIsApplyingAISuggestion(true)
+    const executionNotes: string[] = []
+    let shouldClearPendingSuggestion = true
+    let skipOperationLoop = false
+    try {
+      if (
+        aiPendingSuggestion.intent === 'chapter_suggest' &&
+        aiPendingSuggestion.operations.length === 0
+      ) {
+        if (aiPendingSuggestion.chapters.length > 0) {
+          const session = await ensureEditorSession()
+          if (session) {
+            try {
+              setEditorStatus('syncing')
+              let workingSession = await replaceEditorSessionSegments(
+                session.sessionId,
+                segments,
+                selectedId,
+              )
+              const splitPoints = aiPendingSuggestion.chapters
+                .map((chapter) => chapter.start)
+                .filter((start): start is string => typeof start === 'string')
+                .map((start) => parseEditableTimestamp(start))
+                .filter((value): value is number => value != null && Number.isFinite(value))
+                .filter((value) => value > 0)
+                .sort((a, b) => a - b)
+              for (const splitAtSeconds of splitPoints) {
+                const containing = workingSession.segments.find(
+                  (segment) => splitAtSeconds > segment.start + 0.1 && splitAtSeconds < segment.end - 0.1,
+                )
+                if (!containing) continue
+                workingSession = await splitEditorSessionAtTime(
+                  session.sessionId,
+                  containing.id,
+                  splitAtSeconds,
+                )
+              }
+              const nextSegments = preserveChapterLabels(segments, workingSession.segments)
+              const renamedSegments = nextSegments.map((segment, index) => ({
+                ...segment,
+                label: aiPendingSuggestion.chapters[index]?.title?.trim() || segment.label,
+              }))
+              setSegments(renamedSegments)
+              setChapterSummaryDrafts(
+                Object.fromEntries(
+                  renamedSegments.map((segment, index) => [
+                    segment.id,
+                    aiPendingSuggestion.chapters[index]?.summary ?? '',
+                  ]),
+                ),
+              )
+              setChapterThumbnailDrafts(
+                Object.fromEntries(
+                  renamedSegments.map((segment, index) => [
+                    segment.id,
+                    aiPendingSuggestion.chapters[index]?.thumbnailTime ?? aiPendingSuggestion.chapters[index]?.start ?? null,
+                  ]),
+                ),
+              )
+              setRightPanelView('chapters')
+              setActiveWorkflowStep('chapters')
+              setEditorStatus('ready')
+              executionNotes.push('AI chapter suggestions applied to timeline splits and chapter metadata.')
+              skipOperationLoop = true
+            } catch (error) {
+              setEditorStatus('error')
+            }
+          }
+        }
+        if (subtitleSegments.length === 0) {
+          executionNotes.push(
+            'Chapter suggestion requires subtitles/transcript. Do you require assistance in adding subtitles?',
+          )
+          setAiPendingSuggestion({
+            intent: 'subtitle',
+            needs_review: true,
+            parameters: { sourceIntent: 'chapter_suggest' },
+            operations: [{ action: 'add_subtitle', start: null, end: null, text: null }],
+            chapters: [],
+            notes: ['Subtitles are required before chapter suggestion can run.'],
+          })
+          shouldClearPendingSuggestion = false
+        } else {
+          const allowShareTranscript = window.confirm(
+            'Allow sharing current subtitles transcript with AI model for chapter analysis?',
+          )
+          if (!allowShareTranscript) {
+            executionNotes.push(
+              'Chapter suggestion skipped: transcript sharing was not allowed.',
+            )
+          } else {
+            const transcript = subtitleSegments.map((segment) => ({
+              start: formatEditableTimestamp(segment.start),
+              end: formatEditableTimestamp(segment.end),
+              text: segment.text,
+            }))
+            const { suggestion } = await requestAIChapterSuggestions({
+              videoDuration: formatEditableTimestamp(videoDuration ?? totalDuration),
+              transcript,
+            })
+            setAiPendingSuggestion(suggestion)
+            setAiResponseJson(JSON.stringify(suggestion, null, 2))
+            shouldClearPendingSuggestion = false
+            executionNotes.push(
+              `Chapter suggestion generated with transcript context (${transcript.length} subtitle lines). Review the updated suggestions before applying any edits.`,
+            )
+          }
+        }
+      }
+
+      if (!skipOperationLoop) for (const operation of aiPendingSuggestion.operations) {
+      if (operation.action === 'split_at') {
+        const splitAtSeconds = operation.start
+          ? parseEditableTimestamp(operation.start)
+          : null
+        if (splitAtSeconds == null) {
+          executionNotes.push('Split operation skipped: invalid or missing split timestamp.')
+          continue
+        }
+
+        const containingSegment = segments.find(
+          (segment) =>
+            splitAtSeconds > segment.start + 0.1 &&
+            splitAtSeconds < segment.end - 0.1,
+        )
+        if (!containingSegment) {
+          executionNotes.push(
+            `Split skipped: ${operation.start} is outside a splittable segment.`,
+          )
+          continue
+        }
+
+        const session = await ensureEditorSession()
+        if (!session) {
+          executionNotes.push('Split skipped: editor session is unavailable.')
+          continue
+        }
+
+        try {
+          setEditorStatus('syncing')
+          const previousState = captureEditorState()
+          const nextSession = await splitEditorSessionAtTime(
+            session.sessionId,
+            containingSegment.id,
+            splitAtSeconds,
+          )
+          setHistory((prev) => [...prev.slice(-29), previousState])
+          const nextSegments = preserveChapterLabels(segments, nextSession.segments)
+          setSegments(nextSegments)
+          applyClipSelection(
+            nextSegments,
+            nextSession.selectedSegmentId != null
+              ? [nextSession.selectedSegmentId]
+              : [],
+            nextSession.selectedSegmentId ?? nextSegments[0]?.id ?? null,
+          )
+          setEditorStatus('ready')
+          handleSeek(splitAtSeconds)
+          executionNotes.push(`Split applied at ${operation.start}.`)
+        } catch (error) {
+          setEditorStatus('error')
+          executionNotes.push(
+            error instanceof Error
+              ? `Split failed: ${error.message}`
+              : 'Split failed unexpectedly.',
+          )
+        }
+        continue
+      }
+
+      if (operation.action === 'add_subtitle') {
+        if (subtitleSegments.length === 0) {
+          void handleGenerateSubtitlesFromPanel()
+          executionNotes.push(
+            'Subtitle generation started because no subtitle track existed.',
+          )
+        } else {
+          executionNotes.push(
+            'TODO: range-based subtitle insertion adapter is not connected yet.',
+          )
+        }
+        continue
+      }
+
+      if (operation.action === 'trim_silence') {
+        const session = await ensureEditorSession()
+        if (!session) {
+          executionNotes.push('Silence trim skipped: editor session is unavailable.')
+          continue
+        }
+        try {
+          setEditorStatus('syncing')
+          const previousState = captureEditorState()
+          const parsePositiveSeconds = (value: unknown): number | null => {
+            if (typeof value === 'number') {
+              return Number.isFinite(value) && value > 0 ? value : null
+            }
+            if (typeof value === 'string') {
+              const direct = Number(value)
+              if (Number.isFinite(direct) && direct > 0) {
+                return direct
+              }
+              const matched = value.match(/(\d+(?:\.\d+)?)/)
+              if (!matched) return null
+              const parsed = Number(matched[1])
+              return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+            }
+            return null
+          }
+          const rawThreshold = aiPendingSuggestion.parameters?.minSilenceSeconds
+          const fallbackThreshold = parsePositiveSeconds(operation.text)
+          const thresholdSeconds =
+            parsePositiveSeconds(rawThreshold) ?? fallbackThreshold
+          const detection =
+            silenceSegments.length > 0
+              ? {
+                  audioDuration:
+                    silenceSegments[silenceSegments.length - 1]?.end ??
+                    session.duration,
+                  silenceSegments,
+                  speechSegments: [],
+                }
+              : isTimelineUnedited(segments, videoDuration)
+                ? await (async () => {
+                    const videoFile = await ensureVideoFile()
+                    if (!videoFile) {
+                      throw new Error(
+                        'Upload a local video file before trimming silence with AI.',
+                      )
+                    }
+                    return detectSilenceFromVideo(videoFile, {
+                      noiseThresholdDb: -35,
+                      minSilenceDuration:
+                        thresholdSeconds != null && Number.isFinite(thresholdSeconds)
+                          ? thresholdSeconds
+                          : 0.6,
+                      minSegmentDuration: 0.25,
+                    })
+                  })()
+                : await detectSilenceInEditorSession(session.sessionId, {
+                    minSilenceDuration:
+                      thresholdSeconds != null && Number.isFinite(thresholdSeconds)
+                        ? thresholdSeconds
+                        : undefined,
+                  })
+          let resolvedSilenceSegments = detection.silenceSegments
+          if (
+            resolvedSilenceSegments.length === 0 &&
+            !isTimelineUnedited(segments, videoDuration)
+          ) {
+            const videoFile = await ensureVideoFile()
+            if (videoFile) {
+              const sourceDetection = await detectSilenceFromVideo(videoFile, {
+                noiseThresholdDb: -35,
+                minSilenceDuration:
+                  thresholdSeconds != null && Number.isFinite(thresholdSeconds)
+                    ? thresholdSeconds
+                    : 0.6,
+                minSegmentDuration: 0.25,
+              })
+              resolvedSilenceSegments = sourceDetection.silenceSegments
+                .map((silence) => {
+                  for (const segment of segments) {
+                    const start = Math.max(silence.start, segment.start)
+                    const end = Math.min(silence.end, segment.end)
+                    if (end - start >= 0.6) {
+                      return { start, end }
+                    }
+                  }
+                  return null
+                })
+                .filter((segment): segment is { start: number; end: number } => segment != null)
+            }
+          }
+          const candidateDurations = resolvedSilenceSegments.map((segment) =>
+            Number((segment.end - segment.start).toFixed(2)),
+          )
+          const targetSilenceSegments =
+            thresholdSeconds != null && Number.isFinite(thresholdSeconds)
+              ? resolvedSilenceSegments.filter(
+                  (segment) => segment.end - segment.start >= thresholdSeconds,
+                )
+              : resolvedSilenceSegments
+          executionNotes.push(
+            `Silence debug: candidates=${resolvedSilenceSegments.length}, durations=[${candidateDurations.join(
+              ', ',
+            )}], threshold=${thresholdSeconds ?? 'none'}.`,
+          )
+          if (targetSilenceSegments.length === 0) {
+            executionNotes.push('No silence segments detected to remove.')
+            setEditorStatus('ready')
+            continue
+          }
+
+          const nextSession = await deleteSilenceRangesFromEditorSession(
+            session.sessionId,
+            targetSilenceSegments,
+          )
+          setHistory((prev) => [...prev.slice(-29), previousState])
+          const nextSegments = preserveChapterLabels(segments, nextSession.segments)
+          setSegments(nextSegments)
+          applyClipSelection(
+            nextSegments,
+            nextSession.selectedSegmentId != null
+              ? [nextSession.selectedSegmentId]
+              : [],
+            nextSession.selectedSegmentId ?? nextSegments[0]?.id ?? null,
+          )
+          setEditorStatus('ready')
+          setSilenceSegments([])
+          setSelectedSilenceSegmentKeys([])
+          setStagedSilenceSegmentKeys([])
+          executionNotes.push(
+            `Silence trim applied to ${targetSilenceSegments.length} detected ranges.`,
+          )
+        } catch (error) {
+          setEditorStatus('error')
+          executionNotes.push(
+            error instanceof Error
+              ? `Silence trim failed: ${error.message}`
+              : 'Silence trim failed unexpectedly.',
+          )
+        }
+        continue
+      }
+
+      if (operation.action === 'keep' || operation.action === 'remove') {
+        const cutStartSeconds = operation.start
+          ? parseEditableTimestamp(operation.start)
+          : null
+        const cutEndSeconds = operation.end
+          ? parseEditableTimestamp(operation.end)
+          : null
+        if (
+          cutStartSeconds == null ||
+          cutEndSeconds == null ||
+          !Number.isFinite(cutStartSeconds) ||
+          !Number.isFinite(cutEndSeconds) ||
+          cutEndSeconds <= cutStartSeconds
+        ) {
+          executionNotes.push(
+            'Cut skipped: keep/remove operation is missing a valid start/end range.',
+          )
+          continue
+        }
+
+        const session = await ensureEditorSession()
+        if (!session) {
+          executionNotes.push('Cut skipped: editor session is unavailable.')
+          continue
+        }
+
+        const selectedForCut =
+          selectedSegments.length > 0
+            ? [...orderedSelectedSegmentIds]
+            : segments.map((segment) => segment.id)
+
+        try {
+          setEditorStatus('syncing')
+          const previousState = captureEditorState()
+          const nextSession = await cutEditorSessionToRange(
+            session.sessionId,
+            cutStartSeconds,
+            cutEndSeconds,
+            selectedForCut,
+          )
+          setHistory((prev) => [...prev.slice(-29), previousState])
+          const nextSegments = preserveChapterLabels(segments, nextSession.segments)
+          setSegments(nextSegments)
+          applyClipSelection(
+            nextSegments,
+            nextSession.selectedSegmentId != null
+              ? [nextSession.selectedSegmentId]
+              : [],
+            nextSession.selectedSegmentId ?? nextSegments[0]?.id ?? null,
+          )
+          setCutRange(buildFullCutRange(cutEndSeconds - cutStartSeconds))
+          setIsCutModeEnabled(false)
+          setActiveCutHandle(null)
+          setEditorStatus('ready')
+          executionNotes.push(
+            `${operation.action === 'remove' ? 'Cut' : 'Keep'} applied for ${operation.start} to ${operation.end} (outside removed).`,
+          )
+        } catch (error) {
+          setEditorStatus('error')
+          executionNotes.push(
+            error instanceof Error
+              ? `Cut failed: ${error.message}`
+              : 'Cut failed unexpectedly.',
+          )
+        }
+        continue
+      }
+
+      if (operation.action === 'mute') {
+        executionNotes.push('TODO: mute adapter is not connected yet.')
+        continue
+      }
+
+      if (operation.action === 'suggest_chapter') {
+        if (
+          aiPendingSuggestion.intent === 'chapter_suggest' &&
+          aiPendingSuggestion.chapters.length > 0
+        ) {
+          const session = await ensureEditorSession()
+          if (!session) {
+            executionNotes.push('Chapter suggestion skipped: editor session is unavailable.')
+            continue
+          }
+          try {
+            setEditorStatus('syncing')
+            let workingSession = await replaceEditorSessionSegments(
+              session.sessionId,
+              segments,
+              selectedId,
+            )
+            const splitPoints = aiPendingSuggestion.chapters
+              .map((chapter) => chapter.start)
+              .filter((start): start is string => typeof start === 'string')
+              .map((start) => parseEditableTimestamp(start))
+              .filter((value): value is number => value != null && Number.isFinite(value))
+              .filter((value) => value > 0)
+              .sort((a, b) => a - b)
+            for (const splitAtSeconds of splitPoints) {
+              const containing = workingSession.segments.find(
+                (segment) => splitAtSeconds > segment.start + 0.1 && splitAtSeconds < segment.end - 0.1,
+              )
+              if (!containing) continue
+              workingSession = await splitEditorSessionAtTime(
+                session.sessionId,
+                containing.id,
+                splitAtSeconds,
+              )
+            }
+            const nextSegments = preserveChapterLabels(segments, workingSession.segments)
+            const renamedSegments = nextSegments.map((segment, index) => ({
+              ...segment,
+              label: aiPendingSuggestion.chapters[index]?.title?.trim() || segment.label,
+            }))
+            setSegments(renamedSegments)
+            setChapterSummaryDrafts(
+              Object.fromEntries(
+                renamedSegments.map((segment, index) => [
+                  segment.id,
+                  aiPendingSuggestion.chapters[index]?.summary ?? '',
+                ]),
+              ),
+            )
+            setChapterThumbnailDrafts(
+              Object.fromEntries(
+                renamedSegments.map((segment, index) => [
+                  segment.id,
+                  aiPendingSuggestion.chapters[index]?.thumbnailTime ?? aiPendingSuggestion.chapters[index]?.start ?? null,
+                ]),
+              ),
+            )
+            setRightPanelView('chapters')
+            setActiveWorkflowStep('chapters')
+            setEditorStatus('ready')
+            executionNotes.push('AI chapter suggestions applied to timeline splits and chapter metadata.')
+          } catch (error) {
+            setEditorStatus('error')
+            executionNotes.push(
+              error instanceof Error ? `Chapter apply failed: ${error.message}` : 'Chapter apply failed unexpectedly.',
+            )
+          }
+          continue
+        }
+        if (subtitleSegments.length === 0) {
+          const shouldGenerate = window.confirm(
+            'Chapter suggestions require subtitles/transcript. No subtitles found. Generate subtitles now?',
+          )
+          executionNotes.push(
+            shouldGenerate
+              ? 'Please generate subtitles first, then re-run chapter suggestion apply.'
+              : 'Chapter suggestion skipped: subtitles are required.',
+          )
+          continue
+        }
+
+        const allowShareTranscript = window.confirm(
+          'Allow sharing current subtitles transcript with AI model for chapter analysis?',
+        )
+        if (!allowShareTranscript) {
+          executionNotes.push('Chapter suggestion skipped: transcript sharing was not allowed.')
+          continue
+        }
+
+        const transcript = subtitleSegments.map((segment) => ({
+          start: formatEditableTimestamp(segment.start),
+          end: formatEditableTimestamp(segment.end),
+          text: segment.text,
+        }))
+        const { suggestion } = await requestAIChapterSuggestions({
+          videoDuration: formatEditableTimestamp(videoDuration ?? totalDuration),
+          transcript,
+        })
+        setAiPendingSuggestion(suggestion)
+        setAiResponseJson(JSON.stringify(suggestion, null, 2))
+        shouldClearPendingSuggestion = false
+        executionNotes.push(
+          `Chapter suggestion refreshed with transcript context (${transcript.length} subtitle lines). Review updated suggestions.`,
+        )
+      }
+    }
+
+    setAiMessages((prev) => [
+      ...prev,
+      {
+        id: `assistant-loop-${Date.now()}`,
+        role: 'assistant',
+        text:
+          executionNotes.length > 0
+            ? executionNotes.join(' ')
+            : 'No executable AI operations were found in this suggestion.',
+      },
+    ])
+    if (shouldClearPendingSuggestion) {
+      setAiPendingSuggestion(null)
+    }
+    } finally {
+      setIsApplyingAISuggestion(false)
+    }
+  }
+
+  const handleCancelAISuggestion = () => setAiPendingSuggestion(null)
 
   const progress = totalDuration > 0 ? currentTime / totalDuration : 0
   const topTabClass = ({ isActive }: { isActive: boolean }) =>
@@ -3303,6 +3917,32 @@ export default function HomePage(): JSX.Element {
             >
               VidVersity is adding the uploaded video to the end of your current
               timeline. This can take a moment for larger files.
+            </p>
+          </div>
+        </div>
+      ) : null}
+
+      {subtitleStatus === 'processing' ? (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-[#0b1220]/55 px-4 backdrop-blur-sm">
+          <div
+            className={`w-full max-w-sm rounded-[28px] border px-6 py-6 text-center shadow-[0_24px_80px_rgba(15,23,42,0.28)] ${
+              isDark
+                ? 'border-[#31415a] bg-[#111827] text-[#edf2ff]'
+                : 'border-[#d9dde5] bg-white text-[#191c1e]'
+            }`}
+          >
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-[rgba(222,52,171,0.12)]">
+              <span className="h-7 w-7 animate-spin rounded-full border-2 border-[#de34ab] border-t-transparent" />
+            </div>
+            <h2 className={`mt-4 text-[15px] font-bold uppercase tracking-[0.2em] ${
+              isDark ? 'text-[#ff9dd7]' : 'text-[#c2187a]'
+            }`}>
+              Processing Subtitles
+            </h2>
+            <p className={`mt-3 text-sm leading-6 ${
+              isDark ? 'text-[#c6d3eb]' : 'text-[#515f74]'
+            }`}>
+              VidVersity is generating subtitle scripts for your video. This can take a moment for larger files.
             </p>
           </div>
         </div>
@@ -5157,6 +5797,52 @@ export default function HomePage(): JSX.Element {
                                     }`}
                                   />
                                 </label>
+                                <label className="block">
+                                  <span className={`mb-1.5 block text-[10px] font-bold uppercase tracking-[0.14em] ${
+                                    isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
+                                  }`}>Summary</span>
+                                  <textarea
+                                    value={chapterSummaryDrafts[segment.id] ?? ''}
+                                    onChange={(event) =>
+                                      setChapterSummaryDrafts((prev) => ({ ...prev, [segment.id]: event.target.value }))
+                                    }
+                                    className={`w-full rounded-2xl border px-4 py-3 text-[12px] outline-none transition ${
+                                      isDark
+                                        ? 'border-[#31415a] bg-[#0f172a] text-[#edf2ff] focus:border-[#60a5fa]'
+                                        : 'border-[#d9dde5] bg-white text-[#191c1e] focus:border-[#1a56db]'
+                                    }`}
+                                  />
+                                </label>
+                                {(() => {
+                                  const thumbnailTimeDraft =
+                                    chapterThumbnailDrafts[segment.id] ??
+                                    formatEditableTimestamp(segment.start)
+                                  const thumbnailSeconds =
+                                    parseEditableTimestamp(thumbnailTimeDraft) ??
+                                    segment.start
+                                  const thumbnail = timelineThumbnails.reduce<TimelineThumbnail | null>(
+                                    (closest, frame) => {
+                                      const distance = Math.abs(frame.time - thumbnailSeconds)
+                                      if (!closest) return frame
+                                      const bestDistance = Math.abs(
+                                        closest.time - thumbnailSeconds,
+                                      )
+                                      return distance < bestDistance ? frame : closest
+                                    },
+                                    null,
+                                  )
+                                  return thumbnail ? (
+                                    <img
+                                      src={thumbnail.src}
+                                      alt={`Thumbnail for ${getChapterNameDraft(segment, index)}`}
+                                      className="h-20 w-full rounded-lg object-cover"
+                                    />
+                                  ) : (
+                                    <p className={`text-[11px] ${isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'}`}>
+                                      Thumbnail frame is unavailable.
+                                    </p>
+                                  )
+                                })()}
 
                                 <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3 ${
                                   isDark ? 'border-[#243149]' : 'border-[#e3e7ee]'
@@ -5573,12 +6259,13 @@ export default function HomePage(): JSX.Element {
                       <button
                         key={item}
                         type="button"
+                        disabled={!videoSourceUrl && !selectedVideoFile}
                         onClick={() => setAiPromptDraft(item)}
                         className={`rounded-full border px-3 py-2 text-left text-[12px] transition ${
                           isDark
                             ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb] hover:border-[#4b6388] hover:bg-[#131f33]'
                             : 'border-[#d9dde5] bg-white text-[#515f74] hover:border-[#7aa4ff] hover:bg-[#f6f9ff]'
-                        }`}
+                        } disabled:cursor-not-allowed disabled:opacity-45`}
                       >
                         {item}
                       </button>
@@ -5603,6 +6290,57 @@ export default function HomePage(): JSX.Element {
                           {message.text}
                         </div>
                       ))}
+
+                      {aiPendingSuggestion && (
+                        <div className={`rounded-2xl border p-3 text-[12px] ${
+                          isDark
+                            ? 'border-[#31415a] bg-[#0f172a] text-[#c6d3eb]'
+                            : 'border-[#d9dde5] bg-[#f8fbff] text-[#334155]'
+                        }`}>
+                          <p className="font-semibold">
+                            Review AI suggestion ({aiPendingSuggestion.intent})
+                          </p>
+                          <ul className="mt-2 list-disc space-y-1 pl-4">
+                            {aiPendingSuggestion.operations.map((operation, index) => (
+                              <li key={`${operation.action}-${index}`}>
+                                {operation.action === 'remove' || operation.action === 'keep'
+                                  ? `Keep chapter range ${operation.start ?? 'start'} to ${operation.end ?? 'end'}`
+                                  : operation.action === 'split_at'
+                                    ? `Split at ${operation.start ?? 'the suggested time'}`
+                                    : operation.action === 'trim_silence'
+                                      ? 'Remove long silent sections'
+                                      : operation.action === 'add_subtitle'
+                                        ? 'Generate subtitles for this video'
+                                        : operation.action === 'suggest_chapter'
+                                          ? 'Create chapter suggestions from transcript'
+                                          : operation.action}
+                              </li>
+                            ))}
+                          </ul>
+                          {aiPendingSuggestion.notes.length > 0 && (
+                            <p className="mt-2">
+                              Notes: {aiPendingSuggestion.notes.join(' | ')}
+                            </p>
+                          )}
+                          <div className="mt-3 flex gap-2">
+                            <button
+                              type="button"
+                              onClick={handleApplyAISuggestion}
+                              disabled={isApplyingAISuggestion}
+                              className="rounded-lg bg-[#003fb1] px-3 py-1.5 text-white"
+                            >
+                              {isApplyingAISuggestion ? 'Applying…' : 'Apply'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleCancelAISuggestion}
+                              className="rounded-lg border px-3 py-1.5"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     <div
@@ -5631,7 +6369,11 @@ export default function HomePage(): JSX.Element {
                       <button
                         type="button"
                         onClick={handleSendAIPrompt}
-                        disabled={aiPromptDraft.trim().length === 0}
+                        disabled={
+                          aiPromptDraft.trim().length === 0 ||
+                          aiRequestStatus === 'sending' ||
+                          (!videoSourceUrl && !selectedVideoFile)
+                        }
                         className={`flex h-11 w-11 items-center justify-center rounded-2xl transition disabled:cursor-not-allowed disabled:opacity-40 ${
                           isDark
                             ? 'bg-[#1b3566] text-[#edf2ff] hover:bg-[#234178]'
@@ -5642,6 +6384,17 @@ export default function HomePage(): JSX.Element {
                         <Send className="h-4 w-4" />
                       </button>
                     </div>
+                    <p className="mt-2 text-[11px] opacity-70">
+                      {aiRequestStatus === 'sending' && 'AI is preparing your suggestion...'}
+                      {aiRequestStatus === 'success' && 'Suggestion is ready. Review it and choose Apply or Cancel.'}
+                      {aiRequestStatus === 'error' && 'AI request failed. Please try again.'}
+                      {aiRequestStatus === 'idle' && 'Enter your request and click Send.'}
+                    </p>
+                    {!videoSourceUrl && !selectedVideoFile && (
+                      <p className="mt-1 text-[11px] font-medium text-amber-500">
+                        Upload a video first to enable AI Workspace suggestions.
+                      </p>
+                    )}
                   </div>
                 </>
               )}
