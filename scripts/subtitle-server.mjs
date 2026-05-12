@@ -988,7 +988,7 @@ function buildSafeAISuggestion(message) {
   }
 }
 
-function normalizeAISuggestion(input) {
+function normalizeAISuggestion(input, sourcePrompt = '') {
   const parseLooseTime = (value) => {
     if (typeof value !== 'string' || value.trim().length === 0) return null
     if (value === 'END') return Number.POSITIVE_INFINITY
@@ -999,18 +999,32 @@ function normalizeAISuggestion(input) {
     return null
   }
   const allowedIntents = new Set(['cut','split','merge','mute','subtitle','trim_silence','chapter_suggest','unknown'])
+  const actionAliases = {
+    cut: 'remove',
+    cut_range: 'remove',
+    keep_range: 'keep',
+    split: 'split_at',
+    splitAt: 'split_at',
+    trimSilence: 'trim_silence',
+    addSubtitle: 'add_subtitle',
+    suggestChapter: 'suggest_chapter',
+  }
   const allowedActions = new Set(['remove','keep','split_at','mute','add_subtitle','trim_silence','suggest_chapter'])
   const suggestion = input && typeof input === 'object' ? input : {}
   const notes = Array.isArray(suggestion.notes) ? suggestion.notes.map((n) => `${n}`) : []
   const operations = Array.isArray(suggestion.operations) ? suggestion.operations : []
   const normalizedOperations = operations
     .map((operation) => {
-      if (!allowedActions.has(operation?.action)) {
+      const rawAction = typeof operation?.action === 'string' ? operation.action : ''
+      const normalizedAction = allowedActions.has(rawAction)
+        ? rawAction
+        : actionAliases[rawAction] || null
+      if (!normalizedAction) {
         notes.push('One or more operations used unsupported actions and were removed.')
         return null
       }
       return {
-        action: operation.action,
+        action: normalizedAction,
         start: typeof operation?.start === 'string' ? operation.start : null,
         end: typeof operation?.end === 'string' ? operation.end : null,
         text: typeof operation?.text === 'string' ? operation.text : null,
@@ -1074,11 +1088,35 @@ function normalizeAISuggestion(input) {
   if (normalizedIntent === 'unknown' && normalizedOperations.length > 0) {
     notes.push('Ambiguous intent detected; operations were cleared for safety.')
   }
+  const normalizedPrompt = `${sourcePrompt}`.toLowerCase()
+  let fallbackIntent = normalizedIntent
+  let fallbackOperations = safeOperations
+  if (normalizedIntent === 'unknown' && safeOperations.length === 0) {
+    if (/cut|remove/.test(normalizedPrompt) && /\d{1,2}:\d{2}/.test(normalizedPrompt)) {
+      const times = normalizedPrompt.match(/\d{1,2}:\d{2}(?:\.\d+)?/g) || []
+      fallbackIntent = 'cut'
+      fallbackOperations =
+        times.length >= 2
+          ? [{ action: 'remove', start: times[0], end: times[1], text: null }]
+          : []
+      notes.push('Fallback intent mapping used from prompt keywords.')
+    } else if (/split/.test(normalizedPrompt) && /\d{1,2}:\d{2}/.test(normalizedPrompt)) {
+      const time = (normalizedPrompt.match(/\d{1,2}:\d{2}(?:\.\d+)?/) || [null])[0]
+      fallbackIntent = 'split'
+      fallbackOperations = time ? [{ action: 'split_at', start: time, end: null, text: null }] : []
+      notes.push('Fallback intent mapping used from prompt keywords.')
+    } else if (/silent|silence/.test(normalizedPrompt)) {
+      fallbackIntent = 'trim_silence'
+      fallbackOperations = [{ action: 'trim_silence', start: null, end: null, text: null }]
+      notes.push('Fallback intent mapping used from prompt keywords.')
+    }
+  }
+
   return {
-    intent: normalizedIntent,
+    intent: fallbackIntent,
     needs_review: true,
     parameters: suggestion.parameters && typeof suggestion.parameters === 'object' ? suggestion.parameters : {},
-    operations: safeOperations,
+    operations: fallbackOperations,
     chapters,
     notes,
   }
@@ -1318,7 +1356,7 @@ const server = createServer(async (request, response) => {
               },
             ]
         const modelResponse = await callOllamaChat(messages)
-        let suggestion = normalizeAISuggestion(modelResponse.parsed)
+        let suggestion = normalizeAISuggestion(modelResponse.parsed, prompt)
         if (url.pathname === '/api/ai/chapter-suggestions') {
           suggestion.intent = 'chapter_suggest'
           if (!hasUsableChapters(suggestion.chapters) && transcript.length > 0) {
