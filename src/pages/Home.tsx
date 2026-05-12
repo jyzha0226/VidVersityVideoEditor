@@ -3771,14 +3771,18 @@ export default function HomePage(): JSX.Element {
           continue
         }
         if (subtitleSegments.length === 0) {
-          const shouldGenerate = window.confirm(
-            'Chapter suggestions require subtitles/transcript. No subtitles found. Generate subtitles now?',
-          )
           executionNotes.push(
-            shouldGenerate
-              ? 'Please generate subtitles first, then re-run chapter suggestion apply.'
-              : 'Chapter suggestion skipped: subtitles are required.',
+            'Automatic chapter split requires subtitles. Do you require assistance in adding subtitles?',
           )
+          setAiPendingSuggestion({
+            intent: 'subtitle',
+            needs_review: true,
+            parameters: { sourceIntent: 'chapter_suggest' },
+            operations: [{ action: 'add_subtitle', start: null, end: null, text: null }],
+            chapters: [],
+            notes: ['Subtitles are required before chapter suggestion can run.'],
+          })
+          shouldClearPendingSuggestion = false
           continue
         }
 
