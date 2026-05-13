@@ -16,8 +16,10 @@ import {
   Clapperboard,
   CircleX,
   Files,
+  Download,
   FolderArchive,
   HelpCircle,
+  History,
   Lightbulb,
   Mic,
   Moon,
@@ -55,14 +57,19 @@ import {
   type AudioActivityDetectionResult,
   cutEditorSessionToRange,
   createEditorSessionFromVideo,
+  deleteEditorSessionVersion,
   deleteSilenceRangesFromEditorSession,
   detectSilenceFromVideo,
   detectSilenceInEditorSession,
   downloadEditorSessionSourceFile,
+  downloadEditorSessionVersion,
   type EditorSessionState,
+  type EditorVersionInfo,
   exportEditorSessionVideo,
+  listEditorSessionVersions,
   mergeEditorSessionSegments,
   replaceEditorSessionSegments,
+  saveEditorSessionVersion,
   splitEditorSessionAtTime,
   generateSubtitlesFromVideo,
   updateEditorSessionCategory,
@@ -1464,6 +1471,20 @@ export default function HomePage(): JSX.Element {
   const [doneCategoryDraft, setDoneCategoryDraft] = useState('')
   const [doneCourseDraft, setDoneCourseDraft] = useState(EXISTING_COURSE_OPTIONS[0])
   const [doneNewCourseNameDraft, setDoneNewCourseNameDraft] = useState('')
+  const [isVersionsModalOpen, setIsVersionsModalOpen] = useState(false)
+  const [editorVersions, setEditorVersions] = useState<EditorVersionInfo[]>([])
+  const [versionsStatus, setVersionsStatus] =
+    useState<'idle' | 'loading' | 'error'>('idle')
+  const [versionsError, setVersionsError] = useState<string | null>(null)
+  const [saveVersionStatus, setSaveVersionStatus] =
+    useState<'idle' | 'saving' | 'error'>('idle')
+  const [saveVersionError, setSaveVersionError] = useState<string | null>(null)
+  const [deletingVersionName, setDeletingVersionName] = useState<string | null>(
+    null,
+  )
+  const [downloadingVersionName, setDownloadingVersionName] = useState<
+    string | null
+  >(null)
   const [cutRange, setCutRange] = useState<{ start: number; end: number }>({
     start: 0,
     end: 180,
@@ -3313,6 +3334,122 @@ export default function HomePage(): JSX.Element {
     handleCloseDoneActionModal()
   }
 
+  const loadEditorVersions = async (sessionId: string) => {
+    setVersionsStatus('loading')
+    setVersionsError(null)
+    try {
+      const list = await listEditorSessionVersions(sessionId)
+      setEditorVersions(list)
+      setVersionsStatus('idle')
+    } catch (error) {
+      setVersionsStatus('error')
+      setVersionsError(
+        error instanceof Error
+          ? error.message
+          : 'Could not load saved versions.',
+      )
+    }
+  }
+
+  const handleOpenVersionsModal = async () => {
+    setSaveVersionStatus('idle')
+    setSaveVersionError(null)
+    setDeletingVersionName(null)
+    setDownloadingVersionName(null)
+    setIsVersionsModalOpen(true)
+
+    const session = await ensureEditorSession()
+    if (!session) {
+      setVersionsStatus('error')
+      setVersionsError(
+        'Upload a video to start a session before viewing saved versions.',
+      )
+      return
+    }
+    await loadEditorVersions(session.sessionId)
+  }
+
+  const handleCloseVersionsModal = () => {
+    setIsVersionsModalOpen(false)
+    setSaveVersionStatus('idle')
+    setSaveVersionError(null)
+    setVersionsError(null)
+    setDeletingVersionName(null)
+    setDownloadingVersionName(null)
+  }
+
+  const handleSaveCurrentVersion = async () => {
+    const session = await ensureEditorSession()
+    if (!session) return
+
+    try {
+      setSaveVersionStatus('saving')
+      setSaveVersionError(null)
+
+      const syncedSession = await replaceEditorSessionSegments(
+        session.sessionId,
+        segments,
+        selectedId,
+        selectedCategory,
+      )
+      const result = await saveEditorSessionVersion(syncedSession.sessionId, {
+        segments,
+        subtitles: subtitleSegments,
+      })
+      setEditorVersions(result.versions)
+      setSaveVersionStatus('idle')
+    } catch (error) {
+      setSaveVersionStatus('error')
+      setSaveVersionError(
+        error instanceof Error
+          ? error.message
+          : 'Could not save the current edit as a new version.',
+      )
+    }
+  }
+
+  const handleDeleteEditorVersion = async (versionName: string) => {
+    if (!editorSessionId) return
+    try {
+      setDeletingVersionName(versionName)
+      setVersionsError(null)
+      const list = await deleteEditorSessionVersion(
+        editorSessionId,
+        versionName,
+      )
+      setEditorVersions(list)
+    } catch (error) {
+      setVersionsError(
+        error instanceof Error
+          ? error.message
+          : 'Could not delete the selected version.',
+      )
+    } finally {
+      setDeletingVersionName(null)
+    }
+  }
+
+  const handleDownloadEditorVersion = async (versionName: string) => {
+    if (!editorSessionId) return
+    try {
+      setDownloadingVersionName(versionName)
+      setVersionsError(null)
+      const rendered = await downloadEditorSessionVersion(
+        editorSessionId,
+        versionName,
+      )
+      downloadRenderedVideo(rendered)
+    } catch (error) {
+      setVersionsError(
+        error instanceof Error
+          ? error.message
+          : 'Could not download the selected version.',
+      )
+    } finally {
+      setDownloadingVersionName(null)
+    }
+  }
+
   const handleSubtitleFileSelected = async (
     event: React.ChangeEvent<HTMLInputElement>,
   ) => {
@@ -3470,6 +3607,7 @@ export default function HomePage(): JSX.Element {
       if (
         doneActionKind != null ||
         isCreateCategoryModalOpen ||
+        isVersionsModalOpen ||
         isEditorHotkeyTextEntryTarget(event.target)
       ) {
         return
@@ -4773,6 +4911,238 @@ export default function HomePage(): JSX.Element {
                   }`}
                 >
                   {doneActionKind ? getDoneActionConfirmLabel(doneActionKind) : 'Save'}
+                </button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog
+          open={isVersionsModalOpen}
+          onOpenChange={(open) => {
+            if (!open) {
+              handleCloseVersionsModal()
+            }
+          }}
+        >
+          <DialogContent
+            className={`sm:max-w-[560px] ${
+              isDark
+                ? 'border-[#243149] bg-[#0f172a] text-[#edf2ff]'
+                : 'border-[#e3e7ee] bg-white text-[#191c1e]'
+            }`}
+          >
+            <DialogHeader>
+              <DialogTitle>Saved versions</DialogTitle>
+            </DialogHeader>
+
+            <div className="space-y-4">
+              <p
+                className={`text-[12px] leading-5 ${
+                  isDark ? 'text-[#8aa0c4]' : 'text-[#515f74]'
+                }`}
+              >
+                The original upload is kept as <span className="font-semibold">_original</span>.
+                Each saved edit is stored with a <span className="font-semibold">_YYYYMMDD_HHMMSS</span>{' '}
+                timestamp. You can review what is already saved, remove versions
+                you no longer need, or save the current edit as a new version.
+              </p>
+
+              {versionsError ? (
+                <div
+                  className={`rounded-xl border px-3 py-2 text-[12px] ${
+                    isDark
+                      ? 'border-[#6f3a45] bg-[#3d1f24] text-[#ff8f9a]'
+                      : 'border-[#f0b8b8] bg-[#fdecec] text-[#a23535]'
+                  }`}
+                >
+                  {versionsError}
+                </div>
+              ) : null}
+
+              <div
+                className={`max-h-[260px] overflow-auto rounded-2xl border ${
+                  isDark
+                    ? 'border-[#243149] bg-[#111827]'
+                    : 'border-[#e3e7ee] bg-[#fbfcfd]'
+                }`}
+              >
+                {versionsStatus === 'loading' ? (
+                  <div
+                    className={`px-3 py-6 text-center text-[12px] ${
+                      isDark ? 'text-[#8aa0c4]' : 'text-[#515f74]'
+                    }`}
+                  >
+                    Loading saved versions...
+                  </div>
+                ) : editorVersions.length === 0 ? (
+                  <div
+                    className={`px-3 py-6 text-center text-[12px] ${
+                      isDark ? 'text-[#8aa0c4]' : 'text-[#515f74]'
+                    }`}
+                  >
+                    No saved versions yet for this session.
+                  </div>
+                ) : (
+                  <ul className="divide-y divide-transparent">
+                    {editorVersions.map((version) => {
+                      const isDeleting = deletingVersionName === version.fileName
+                      const isDownloading =
+                        downloadingVersionName === version.fileName
+                      const canDelete = !version.isOriginal && !version.isCurrent
+                      const sizeMb = version.sizeBytes / (1024 * 1024)
+                      const displayName = version.displayName.replace(
+                        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i,
+                        '',
+                      )
+                      const createdLabel = version.createdAt
+                        ? new Date(version.createdAt).toLocaleString()
+                        : ''
+                      return (
+                        <li
+                          key={version.fileName}
+                          className={`flex flex-col gap-2 border-b px-3 py-2 last:border-b-0 sm:flex-row sm:items-start sm:justify-between sm:gap-3 ${
+                            isDark
+                              ? 'border-[#243149]'
+                              : 'border-[#e3e7ee]'
+                          }`}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span
+                                className={`line-clamp-2 break-all text-[12px] font-semibold ${
+                                  isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'
+                                }`}
+                                title={displayName}
+                              >
+                                {displayName}
+                              </span>
+                              {version.isOriginal ? (
+                                <span
+                                  className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.16em] ${
+                                    isDark
+                                      ? 'border-[#3a6f59] text-[#8fffb1]'
+                                      : 'border-[#b8f0c9] text-[#1f7a3a]'
+                                  }`}
+                                >
+                                  Original
+                                </span>
+                              ) : null}
+                              {version.isCurrent ? (
+                                <span
+                                  className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.16em] ${
+                                    isDark
+                                      ? 'border-[#3a526f] text-[#8fbfff]'
+                                      : 'border-[#b8d4f0] text-[#003fb1]'
+                                  }`}
+                                >
+                                  Current
+                                </span>
+                              ) : null}
+                            </div>
+                            <div
+                              className={`mt-1 text-[10px] ${
+                                isDark ? 'text-[#8aa0c4]' : 'text-[#8a94a6]'
+                              }`}
+                            >
+                              {createdLabel}
+                              {sizeMb > 0
+                                ? ` · ${sizeMb.toFixed(sizeMb >= 10 ? 0 : 1)} MB`
+                                : ''}
+                            </div>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-2 self-end sm:self-start">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void handleDownloadEditorVersion(
+                                  version.fileName,
+                                )
+                              }}
+                              disabled={isDownloading}
+                              className={`flex h-8 items-center justify-center gap-1 rounded-full border px-2.5 text-[10px] font-bold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                                isDark
+                                  ? 'border-[#31415a] text-[#c6d3eb] hover:bg-[#182238]'
+                                  : 'border-[#d9dde5] text-[#515f74] hover:bg-[#f7f9fb]'
+                              }`}
+                            >
+                              <Download className="h-3.5 w-3.5" />
+                              {isDownloading ? '...' : 'Download'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void handleDeleteEditorVersion(version.fileName)
+                              }}
+                              disabled={!canDelete || isDeleting}
+                              title={
+                                !canDelete
+                                  ? version.isOriginal
+                                    ? 'The original version cannot be deleted.'
+                                    : 'The current active version cannot be deleted.'
+                                  : 'Delete this version'
+                              }
+                              className={`flex h-8 items-center justify-center gap-1 rounded-full border px-2.5 text-[10px] font-bold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                                isDark
+                                  ? 'border-[#6f3a45] text-[#ff8f9a] hover:bg-[#3d1f24]'
+                                  : 'border-[#f0b8b8] text-[#a23535] hover:bg-[#fdecec]'
+                              }`}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              {isDeleting ? '...' : 'Delete'}
+                            </button>
+                          </div>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                )}
+              </div>
+
+              {saveVersionError ? (
+                <div
+                  className={`rounded-xl border px-3 py-2 text-[12px] ${
+                    isDark
+                      ? 'border-[#6f3a45] bg-[#3d1f24] text-[#ff8f9a]'
+                      : 'border-[#f0b8b8] bg-[#fdecec] text-[#a23535]'
+                  }`}
+                >
+                  {saveVersionError}
+                </div>
+              ) : null}
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={handleCloseVersionsModal}
+                  className={`flex h-10 items-center justify-center rounded-xl border px-4 text-sm font-semibold transition ${
+                    isDark
+                      ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb] hover:bg-[#182238]'
+                      : 'border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb]'
+                  }`}
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleSaveCurrentVersion()
+                  }}
+                  disabled={
+                    saveVersionStatus === 'saving' ||
+                    editorStatus === 'syncing' ||
+                    (!selectedVideoFile && !editorSessionId)
+                  }
+                  className={`flex h-10 items-center justify-center gap-2 rounded-xl px-4 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                    isDark
+                      ? 'bg-[#1a56db] text-white hover:bg-[#2b67ec]'
+                      : 'bg-[#003fb1] text-white hover:bg-[#1a56db]'
+                  }`}
+                >
+                  <Save className="h-4 w-4" />
+                  {saveVersionStatus === 'saving'
+                    ? 'Saving Version...'
+                    : 'Save Current Edit as New Version'}
                 </button>
               </div>
             </div>
@@ -6527,6 +6897,21 @@ export default function HomePage(): JSX.Element {
                     }`}
                   >
                     <div className="grid grid-cols-1 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void handleOpenVersionsModal()
+                        }}
+                        disabled={!selectedVideoFile && !editorSessionId}
+                        className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                          isDark
+                            ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
+                            : 'border border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb] hover:text-[#003fb1]'
+                        }`}
+                      >
+                        <History className="h-4 w-4" />
+                        Save & Manage Versions
+                      </button>
                       <button
                         type="button"
                         onClick={() => handleOpenDoneActionModal('save-draft')}
