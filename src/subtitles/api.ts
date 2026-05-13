@@ -31,6 +31,7 @@ export interface EditorClipSegment {
   label: string
   start: number
   end: number
+  sourceRanges?: Array<{ start: number; end: number }>
 }
 
 export interface EditorSessionState {
@@ -73,6 +74,7 @@ interface EditorSessionApiResponse {
     label?: string
     start?: number
     end?: number
+    sourceRanges?: Array<{ start?: number; end?: number }>
   }>
   error?: string
 }
@@ -144,14 +146,31 @@ function normalizeEditorSegments(
   }
 
   return segments
-    .map((segment, index) => ({
-      id: Number(segment.id ?? index + 1),
-      label:
-        segment.label?.trim().replace(/^Clip\s+\d+$/i, `Chapter ${index + 1}`) ||
-        `Chapter ${index + 1}`,
-      start: Number(segment.start ?? 0),
-      end: Number(segment.end ?? 0),
-    }))
+    .map((segment, index) => {
+      const sourceRanges = Array.isArray(segment.sourceRanges)
+        ? segment.sourceRanges
+            .map((range) => ({
+              start: Number(range.start),
+              end: Number(range.end),
+            }))
+            .filter(
+              (range) =>
+                Number.isFinite(range.start) &&
+                Number.isFinite(range.end) &&
+                range.end > range.start,
+            )
+        : []
+
+      return {
+        id: Number(segment.id ?? index + 1),
+        label:
+          segment.label?.trim().replace(/^Clip\s+\d+$/i, `Chapter ${index + 1}`) ||
+          `Chapter ${index + 1}`,
+        start: Number(segment.start ?? sourceRanges[0]?.start ?? 0),
+        end: Number(segment.end ?? sourceRanges[sourceRanges.length - 1]?.end ?? 0),
+        ...(sourceRanges.length > 0 ? { sourceRanges } : {}),
+      }
+    })
     .filter(
       (segment) =>
         Number.isFinite(segment.id) &&

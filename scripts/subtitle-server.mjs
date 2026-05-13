@@ -159,9 +159,22 @@ function sanitizeEditorSegments(segments) {
 
   return segments
     .map((segment, index) => {
+      const sourceRanges = Array.isArray(segment?.sourceRanges)
+        ? segment.sourceRanges
+            .map((range) => ({
+              start: Number(range?.start),
+              end: Number(range?.end),
+            }))
+            .filter(
+              (range) =>
+                Number.isFinite(range.start) &&
+                Number.isFinite(range.end) &&
+                range.end > range.start,
+            )
+        : []
       const id = Number(segment?.id)
-      const start = Number(segment?.start)
-      const end = Number(segment?.end)
+      const start = Number(segment?.start ?? sourceRanges[0]?.start)
+      const end = Number(segment?.end ?? sourceRanges[sourceRanges.length - 1]?.end)
       const label =
         typeof segment?.label === 'string' && segment.label.trim().length > 0
           ? segment.label.trim()
@@ -175,7 +188,13 @@ function sanitizeEditorSegments(segments) {
         throw new Error('Clip segment end time must be greater than start time.')
       }
 
-      return { id, label, start, end }
+      return {
+        id,
+        label,
+        start,
+        end,
+        ...(sourceRanges.length > 0 ? { sourceRanges } : {}),
+      }
     })
 }
 
@@ -188,9 +207,33 @@ function relabelEditorSegments(segments) {
 
 function getEditorTimelineDuration(segments) {
   return segments.reduce(
-    (sum, segment) => sum + Math.max(0, segment.end - segment.start),
+    (sum, segment) =>
+      sum +
+      getEditorSegmentSourceRanges(segment).reduce(
+        (rangeSum, range) => rangeSum + Math.max(0, range.end - range.start),
+        0,
+      ),
     0,
   )
+}
+
+function getEditorSegmentSourceRanges(segment) {
+  const ranges =
+    Array.isArray(segment?.sourceRanges) && segment.sourceRanges.length > 0
+      ? segment.sourceRanges
+      : [{ start: segment.start, end: segment.end }]
+
+  return ranges
+    .map((range) => ({
+      start: Number(range.start),
+      end: Number(range.end),
+    }))
+    .filter(
+      (range) =>
+        Number.isFinite(range.start) &&
+        Number.isFinite(range.end) &&
+        range.end > range.start,
+    )
 }
 
 function normalizeEditorSegmentIds(segmentIds) {
@@ -221,6 +264,82 @@ function sanitizeCutSegmentIds(segmentIds) {
   }
 
   return normalizedIds
+}
+
+function mergeEditorSegments(segments, segmentIds, nextSegmentId) {
+  const selectedSegmentIds = sanitizeSelectedSegmentIds(segmentIds)
+  const selectedSegmentIdSet = new Set(selectedSegmentIds)
+  const selectedIndices = []
+
+  segments.forEach((segment, index) => {
+    if (selectedSegmentIdSet.has(segment.id)) {
+      selectedIndices.push(index)
+    }
+  })
+
+  if (selectedIndices.length !== selectedSegmentIds.length) {
+    throw new Error('One or more selected clips were not found in the editor session.')
+  }
+
+  const firstSelectedIndex = selectedIndices[0]
+  const lastSelectedIndex = selectedIndices[selectedIndices.length - 1]
+  if (lastSelectedIndex - firstSelectedIndex + 1 !== selectedIndices.length) {
+    throw new Error('Select adjacent clips to merge them into a single clip.')
+  }
+
+  const nextSegments = []
+  let mergedSegmentId = null
+  let cursorId = Number.isFinite(nextSegmentId) && nextSegmentId > 0 ? nextSegmentId : 1
+
+  for (let index = 0; index < segments.length; index += 1) {
+    if (index === firstSelectedIndex) {
+      const mergedSourceRanges = segments
+        .slice(firstSelectedIndex, lastSelectedIndex + 1)
+        .flatMap((segment) => getEditorSegmentSourceRanges(segment))
+      const firstRange = mergedSourceRanges[0]
+      const lastRange = mergedSourceRanges[mergedSourceRanges.length - 1]
+      const sourceContiguous =
+        mergedSourceRanges.length > 0 &&
+        mergedSourceRanges.every((range, rangeIndex) => {
+          if (rangeIndex === 0) return true
+          return Math.abs(range.start - mergedSourceRanges[rangeIndex - 1].end) < 0.001
+        })
+
+      if (!firstRange || !lastRange) {
+        throw new Error('Selected clips could not be merged.')
+      }
+
+      const mergedSegment = {
+        id: cursorId,
+        label: `Clip ${cursorId}`,
+        start: firstRange.start,
+        end: lastRange.end,
+      }
+      if (!sourceContiguous) {
+        mergedSegment.sourceRanges = mergedSourceRanges
+      }
+
+      nextSegments.push(mergedSegment)
+      mergedSegmentId = cursorId
+      cursorId += 1
+      index = lastSelectedIndex
+      continue
+    }
+
+    const segment = segments[index]
+    nextSegments.push({
+      ...segment,
+      id: cursorId,
+      label: `Clip ${cursorId}`,
+    })
+    cursorId += 1
+  }
+
+  return {
+    segments: relabelEditorSegments(nextSegments),
+    selectedSegmentId: mergedSegmentId,
+    nextSegmentId: cursorId,
+  }
 }
 
 function flattenMergedEditorSegments(segments, segmentIds) {
@@ -355,7 +474,7 @@ function remapDetectedSegmentsToSourceTimeline(selectedSegments, detectedSegment
   let analysisOffset = 0
   const remapped = []
 
-  selectedSegments.forEach((segment) => {
+  selectedSegments.flatMap((segment) => getEditorSegmentSourceRanges(segment)).forEach((segment) => {
     const segmentDuration = Math.max(0, segment.end - segment.start)
     const analysisSegmentStart = analysisOffset
     const analysisSegmentEnd = analysisOffset + segmentDuration
@@ -422,38 +541,40 @@ function removeSilenceRangesFromEditorSegments(segments, silenceRanges, nextSegm
   const nextSegments = []
 
   segments.forEach((segment) => {
-    let keepCursor = segment.start
+    getEditorSegmentSourceRanges(segment).forEach((sourceRange) => {
+      let keepCursor = sourceRange.start
 
-    normalizedRanges.forEach((range) => {
-      const overlapStart = Math.max(segment.start, range.start)
-      const overlapEnd = Math.min(segment.end, range.end)
+      normalizedRanges.forEach((range) => {
+        const overlapStart = Math.max(sourceRange.start, range.start)
+        const overlapEnd = Math.min(sourceRange.end, range.end)
 
-      if (overlapEnd <= overlapStart) {
-        return
-      }
+        if (overlapEnd <= overlapStart) {
+          return
+        }
 
-      if (overlapStart - keepCursor >= CUT_RANGE_MIN_GAP) {
+        if (overlapStart - keepCursor >= CUT_RANGE_MIN_GAP) {
+          nextSegments.push({
+            id: cursorId,
+            label: segment.label,
+            start: keepCursor,
+            end: overlapStart,
+          })
+          cursorId += 1
+        }
+
+        keepCursor = Math.max(keepCursor, overlapEnd)
+      })
+
+      if (sourceRange.end - keepCursor >= CUT_RANGE_MIN_GAP) {
         nextSegments.push({
           id: cursorId,
           label: segment.label,
           start: keepCursor,
-          end: overlapStart,
+          end: sourceRange.end,
         })
         cursorId += 1
       }
-
-      keepCursor = Math.max(keepCursor, overlapEnd)
     })
-
-    if (segment.end - keepCursor >= CUT_RANGE_MIN_GAP) {
-      nextSegments.push({
-        id: cursorId,
-        label: segment.label,
-        start: keepCursor,
-        end: segment.end,
-      })
-      cursorId += 1
-    }
   })
 
   if (nextSegments.length === 0) {
@@ -828,8 +949,9 @@ async function renderEditorSegmentsToFile(filePath, segments, outputPath) {
 
   const filterParts = []
   const concatInputs = []
+  const renderRanges = segments.flatMap((segment) => getEditorSegmentSourceRanges(segment))
 
-  segments.forEach((segment, index) => {
+  renderRanges.forEach((segment, index) => {
     filterParts.push(
       `[0:v]trim=start=${segment.start}:end=${segment.end},setpts=PTS-STARTPTS[v${index}]`,
     )
@@ -844,7 +966,7 @@ async function renderEditorSegmentsToFile(filePath, segments, outputPath) {
   })
 
   filterParts.push(
-    `${concatInputs.join('')}concat=n=${segments.length}:v=1:a=${hasAudio ? 1 : 0}[vout]${
+    `${concatInputs.join('')}concat=n=${renderRanges.length}:v=1:a=${hasAudio ? 1 : 0}[vout]${
       hasAudio ? '[aout]' : ''
     }`,
   )
@@ -1576,41 +1698,15 @@ const server = createServer(async (request, response) => {
       const sessionId =
         typeof payload?.sessionId === 'string' ? payload.sessionId : ''
       const session = getEditorSession(sessionId)
-      const nextState = flattenMergedEditorSegments(
+      const nextState = mergeEditorSegments(
         session.segments,
         payload?.segmentIds,
+        session.nextSegmentId,
       )
-      const mergedOutputPath = join(
-        EDITOR_SESSION_DIR,
-        `${session.id}-timeline-merge-${Date.now()}.mp4`,
-      )
-      let didReplaceSource = false
-
-      try {
-        await renderEditorSegmentsToFile(
-          session.filePath,
-          session.segments,
-          mergedOutputPath,
-        )
-
-        const previousFilePath = session.filePath
-        session.filePath = mergedOutputPath
-        session.duration = nextState.duration
-        session.segments = nextState.segments
-        session.selectedSegmentId = nextState.selectedSegmentId
-        session.nextSegmentId = Math.max(1, nextState.segments.length + 1)
-        didReplaceSource = true
-
-        if (previousFilePath !== mergedOutputPath) {
-          await rm(previousFilePath, { force: true }).catch(() => undefined)
-        }
-
-        sendJson(response, 200, serializeEditorSession(session))
-      } finally {
-        if (!didReplaceSource) {
-          await rm(mergedOutputPath, { force: true }).catch(() => undefined)
-        }
-      }
+      session.segments = nextState.segments
+      session.selectedSegmentId = nextState.selectedSegmentId
+      session.nextSegmentId = nextState.nextSegmentId
+      sendJson(response, 200, serializeEditorSession(session))
       return
     }
 

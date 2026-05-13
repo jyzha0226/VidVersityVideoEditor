@@ -18,6 +18,7 @@ import {
   Files,
   FolderArchive,
   HelpCircle,
+  Lightbulb,
   Mic,
   Moon,
   Pause,
@@ -109,6 +110,7 @@ interface ClipSegment {
   label: string
   start: number
   end: number
+  sourceRanges?: ClipSourceRange[]
 }
 
 interface AISuggestion {
@@ -123,6 +125,11 @@ interface TimelineThumbnail {
   id: string
   src: string
   time: number
+}
+
+interface ClipSourceRange {
+  start: number
+  end: number
 }
 
 interface OriginalTimelineSection {
@@ -470,8 +477,8 @@ function ToolbarButton({
           ? 'text-[#ffb7c0] hover:bg-[#2a1820]'
           : 'text-[#a23535] hover:bg-[#fff1f1]'
         : isDark
-          ? 'text-[#e6efff] hover:bg-[#22314a]'
-          : 'text-[#26354a] hover:bg-[#f2f4f6]'
+          ? 'text-[#8bb8ff] hover:bg-[#22314a]'
+          : 'text-[#1a56db] hover:bg-[#f2f4f6]'
     : danger
       ? isDark
         ? 'text-[#ff8f9a]/75 hover:bg-[#2a1820] hover:text-[#ffb7c0]'
@@ -837,6 +844,100 @@ function createInitialSegments(duration: number): ClipSegment[] {
   return [{ id: 1, label: 'Chapter 1', start: 0, end: safeDuration }]
 }
 
+function getClipSourceRanges(segment: ClipSegment): ClipSourceRange[] {
+  const ranges =
+    Array.isArray(segment.sourceRanges) && segment.sourceRanges.length > 0
+      ? segment.sourceRanges
+      : [{ start: segment.start, end: segment.end }]
+
+  return ranges
+    .map((range) => ({
+      start: Number(range.start),
+      end: Number(range.end),
+    }))
+    .filter(
+      (range) =>
+        Number.isFinite(range.start) &&
+        Number.isFinite(range.end) &&
+        range.end > range.start,
+    )
+}
+
+function getClipDuration(segment: ClipSegment): number {
+  return getClipSourceRanges(segment).reduce(
+    (sum, range) => sum + Math.max(0, range.end - range.start),
+    0,
+  )
+}
+
+function getClipSourceStart(segment: ClipSegment): number {
+  return getClipSourceRanges(segment)[0]?.start ?? segment.start
+}
+
+function getClipSourceEnd(segment: ClipSegment): number {
+  const ranges = getClipSourceRanges(segment)
+  return ranges[ranges.length - 1]?.end ?? segment.end
+}
+
+function isSourceTimeInsideClip(segment: ClipSegment, time: number): boolean {
+  return getClipSourceRanges(segment).some(
+    (range) => time >= range.start && time <= range.end,
+  )
+}
+
+function mapClipEditedOffsetToSourceTime(
+  segment: ClipSegment,
+  editedOffset: number,
+): number {
+  const ranges = getClipSourceRanges(segment)
+  if (ranges.length === 0) return segment.start
+
+  let consumedDuration = 0
+  const safeOffset = Math.max(0, editedOffset)
+
+  for (let index = 0; index < ranges.length; index += 1) {
+    const range = ranges[index]
+    const duration = range.end - range.start
+    const nextConsumedDuration = consumedDuration + duration
+    if (safeOffset <= nextConsumedDuration || index === ranges.length - 1) {
+      return range.start + clamp(safeOffset - consumedDuration, 0, duration)
+    }
+    consumedDuration = nextConsumedDuration
+  }
+
+  return ranges[ranges.length - 1].end
+}
+
+function mapSourceTimeToClipEditedOffset(
+  segment: ClipSegment,
+  sourceTime: number,
+): number {
+  const ranges = getClipSourceRanges(segment)
+  let consumedDuration = 0
+
+  for (const range of ranges) {
+    const duration = range.end - range.start
+    if (sourceTime >= range.start && sourceTime <= range.end) {
+      return consumedDuration + clamp(sourceTime - range.start, 0, duration)
+    }
+    consumedDuration += duration
+  }
+
+  return clamp(sourceTime - segment.start, 0, getClipDuration(segment))
+}
+
+function formatClipSourceRange(segment: ClipSegment): string {
+  const ranges = getClipSourceRanges(segment)
+  if (ranges.length <= 1) {
+    const range = ranges[0] ?? { start: segment.start, end: segment.end }
+    return `${formatClock(range.start)} - ${formatClock(range.end)}`
+  }
+
+  return ranges
+    .map((range) => `${formatClock(range.start)}-${formatClock(range.end)}`)
+    .join(', ')
+}
+
 function getDefaultChapterLabel(index: number): string {
   return `Chapter ${index + 1}`
 }
@@ -878,15 +979,17 @@ function preserveChapterLabels(
     const matches = normalizedNextSegments
       .map((segment, nextIndex) => ({ segment, nextIndex }))
       .filter(({ segment }) => {
-        const startsInside = segment.start >= previousSegment.start - tolerance
-        const endsInside = segment.end <= previousSegment.end + tolerance
+        const startsInside =
+          getClipSourceStart(segment) >= getClipSourceStart(previousSegment) - tolerance
+        const endsInside =
+          getClipSourceEnd(segment) <= getClipSourceEnd(previousSegment) + tolerance
         const overlaps =
-          segment.end > previousSegment.start + tolerance &&
-          segment.start < previousSegment.end - tolerance
+          getClipSourceEnd(segment) > getClipSourceStart(previousSegment) + tolerance &&
+          getClipSourceStart(segment) < getClipSourceEnd(previousSegment) - tolerance
 
         return startsInside && endsInside && overlaps
       })
-      .sort((left, right) => left.segment.start - right.segment.start)
+      .sort((left, right) => getClipSourceStart(left.segment) - getClipSourceStart(right.segment))
 
     if (matches.length === 0) {
       return
@@ -922,8 +1025,9 @@ function isTimelineUnedited(
   }
 
   return (
-    Math.abs(segment.start) < 0.001 &&
-    Math.abs(segment.end - videoDuration) < 0.001
+    Math.abs(getClipSourceStart(segment)) < 0.001 &&
+    Math.abs(getClipSourceEnd(segment) - videoDuration) < 0.001 &&
+    getClipSourceRanges(segment).length === 1
   )
 }
 
@@ -1045,7 +1149,7 @@ function buildTimelineSegmentLayouts(
   let selectedOffset = 0
 
   return segments.map((segment) => {
-    const duration = Math.max(0, segment.end - segment.start)
+    const duration = getClipDuration(segment)
     const isSelected = selectedSegmentIdSet.has(segment.id)
     const layout: TimelineSegmentLayout = {
       segmentId: segment.id,
@@ -1144,7 +1248,9 @@ function getSegmentTimelineFrames(
 
   const frames = thumbnails.filter(
     (thumbnail) =>
-      thumbnail.time >= segment.start && thumbnail.time < segment.end,
+      getClipSourceRanges(segment).some(
+        (range) => thumbnail.time >= range.start && thumbnail.time < range.end,
+      ),
   )
 
   if (frames.length > 0) {
@@ -1155,12 +1261,12 @@ function getSegmentTimelineFrames(
     if (closest == null) return thumbnail
 
     const thumbnailDistance = Math.min(
-      Math.abs(thumbnail.time - segment.start),
-      Math.abs(thumbnail.time - segment.end),
+      Math.abs(thumbnail.time - getClipSourceStart(segment)),
+      Math.abs(thumbnail.time - getClipSourceEnd(segment)),
     )
     const closestDistance = Math.min(
-      Math.abs(closest.time - segment.start),
-      Math.abs(closest.time - segment.end),
+      Math.abs(closest.time - getClipSourceStart(segment)),
+      Math.abs(closest.time - getClipSourceEnd(segment)),
     )
 
     return thumbnailDistance < closestDistance ? thumbnail : closest
@@ -1178,16 +1284,17 @@ function buildOriginalTimelineSections(
     return []
   }
 
-  const sortedSegments = [...segments]
-    .filter((segment) => segment.end > segment.start)
+  const sortedRanges = segments
+    .flatMap((segment) => getClipSourceRanges(segment))
+    .filter((range) => range.end > range.start)
     .sort((left, right) => left.start - right.start)
 
   const sections: OriginalTimelineSection[] = []
   let cursor = 0
 
-  sortedSegments.forEach((segment) => {
-    const start = clamp(segment.start, 0, safeDuration)
-    const end = clamp(segment.end, 0, safeDuration)
+  sortedRanges.forEach((range) => {
+    const start = clamp(range.start, 0, safeDuration)
+    const end = clamp(range.end, 0, safeDuration)
 
     if (start > cursor) {
       sections.push({
@@ -1231,7 +1338,7 @@ function buildOriginalTimelineMarkers(
 
   return segments
     .slice(1)
-    .map((segment) => clamp(segment.start, 0, safeDuration))
+    .map((segment) => clamp(getClipSourceStart(segment), 0, safeDuration))
     .filter((value) => value > 0 && value < safeDuration)
     .filter((value) => {
       const key = value.toFixed(3)
@@ -1284,13 +1391,8 @@ export default function HomePage(): JSX.Element {
   const [guidedMode, setGuidedMode] = useState(true)
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false)
   const [aiPromptDraft, setAiPromptDraft] = useState('')
-  const [aiMessages, setAiMessages] = useState<AIDraftMessage[]>([
-    {
-      id: 'assistant-seed',
-      role: 'assistant',
-      text: 'AI actions will appear here once the backend is connected. For now, suggestion chips can prefill a request and Send stores it in this workspace panel.',
-    },
-  ])
+  const [areAIQuickActionsVisible, setAreAIQuickActionsVisible] = useState(true)
+  const [aiMessages, setAiMessages] = useState<AIDraftMessage[]>([])
   const [aiPendingSuggestion, setAiPendingSuggestion] = useState<AIEditSuggestion | null>(
     null,
   )
@@ -1371,6 +1473,7 @@ export default function HomePage(): JSX.Element {
   const videoPreviewRef = useRef<VideoPreviewHandle | null>(null)
   const timelineScrollRef = useRef<HTMLDivElement | null>(null)
   const timelineTrackRef = useRef<HTMLDivElement | null>(null)
+  const aiChatEndRef = useRef<HTMLDivElement | null>(null)
   const shouldCenterPlayheadAfterZoomRef = useRef(false)
   const subtitleUploadInputRef = useRef<HTMLInputElement | null>(null)
   const appendVideoInputRef = useRef<HTMLInputElement | null>(null)
@@ -1613,11 +1716,11 @@ export default function HomePage(): JSX.Element {
     videoDuration && videoDuration > 0
       ? videoDuration
       : segments.length > 0
-        ? segments[segments.length - 1].end
+        ? Math.max(...segments.map((segment) => getClipSourceEnd(segment)))
         : 180
   const editedDuration = Math.max(
     0,
-    segments.reduce((sum, segment) => sum + (segment.end - segment.start), 0),
+    segments.reduce((sum, segment) => sum + getClipDuration(segment), 0),
   )
   const segmentTimelineLayouts = useMemo(
     () => buildTimelineSegmentLayouts(segments, new Set(orderedSelectedSegmentIds)),
@@ -1654,7 +1757,7 @@ export default function HomePage(): JSX.Element {
   const cutRangeEndRatio =
     editedDuration > 0 ? cutRangeEndEditedTime / editedDuration : 1
   const timelinePlayheadSegmentIndex = segments.findIndex(
-    (segment) => currentTime >= segment.start && currentTime <= segment.end,
+    (segment) => isSourceTimeInsideClip(segment, currentTime),
   )
   const activeTimelineSegmentIndex =
     timelinePlayheadSegmentIndex >= 0 ? timelinePlayheadSegmentIndex : selectedIndex
@@ -1664,16 +1767,12 @@ export default function HomePage(): JSX.Element {
     activeTimelineSegmentIndex > 0
       ? segments
           .slice(0, activeTimelineSegmentIndex)
-          .reduce((sum, segment) => sum + (segment.end - segment.start), 0)
+          .reduce((sum, segment) => sum + getClipDuration(segment), 0)
       : 0
   const timelinePlayheadEditedTime = activeTimelineSegment
     ? clamp(
         activeTimelineSegmentOffset +
-          clamp(
-            currentTime - activeTimelineSegment.start,
-            0,
-            Math.max(activeTimelineSegment.end - activeTimelineSegment.start, 0),
-          ),
+          mapSourceTimeToClipEditedOffset(activeTimelineSegment, currentTime),
         0,
         editedDuration,
       )
@@ -1908,7 +2007,7 @@ export default function HomePage(): JSX.Element {
     setPreviewPlaybackMode('edited')
     const safeTime = Math.max(0, Math.min(timeInSeconds, totalDuration))
     const containingSegment = segments.find(
-      (segment) => safeTime >= segment.start && safeTime <= segment.end,
+      (segment) => isSourceTimeInsideClip(segment, safeTime),
     )
     if (containingSegment) {
       setSelectedId(containingSegment.id)
@@ -1945,13 +2044,14 @@ export default function HomePage(): JSX.Element {
 
     for (let index = 0; index < segments.length; index += 1) {
       const segment = segments[index]
-      const segmentDuration = Math.max(segment.end - segment.start, 0)
+      const segmentDuration = getClipDuration(segment)
       const nextConsumedDuration = consumedDuration + segmentDuration
 
       if (safeEditedTime <= nextConsumedDuration || index === segments.length - 1) {
-        const nextTime =
-          segment.start +
-          clamp(safeEditedTime - consumedDuration, 0, Math.max(segmentDuration, 0))
+        const nextTime = mapClipEditedOffsetToSourceTime(
+          segment,
+          clamp(safeEditedTime - consumedDuration, 0, segmentDuration),
+        )
         handleSeek(nextTime)
         return
       }
@@ -2027,20 +2127,17 @@ export default function HomePage(): JSX.Element {
     }
   }
 
-	  const handleRemoveSilence = async () => {
-	    setActiveWorkflowStep('polish')
-	    if (rightPanelView === 'silence' && !isRightPanelCollapsed) {
-      setIsRightPanelCollapsed(true)
-      setIsCutModeEnabled(false)
-      setActiveCutHandle(null)
-      return
-    }
-
+  const openSilenceReviewPanel = () => {
+    setActiveWorkflowStep('polish')
     previousWorkspaceViewRef.current = 'silence'
     setRightPanelView('silence')
     setIsCutModeEnabled(false)
     setActiveCutHandle(null)
     setIsRightPanelCollapsed(false)
+  }
+
+  const handleDetectSilence = async () => {
+    openSilenceReviewPanel()
 
     const isUneditedTimeline = isTimelineUnedited(segments, videoDuration)
     const silenceDetectionOptions = {
@@ -2463,7 +2560,7 @@ export default function HomePage(): JSX.Element {
           return sum
         }
 
-        return sum + (segment.end - segment.start)
+        return sum + getClipDuration(segment)
       }, 0)
       setCutRange(buildFullCutRange(nextSelectedDuration))
 
@@ -2640,14 +2737,6 @@ export default function HomePage(): JSX.Element {
         session.sessionId,
         orderedSelectedSegmentIds,
       )
-      const mergedSourceFile = await downloadEditorSessionSourceFile(
-        nextSession.sessionId,
-      )
-      const mergedSourceUrl = URL.createObjectURL(mergedSourceFile)
-      const remappedSubtitles =
-        subtitleSegments.length > 0
-          ? remapSubtitlesToEditedTimeline(subtitleSegments, session.segments)
-          : []
       const nextSegments = preserveChapterLabels(segments, nextSession.segments)
       const nextSelectedSegment =
         (nextSession.selectedSegmentId != null
@@ -2656,16 +2745,17 @@ export default function HomePage(): JSX.Element {
             ) ?? null
           : null) ?? nextSegments[0] ?? null
 
-      setSelectedVideoFile(mergedSourceFile)
-      setVideoSourceUrl(mergedSourceUrl)
-      setVideoDuration(nextSession.duration)
       setSegments(nextSegments)
       applyClipSelection(
         nextSegments,
         nextSelectedSegment ? [nextSelectedSegment.id] : [],
         nextSelectedSegment?.id ?? null,
       )
-      setCurrentTime(nextSelectedSegment?.start ?? 0)
+      const nextSeekTime = nextSelectedSegment
+        ? getClipSourceStart(nextSelectedSegment)
+        : 0
+      videoPreviewRef.current?.seekTo(nextSeekTime)
+      setCurrentTime(nextSeekTime)
       setHistory((prev) => [...prev.slice(-29), previousState])
       setRedoHistory([])
       setEditorStatus('ready')
@@ -2676,12 +2766,8 @@ export default function HomePage(): JSX.Element {
       setSelectedSilenceSegmentKeys([])
       setStagedSilenceSegmentKeys([])
       setSilenceNotice(
-        'The merge rebuilt the working source media. Run silence detection again if you want to review the merged timeline.',
+        'Run silence detection again if you want to review the merged timeline.',
       )
-      if (subtitleSegments.length > 0) {
-        setSubtitleSegments(remappedSubtitles)
-        setSubtitleTimingDrafts({})
-      }
       setChapterNameDrafts({})
     } catch (error) {
       setEditorStatus('error')
@@ -3275,18 +3361,12 @@ export default function HomePage(): JSX.Element {
     } else {
       if (previewPlaybackMode === 'edited' && selectedSegment) {
         const currentPreviewTime = videoPreviewRef.current.getCurrentTime()
-        const clipEndBoundary = Math.max(
-          selectedSegment.start,
-          selectedSegment.end - 0.05,
-        )
 
-        if (
-          currentPreviewTime < selectedSegment.start ||
-          currentPreviewTime >= clipEndBoundary
-        ) {
+        if (!isSourceTimeInsideClip(selectedSegment, currentPreviewTime)) {
+          const clipStart = getClipSourceStart(selectedSegment)
           resetClipHotkeyNavigation()
-          videoPreviewRef.current.seekTo(selectedSegment.start)
-          setCurrentTime(selectedSegment.start)
+          videoPreviewRef.current.seekTo(clipStart)
+          setCurrentTime(clipStart)
         }
       }
       videoPreviewRef.current.play()
@@ -3502,15 +3582,26 @@ export default function HomePage(): JSX.Element {
       return
     }
 
-    const clipEndBoundary = Math.max(
-      selectedSegment.start,
-      selectedSegment.end - 0.05,
+    const ranges = getClipSourceRanges(selectedSegment)
+    const currentRange = ranges.find(
+      (range) => currentTime >= range.start && currentTime < range.end - 0.05,
     )
 
-    if (currentTime < clipEndBoundary) {
+    if (currentRange) {
       return
     }
 
+    const nextRange = ranges.find((range) => currentTime < range.start)
+    if (nextRange) {
+      videoPreviewRef.current.seekTo(nextRange.start)
+      setCurrentTime(nextRange.start)
+      return
+    }
+
+    const clipEndBoundary = Math.max(
+      getClipSourceStart(selectedSegment),
+      getClipSourceEnd(selectedSegment) - 0.05,
+    )
     videoPreviewRef.current.pause()
     videoPreviewRef.current.seekTo(clipEndBoundary)
     setCurrentTime(clipEndBoundary)
@@ -3567,6 +3658,7 @@ export default function HomePage(): JSX.Element {
       },
     ])
     setAiPromptDraft('')
+    setAreAIQuickActionsVisible(false)
     setAiRequestStatus('sending')
 
     try {
@@ -3605,6 +3697,23 @@ export default function HomePage(): JSX.Element {
       ])
     }
   }
+
+  useEffect(() => {
+    if (rightPanelView !== 'ai' || isRightPanelCollapsed) return
+
+    const frameId = window.requestAnimationFrame(() => {
+      aiChatEndRef.current?.scrollIntoView({ block: 'end', behavior: 'smooth' })
+    })
+
+    return () => window.cancelAnimationFrame(frameId)
+  }, [
+    aiMessages,
+    aiPendingSuggestion,
+    aiRequestStatus,
+    isApplyingAISuggestion,
+    isRightPanelCollapsed,
+    rightPanelView,
+  ])
 
   useEffect(() => {
     if (!isTimelineDragging) return
@@ -5119,9 +5228,8 @@ export default function HomePage(): JSX.Element {
 	                          tooltip="Find silent parts you may want to remove."
 	                          guidedMode={guidedMode}
 	                          isDark={isDark}
-	                          onClick={handleRemoveSilence}
+	                          onClick={openSilenceReviewPanel}
 	                          icon={Mic}
-	                          disabled={silenceStatus === 'processing'}
 	                          active={rightPanelView === 'silence' && !isRightPanelCollapsed}
 	                          emphasized={activeWorkflowStep === 'polish'}
 	                          tone="editor"
@@ -5275,7 +5383,7 @@ export default function HomePage(): JSX.Element {
                               }`}
                             >
                               {segments.map((segment) => {
-                                const duration = Math.max(0.1, segment.end - segment.start)
+                                const duration = Math.max(0.1, getClipDuration(segment))
                                 const isPrimarySelected = selectedId === segment.id
                                 const isSelected = selectedSegmentIdSet.has(segment.id)
                                 const isDragTarget =
@@ -5396,9 +5504,10 @@ export default function HomePage(): JSX.Element {
                                         0,
                                         1,
                                       )
-                                      const nextTime =
-                                        segment.start +
-                                        (segment.end - segment.start) * ratio
+                                      const nextTime = mapClipEditedOffsetToSourceTime(
+                                        segment,
+                                        getClipDuration(segment) * ratio,
+                                      )
                                       selectSingleClip(segment.id)
                                       handleSeek(nextTime)
                                       setIsTimelineDragging(true)
@@ -5478,7 +5587,7 @@ export default function HomePage(): JSX.Element {
                                                 : 'text-white/95'
                                           }`}
                                         >
-                                          Source {formatClock(segment.start)} - {formatClock(segment.end)}
+                                          Source {formatClipSourceRange(segment)}
                                         </span>
                                       </div>
                                     </div>
@@ -5811,7 +5920,7 @@ export default function HomePage(): JSX.Element {
                         guidedMode={guidedMode}
                         isDark={isDark}
                         onClick={() => {
-                          void handleRemoveSilence()
+                          void handleDetectSilence()
                         }}
                         icon={Mic}
                         disabled={silenceStatus === 'processing'}
@@ -5884,7 +5993,7 @@ export default function HomePage(): JSX.Element {
                             : 'border-[#c3c5d7] bg-[#fbfcfd] text-[#737686]'
                         }`}
                       >
-                        No silence ranges to review yet. Run Silencer to inspect
+                        No silence ranges to review yet. Click Detect to inspect
                         the full video when untouched, or all clips in the
                         current edit after you make timeline changes.
                       </div>
@@ -5934,8 +6043,7 @@ export default function HomePage(): JSX.Element {
                                         : 'bg-[#f2f4f6] text-[#515f74]'
                                     }`}
                                   >
-                                    {formatEditableTimestamp(segment.start)} -{' '}
-                                    {formatEditableTimestamp(segment.end)}
+                                    {formatClipSourceRange(segment)}
                                   </span>
                                   <span
                                     className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.14em] ${
@@ -6040,8 +6148,7 @@ export default function HomePage(): JSX.Element {
                                         : 'bg-white text-[#57657a]'
                                     }`}
                                   >
-                                    {formatEditableTimestamp(segment.start)} -{' '}
-                                    {formatEditableTimestamp(segment.end)}
+                                    {formatClipSourceRange(segment)}
                                   </span>
                                 </div>
 
@@ -6096,10 +6203,10 @@ export default function HomePage(): JSX.Element {
                                 {(() => {
                                   const thumbnailTimeDraft =
                                     chapterThumbnailDrafts[segment.id] ??
-                                    formatEditableTimestamp(segment.start)
+                                    formatEditableTimestamp(getClipSourceStart(segment))
                                   const thumbnailSeconds =
                                     parseEditableTimestamp(thumbnailTimeDraft) ??
-                                    segment.start
+                                    getClipSourceStart(segment)
                                   const thumbnail = timelineThumbnails.reduce<TimelineThumbnail | null>(
                                     (closest, frame) => {
                                       const distance = Math.abs(frame.time - thumbnailSeconds)
@@ -6154,7 +6261,7 @@ export default function HomePage(): JSX.Element {
                                     </button>
                                     <button
                                       type="button"
-                                      onClick={() => handleSeek(segment.start)}
+                                      onClick={() => handleSeek(getClipSourceStart(segment))}
                                       className="rounded-full bg-[#003fb1] px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-white"
                                     >
                                       Go To
@@ -6525,34 +6632,53 @@ export default function HomePage(): JSX.Element {
               ) : (
                 <>
                   <div className="mb-4 flex items-center gap-3">
-                    <div
-                      className={`flex h-11 w-11 items-center justify-center rounded-2xl ${
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setAreAIQuickActionsVisible((isVisible) => !isVisible)
+                      }
+                      className={`flex h-11 w-11 items-center justify-center rounded-2xl transition ${
                         isDark
-                          ? 'bg-[#1b3566] text-[#9ec5ff]'
-                          : 'bg-[#eef3ff] text-[#003fb1]'
+                          ? 'bg-[#1b3566] text-[#9ec5ff] hover:bg-[#234178]'
+                          : 'bg-[#eef3ff] text-[#003fb1] hover:bg-[#dce8ff]'
                       }`}
+                      aria-pressed={areAIQuickActionsVisible}
+                      aria-label={
+                        areAIQuickActionsVisible
+                          ? 'Hide AI quick suggestions'
+                          : 'Show AI quick suggestions'
+                      }
+                      title={
+                        areAIQuickActionsVisible
+                          ? 'Hide AI quick suggestions'
+                          : 'Show AI quick suggestions'
+                      }
                     >
-                      <Send className="h-5 w-5" />
-                    </div>
+                      <Lightbulb className="h-5 w-5" />
+                    </button>
                   </div>
 
-                  <div className="mb-4 flex flex-wrap gap-2">
-                    {AI_QUICK_ACTIONS.map((item) => (
-                      <button
-                        key={item}
-                        type="button"
-                        disabled={!videoSourceUrl && !selectedVideoFile}
-                        onClick={() => setAiPromptDraft(item)}
-                        className={`rounded-full border px-3 py-2 text-left text-[12px] transition ${
-                          isDark
-                            ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb] hover:border-[#4b6388] hover:bg-[#131f33]'
-                            : 'border-[#d9dde5] bg-white text-[#515f74] hover:border-[#7aa4ff] hover:bg-[#f6f9ff]'
-                        } disabled:cursor-not-allowed disabled:opacity-45`}
-                      >
-                        {item}
-                      </button>
-                    ))}
-                  </div>
+                  {areAIQuickActionsVisible ? (
+                    <div className="mb-4 flex flex-wrap gap-2">
+                      {AI_QUICK_ACTIONS.map((item) => (
+                        <button
+                          key={item}
+                          type="button"
+                          disabled={!videoSourceUrl && !selectedVideoFile}
+                          onClick={() => {
+                            setAiPromptDraft(item)
+                          }}
+                          className={`rounded-full border px-3 py-2 text-left text-[12px] transition ${
+                            isDark
+                              ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb] hover:border-[#4b6388] hover:bg-[#131f33]'
+                              : 'border-[#d9dde5] bg-white text-[#515f74] hover:border-[#7aa4ff] hover:bg-[#f6f9ff]'
+                          } disabled:cursor-not-allowed disabled:opacity-45`}
+                        >
+                          {item}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
 
                   <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
                     <div className="flex-1 space-y-3 overflow-y-auto pr-1">
@@ -6623,10 +6749,36 @@ export default function HomePage(): JSX.Element {
                           </div>
                         </div>
                       )}
+                      <div ref={aiChatEndRef} />
                     </div>
 
                     <div
-                      className={`mt-4 flex items-end gap-2 rounded-2xl border px-3 py-3 ${
+                      className={`mt-4 rounded-2xl border px-3 py-2 text-[12px] font-semibold shadow-sm ${
+                        aiRequestStatus === 'error'
+                          ? isDark
+                            ? 'border-[#7f1d1d] bg-[#2a1218] text-[#fecdd3]'
+                            : 'border-[#fecaca] bg-[#fff1f2] text-[#9f1239]'
+                          : aiRequestStatus === 'success'
+                            ? isDark
+                              ? 'border-[#1d4f3a] bg-[#10231b] text-[#bbf7d0]'
+                              : 'border-[#bbf7d0] bg-[#f0fdf4] text-[#166534]'
+                            : aiRequestStatus === 'sending'
+                              ? isDark
+                                ? 'border-[#1b3566] bg-[#102345] text-[#bfdbfe]'
+                                : 'border-[#bfdbfe] bg-[#eff6ff] text-[#1d4ed8]'
+                              : isDark
+                                ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb]'
+                                : 'border-[#d9dde5] bg-[#f8fbff] text-[#334155]'
+                      }`}
+                    >
+                      {aiRequestStatus === 'sending' && 'AI is preparing your suggestion...'}
+                      {aiRequestStatus === 'success' && 'Suggestion is ready. Review it and choose Apply or Cancel.'}
+                      {aiRequestStatus === 'error' && 'AI request failed. Please try again.'}
+                      {aiRequestStatus === 'idle' && 'Enter your request and click Send.'}
+                    </div>
+
+                    <div
+                      className={`mt-3 flex items-end gap-2 rounded-2xl border px-3 py-3 ${
                         isDark
                           ? 'border-[#31415a] bg-[#111827]'
                           : 'border-[#d9dde5] bg-white'
@@ -6666,12 +6818,6 @@ export default function HomePage(): JSX.Element {
                         <Send className="h-4 w-4" />
                       </button>
                     </div>
-                    <p className="mt-2 text-[11px] opacity-70">
-                      {aiRequestStatus === 'sending' && 'AI is preparing your suggestion...'}
-                      {aiRequestStatus === 'success' && 'Suggestion is ready. Review it and choose Apply or Cancel.'}
-                      {aiRequestStatus === 'error' && 'AI request failed. Please try again.'}
-                      {aiRequestStatus === 'idle' && 'Enter your request and click Send.'}
-                    </p>
                     {!videoSourceUrl && !selectedVideoFile && (
                       <p className="mt-1 text-[11px] font-medium text-amber-500">
                         Upload a video first to enable AI Workspace suggestions.
