@@ -3334,6 +3334,35 @@ export default function HomePage(): JSX.Element {
     handleCloseDoneActionModal()
   }
 
+  const formatVersionDialogError = (
+    error: unknown,
+    fallbackMessage: string,
+  ): string => {
+    const rawMessage = error instanceof Error ? error.message : fallbackMessage
+    const message = rawMessage.trim()
+
+    if (
+      /route not found|not support|cannot (save|download|delete|list).*version/i.test(
+        message,
+      )
+    ) {
+      return 'The subtitle server is running, but this route is unavailable. Restart the server with the latest code (`npm run subtitles:server`).'
+    }
+
+    if (/failed to fetch|networkerror|load failed|fetch failed/i.test(message)) {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        return 'Network appears offline. Reconnect and try again.'
+      }
+      return 'Cannot reach the local subtitle server at http://127.0.0.1:8787. Start it with `npm run subtitles:server` and try again.'
+    }
+
+    if (/ECONNREFUSED|ENOTFOUND|ERR_CONNECTION_REFUSED/i.test(message)) {
+      return 'Could not connect to the local subtitle server. Make sure it is running on port 8787.'
+    }
+
+    return message.length > 0 ? message : fallbackMessage
+  }
+
   const loadEditorVersions = async (sessionId: string) => {
     setVersionsStatus('loading')
     setVersionsError(null)
@@ -3344,9 +3373,7 @@ export default function HomePage(): JSX.Element {
     } catch (error) {
       setVersionsStatus('error')
       setVersionsError(
-        error instanceof Error
-          ? error.message
-          : 'Could not load saved versions.',
+        formatVersionDialogError(error, 'Could not load saved versions.'),
       )
     }
   }
@@ -3401,9 +3428,10 @@ export default function HomePage(): JSX.Element {
     } catch (error) {
       setSaveVersionStatus('error')
       setSaveVersionError(
-        error instanceof Error
-          ? error.message
-          : 'Could not save the current edit as a new version.',
+        formatVersionDialogError(
+          error,
+          'Could not save the current edit as a new version.',
+        ),
       )
     }
   }
@@ -3420,9 +3448,7 @@ export default function HomePage(): JSX.Element {
       setEditorVersions(list)
     } catch (error) {
       setVersionsError(
-        error instanceof Error
-          ? error.message
-          : 'Could not delete the selected version.',
+        formatVersionDialogError(error, 'Could not delete the selected version.'),
       )
     } finally {
       setDeletingVersionName(null)
@@ -3441,9 +3467,10 @@ export default function HomePage(): JSX.Element {
       downloadRenderedVideo(rendered)
     } catch (error) {
       setVersionsError(
-        error instanceof Error
-          ? error.message
-          : 'Could not download the selected version.',
+        formatVersionDialogError(
+          error,
+          'Could not download the selected version.',
+        ),
       )
     } finally {
       setDownloadingVersionName(null)
