@@ -186,6 +186,70 @@ type DoneActionKind =
 
 const CUT_RANGE_MIN_GAP = 0.1
 
+/** Used when AI returns trim_silence but omits numeric duration — avoids deleting every detected gap */
+const DEFAULT_AI_TRIM_SILENCE_SECONDS = 3
+/** Detector API min-gap: keep low so server returns gaps; trim threshold applied client-side afterward */
+const TRIM_SILENCE_DETECT_ENUM_SECONDS = 0.45
+
+function parsePositiveSecondsForAISilence(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value > 0 ? value : null
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    const direct = Number(trimmed)
+    if (Number.isFinite(direct) && direct > 0) return direct
+    const matched = trimmed.match(/(\d+(?:\.\d+)?)/)
+    if (!matched) return null
+    const parsed = Number(matched[1])
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+  }
+  return null
+}
+
+function readTrimSilenceSecondsFromParameters(
+  params: Record<string, unknown>,
+): number | null {
+  const keys = [
+    'minSilenceSeconds',
+    'minSilenceDuration',
+    'thresholdSeconds',
+    'min_silence_seconds',
+    'min_silence_duration',
+    'threshold_seconds',
+    'silentGapMinSeconds',
+  ]
+  for (const key of keys) {
+    const parsed = parsePositiveSecondsForAISilence(params[key])
+    if (parsed != null) return parsed
+  }
+  return null
+}
+
+/** Parse phrases like “longer than 3 seconds” from assistant notes / user chat */
+function inferTrimSilenceThresholdFromTextBlob(blob: string): number | null {
+  const text = blob.trim().toLowerCase()
+  if (!text) return null
+  const patterns = [
+    /(?:only\s+)?(?:long\s+silent\s+parts?\s+)?longer\s+than\s+(\d+(?:\.\d+)?)/i,
+    /more\s+than\s+(\d+(?:\.\d+)?)/i,
+    /at\s+least\s+(\d+(?:\.\d+)?)\s*(?:s(?:ec(?:onds?)?)?|seconds?)?/i,
+    /greater\s+than\s+(\d+(?:\.\d+)?)/i,
+    /over\s+(\d+(?:\.\d+)?)\s*(?:s(?:ec(?:onds?)?)?|seconds?)?/i,
+    />\s*(\d+(?:\.\d+)?)\s*(?:s(?:ec(?:onds?)?)?|seconds?)?\b/i,
+    /minimum\s+(?:silent\s+|silence\s+)?(?:pause|gap|silence\s+gap)\s+(?:of\s+)?(\d+(?:\.\d+)?)/i,
+    /(\d+(?:\.\d+)?)\s*(?:seconds?|secs)\b/i,
+    /(?:remove|trim|cut)\s+.{0,40}?(\d+(?:\.\d+)?)\s*(?:second|seconds|sec)s?\b/i,
+  ]
+  for (const re of patterns) {
+    const match = blob.match(re)
+    if (!match?.[1]) continue
+    const n = Number(match[1])
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  return null
+}
+
 interface ToolbarButtonProps {
   label: string
   tooltip: string
@@ -4245,58 +4309,69 @@ export default function HomePage(): JSX.Element {
         try {
           setEditorStatus('syncing')
           const previousState = captureEditorState()
-          const parsePositiveSeconds = (value: unknown): number | null => {
-            if (typeof value === 'number') {
-              return Number.isFinite(value) && value > 0 ? value : null
-            }
-            if (typeof value === 'string') {
-              const direct = Number(value)
-              if (Number.isFinite(direct) && direct > 0) {
-                return direct
-              }
-              const matched = value.match(/(\d+(?:\.\d+)?)/)
-              if (!matched) return null
-              const parsed = Number(matched[1])
-              return Number.isFinite(parsed) && parsed > 0 ? parsed : null
-            }
-            return null
-          }
-          const rawThreshold = aiPendingSuggestion.parameters?.minSilenceSeconds
-          const fallbackThreshold = parsePositiveSeconds(operation.text)
+
+          const lastUserMessage = [...aiMessages]
+            .reverse()
+            .find((m) => m.role === 'user')
+          const userChatBlob = aiMessages
+            .filter((m) => m.role === 'user')
+            .map((m) => m.text)
+            .join('\n')
+          const fromLastUser = lastUserMessage
+            ? inferTrimSilenceThresholdFromTextBlob(lastUserMessage.text)
+            : null
+          const fromAllUserChat = inferTrimSilenceThresholdFromTextBlob(userChatBlob)
+          const fromAssistantNotes = inferTrimSilenceThresholdFromTextBlob(
+            aiPendingSuggestion.notes.join('\n'),
+          )
+          const fromParameters = readTrimSilenceSecondsFromParameters(
+            aiPendingSuggestion.parameters,
+          )
+          const fallbackOpText = parsePositiveSecondsForAISilence(operation.text)
+
+          const thresholdSecondsExplicit =
+            fallbackOpText ??
+            fromLastUser ??
+            fromAllUserChat ??
+            fromParameters ??
+            fromAssistantNotes
           const thresholdSeconds =
-            parsePositiveSeconds(rawThreshold) ?? fallbackThreshold
-          const detection =
-            silenceSegments.length > 0
-              ? {
-                  audioDuration:
-                    silenceSegments[silenceSegments.length - 1]?.end ??
-                    session.duration,
-                  silenceSegments,
-                  speechSegments: [],
+            thresholdSecondsExplicit ?? DEFAULT_AI_TRIM_SILENCE_SECONDS
+
+          if (fromParameters != null && thresholdSecondsExplicit != null) {
+            if (fromParameters !== thresholdSecondsExplicit) {
+              executionNotes.push(
+                `Using silence threshold ${thresholdSecondsExplicit}s from your chat (model suggested ${fromParameters}s).`,
+              )
+            }
+          } else if (thresholdSecondsExplicit == null) {
+            executionNotes.push(
+              `No silence duration parsed from chat or model; removing only gaps ≥ ${thresholdSeconds}s. Say e.g. "longer than 1 second" to change.`,
+            )
+          }
+
+          const detectEnumerateMinSeconds = Math.min(
+            TRIM_SILENCE_DETECT_ENUM_SECONDS,
+            thresholdSeconds,
+          )
+
+          const detection = isTimelineUnedited(segments, videoDuration)
+            ? await (async () => {
+                const videoFile = await ensureVideoFile()
+                if (!videoFile) {
+                  throw new Error(
+                    'Upload a local video file before trimming silence with AI.',
+                  )
                 }
-              : isTimelineUnedited(segments, videoDuration)
-                ? await (async () => {
-                    const videoFile = await ensureVideoFile()
-                    if (!videoFile) {
-                      throw new Error(
-                        'Upload a local video file before trimming silence with AI.',
-                      )
-                    }
-                    return detectSilenceFromVideo(videoFile, {
-                      noiseThresholdDb: -35,
-                      minSilenceDuration:
-                        thresholdSeconds != null && Number.isFinite(thresholdSeconds)
-                          ? thresholdSeconds
-                          : 0.6,
-                      minSegmentDuration: 0.25,
-                    })
-                  })()
-                : await detectSilenceInEditorSession(session.sessionId, {
-                    minSilenceDuration:
-                      thresholdSeconds != null && Number.isFinite(thresholdSeconds)
-                        ? thresholdSeconds
-                        : undefined,
-                  })
+                return detectSilenceFromVideo(videoFile, {
+                  noiseThresholdDb: -35,
+                  minSilenceDuration: detectEnumerateMinSeconds,
+                  minSegmentDuration: 0.25,
+                })
+              })()
+            : await detectSilenceInEditorSession(session.sessionId, {
+                minSilenceDuration: detectEnumerateMinSeconds,
+              })
           let resolvedSilenceSegments = detection.silenceSegments
           if (
             resolvedSilenceSegments.length === 0 &&
@@ -4306,18 +4381,19 @@ export default function HomePage(): JSX.Element {
             if (videoFile) {
               const sourceDetection = await detectSilenceFromVideo(videoFile, {
                 noiseThresholdDb: -35,
-                minSilenceDuration:
-                  thresholdSeconds != null && Number.isFinite(thresholdSeconds)
-                    ? thresholdSeconds
-                    : 0.6,
+                minSilenceDuration: detectEnumerateMinSeconds,
                 minSegmentDuration: 0.25,
               })
+              const overlapFloor = Math.min(
+                TRIM_SILENCE_DETECT_ENUM_SECONDS,
+                thresholdSeconds,
+              )
               resolvedSilenceSegments = sourceDetection.silenceSegments
                 .map((silence) => {
                   for (const segment of segments) {
                     const start = Math.max(silence.start, segment.start)
                     const end = Math.min(silence.end, segment.end)
-                    if (end - start >= 0.6) {
+                    if (end - start >= overlapFloor) {
                       return { start, end }
                     }
                   }
@@ -4329,16 +4405,13 @@ export default function HomePage(): JSX.Element {
           const candidateDurations = resolvedSilenceSegments.map((segment) =>
             Number((segment.end - segment.start).toFixed(2)),
           )
-          const targetSilenceSegments =
-            thresholdSeconds != null && Number.isFinite(thresholdSeconds)
-              ? resolvedSilenceSegments.filter(
-                  (segment) => segment.end - segment.start >= thresholdSeconds,
-                )
-              : resolvedSilenceSegments
+          const targetSilenceSegments = resolvedSilenceSegments.filter(
+            (segment) => segment.end - segment.start >= thresholdSeconds,
+          )
           executionNotes.push(
-            `Silence debug: candidates=${resolvedSilenceSegments.length}, durations=[${candidateDurations.join(
+            `Silence debug: candidates=${resolvedSilenceSegments.length}, detectMin=${detectEnumerateMinSeconds.toFixed(2)}s, trim≥${thresholdSeconds.toFixed(2)}s, durations=[${candidateDurations.slice(0, 120).join(
               ', ',
-            )}], threshold=${thresholdSeconds ?? 'none'}.`,
+            )}${candidateDurations.length > 120 ? ', …' : ''}].`,
           )
           if (targetSilenceSegments.length === 0) {
             executionNotes.push('No silence segments detected to remove.')
@@ -4365,7 +4438,8 @@ export default function HomePage(): JSX.Element {
           setSelectedSilenceSegmentKeys([])
           setStagedSilenceSegmentKeys([])
           executionNotes.push(
-            `Silence trim applied to ${targetSilenceSegments.length} detected ranges.`,
+            `Silence trim applied to ${targetSilenceSegments.length} gaps ≥ ${thresholdSeconds}s.`,
+            'Silence list in the Silence panel was cleared (timestamps shifted). Click Detect Silence to refresh overlays.',
           )
         } catch (error) {
           setEditorStatus('error')
@@ -7401,6 +7475,41 @@ export default function HomePage(): JSX.Element {
                       {aiRequestStatus === 'error' && 'AI request failed. Please try again.'}
                       {aiRequestStatus === 'idle' && 'Enter your request and click Send.'}
                     </div>
+
+                    {aiPendingSuggestion ? (
+                      <div
+                        className={`mt-3 flex items-center justify-between gap-2 rounded-2xl border px-3 py-2 ${
+                          isDark
+                            ? 'border-[#31415a] bg-[#102345] text-[#dbeafe]'
+                            : 'border-[#bfdbfe] bg-[#eff6ff] text-[#1e3a8a]'
+                        }`}
+                      >
+                        <p className="text-[12px] font-semibold">
+                          Pending suggestion: {aiPendingSuggestion.intent}
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={handleApplyAISuggestion}
+                            disabled={isApplyingAISuggestion}
+                            className="rounded-lg bg-[#003fb1] px-3 py-1.5 text-[12px] font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {isApplyingAISuggestion ? 'Applying…' : 'Apply'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleCancelAISuggestion}
+                            className={`rounded-lg border px-3 py-1.5 text-[12px] font-semibold ${
+                              isDark
+                                ? 'border-[#4b6388] text-[#dbeafe]'
+                                : 'border-[#7aa4ff] text-[#1e3a8a]'
+                            }`}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
 
                     <div
                       className={`mt-3 flex items-end gap-2 rounded-2xl border px-3 py-3 ${

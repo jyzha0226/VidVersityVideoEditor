@@ -2337,11 +2337,20 @@ const server = createServer(async (request, response) => {
         url.searchParams.get("minSegmentDuration") || "0.1",
       );
 
+      console.log(
+        `[SILENCE DETECT API] noise=${noiseThresholdDb}dB, minSilence=${minSilenceDuration}s, minSegment=${minSegmentDuration}s`,
+      );
+
       const result = await runAudioActivityDetection(tempFilePath, {
         noiseThresholdDb,
         minSilenceDuration,
         minSegmentDuration,
       });
+      
+      console.log(
+        `[SILENCE RESULT] ${result.silenceSegments?.length || 0} segments found`,
+      );
+      
       sendJson(response, 200, result);
       return;
     }
