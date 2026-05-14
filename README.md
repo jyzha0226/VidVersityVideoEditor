@@ -298,3 +298,142 @@ python FFmpegAudioActivityDetector.py
 - scene detection backend integration
 - destructive silence removal editing
 - draft/project persistence across sessions
+
+
+## AI Integration Overview
+
+This project supports two AI testing modes:
+
+- **Option A (primary): Cloudflare Quick Tunnel** for temporary cross-network team testing against the maintainer’s running Ollama.
+- **Option B (backup): Local Modelfile deployment** for teammate-independent testing on each machine.
+
+> Quick Tunnel is a temporary testing solution and does **not** guarantee a fixed URL.  
+> Local Modelfile deployment is the backup solution for independent teammate testing.
+
+---
+
+## Option A: Remote Testing with Cloudflare Quick Tunnel
+
+Use this when teammates need to test against the maintainer’s self-hosted model from different networks.
+
+Maintainer-side Ollama runs locally on:
+
+```powershell
+http://127.0.0.1:11434
+```
+
+1. Check Ollama is running:
+
+```powershell
+curl.exe -s http://127.0.0.1:11434/api/tags
+```
+
+2. Start a temporary Quick Tunnel:
+
+```powershell
+cloudflared tunnel --url http://127.0.0.1:11434
+```
+
+3. Cloudflare prints a temporary URL such as:
+
+```text
+https://xxxx-xxxx-xxxx.trycloudflare.com
+```
+
+4. Share this URL with teammates.
+
+5. Teammates set backend env and start subtitle/AI server:
+
+```powershell
+$env:OLLAMA_BASE_URL="https://xxxx-xxxx-xxxx.trycloudflare.com"
+npm run subtitles:server
+```
+
+6. Start frontend:
+
+```powershell
+npm run dev
+```
+
+Notes:
+
+- The Quick Tunnel URL changes each time it is restarted.
+- The maintainer’s computer must keep both Ollama and `cloudflared` running.
+- This method is for temporary project testing only.
+- Do **not** commit temporary tunnel URLs into source code.
+
+---
+
+## Option B: Local AI Model Deployment with Modelfile
+
+Use this when the maintainer’s Quick Tunnel is offline, or when a teammate wants to test independently.
+
+1. Install Ollama.
+2. Pull the base model:
+
+```powershell
+ollama pull qwen2.5:7b-instruct
+```
+
+3. Place the provided `Modelfile` in the project folder (or another known path).
+4. Create the custom model:
+
+```powershell
+ollama create vidversity-edit-parser -f Modelfile
+```
+
+5. Verify model exists:
+
+```powershell
+ollama list
+```
+
+6. Manual model test:
+
+```powershell
+ollama run vidversity-edit-parser
+```
+
+Example prompt:
+
+```text
+Split the video at 04:20
+```
+
+7. Start project backend against local Ollama:
+
+```powershell
+$env:OLLAMA_BASE_URL="http://127.0.0.1:11434"
+$env:OLLAMA_MODEL="vidversity-edit-parser"
+npm run subtitles:server
+```
+
+8. Start frontend:
+
+```powershell
+npm run dev
+```
+
+---
+
+## Environment Variables
+
+- `OLLAMA_BASE_URL` (default `http://localhost:11434`)
+- `OLLAMA_MODEL` (default `vidversity-edit`)
+- `OLLAMA_TIMEOUT_MS` (default `12000`)
+- `OLLAMA_TEMPERATURE` (default `0`)
+- `OLLAMA_TOP_P` (default `0.9`)
+- `AI_MATCH_LOCAL=1` to make `/api/ai/edit-command` use plain user prompt messaging
+- `AI_DEBUG=1` to include backend raw model response/messages for troubleshooting
+
+Frontend calls backend endpoints (`/api/ai/edit-command`, `/api/ai/chapter-suggestions`), and backend proxies to Ollama.
+
+---
+
+## Troubleshooting
+
+- If `curl http://127.0.0.1:11434/api/tags` fails, Ollama is not running.
+- If the Quick Tunnel URL stops working, the maintainer may have closed/restarted the tunnel window.
+- If `ollama create` fails, check the `Modelfile` path.
+- If model output is unexpected, confirm backend uses `OLLAMA_MODEL=vidversity-edit-parser`.
+- For Quick Tunnel, `OLLAMA_BASE_URL` must be the base URL only (do **not** append `/api/tags`).
