@@ -71,6 +71,7 @@ import {
   replaceEditorSessionSegments,
   saveEditorSessionVersion,
   splitEditorSessionAtTime,
+  switchEditorSessionVersion,
   generateSubtitlesFromVideo,
   updateEditorSessionCategory,
 } from '../subtitles/api'
@@ -1480,6 +1481,9 @@ export default function HomePage(): JSX.Element {
     useState<'idle' | 'saving' | 'error'>('idle')
   const [saveVersionError, setSaveVersionError] = useState<string | null>(null)
   const [deletingVersionName, setDeletingVersionName] = useState<string | null>(
+    null,
+  )
+  const [switchingVersionName, setSwitchingVersionName] = useState<string | null>(
     null,
   )
   const [downloadingVersionName, setDownloadingVersionName] = useState<
@@ -3342,7 +3346,7 @@ export default function HomePage(): JSX.Element {
     const message = rawMessage.trim()
 
     if (
-      /route not found|not support|cannot (save|download|delete|list).*version/i.test(
+      /route not found|not support|cannot (save|download|delete|list|switch).*version/i.test(
         message,
       )
     ) {
@@ -3382,6 +3386,7 @@ export default function HomePage(): JSX.Element {
     setSaveVersionStatus('idle')
     setSaveVersionError(null)
     setDeletingVersionName(null)
+    setSwitchingVersionName(null)
     setDownloadingVersionName(null)
     setIsVersionsModalOpen(true)
 
@@ -3402,6 +3407,7 @@ export default function HomePage(): JSX.Element {
     setSaveVersionError(null)
     setVersionsError(null)
     setDeletingVersionName(null)
+    setSwitchingVersionName(null)
     setDownloadingVersionName(null)
   }
 
@@ -3433,6 +3439,74 @@ export default function HomePage(): JSX.Element {
           'Could not save the current edit as a new version.',
         ),
       )
+    }
+  }
+
+  const handleSwitchEditorVersion = async (versionName: string) => {
+    if (!editorSessionId) return
+    try {
+      setSwitchingVersionName(versionName)
+      setVersionsError(null)
+      setEditorStatus('syncing')
+      setEditorError(null)
+
+      const result = await switchEditorSessionVersion(editorSessionId, versionName)
+      const sourceFile = await downloadEditorSessionSourceFile(result.session.sessionId)
+      const sourceUrl = URL.createObjectURL(sourceFile)
+      const nextSegments = relabelSegmentsForChapters(result.session.segments)
+      const nextSelectedId = result.session.selectedSegmentId ?? nextSegments[0]?.id ?? null
+
+      setSelectedVideoFile(sourceFile)
+      setVideoSourceUrl(sourceUrl)
+      setVideoDuration(result.session.duration)
+      setCutRange(buildFullCutRange(result.session.duration))
+      setCurrentTime(0)
+      setSegments(nextSegments)
+      applyClipSelection(
+        nextSegments,
+        nextSelectedId != null ? [nextSelectedId] : [],
+        nextSelectedId,
+      )
+      setEditorSessionId(result.session.sessionId)
+      setSelectedCategory(result.session.category)
+      setChapterNameDrafts({})
+      setChapterSummaryDrafts({})
+      setChapterThumbnailDrafts({})
+      setEditorVersions(result.versions)
+      setIsPlaying(false)
+      setHistory([])
+      setRedoHistory([])
+      setSubtitleSegments([])
+      setSubtitleStatus('idle')
+      setSubtitleError(null)
+      setSubtitleTimingDrafts({})
+      setSilenceStatus('idle')
+      setSilenceError(null)
+      setSilenceSegments([])
+      setSelectedSilenceSegmentKeys([])
+      setStagedSilenceSegmentKeys([])
+      setSilenceNotice(
+        'Switched to the selected source version. Regenerate subtitles or silence detection for this version.',
+      )
+      setEditorStatus('ready')
+      videoPreviewRef.current?.pause()
+      videoPreviewRef.current?.seekTo(0)
+    } catch (error) {
+      setEditorStatus('error')
+      setEditorError(
+        formatVersionDialogError(
+          error,
+          'Could not switch to the selected version.',
+        ),
+      )
+      setVersionsError(
+        formatVersionDialogError(
+          error,
+          'Could not switch to the selected version.',
+        ),
+      )
+    } finally {
+      setSwitchingVersionName(null)
     }
   }
 
@@ -5014,6 +5088,7 @@ export default function HomePage(): JSX.Element {
                   <ul className="divide-y divide-transparent">
                     {editorVersions.map((version) => {
                       const isDeleting = deletingVersionName === version.fileName
+                      const isSwitching = switchingVersionName === version.fileName
                       const isDownloading =
                         downloadingVersionName === version.fileName
                       const canDelete = !version.isOriginal && !version.isCurrent
@@ -5079,6 +5154,25 @@ export default function HomePage(): JSX.Element {
                             </div>
                           </div>
                           <div className="flex shrink-0 items-center gap-2 self-end sm:self-start">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void handleSwitchEditorVersion(version.fileName)
+                              }}
+                              disabled={version.isCurrent || isSwitching}
+                              title={
+                                version.isCurrent
+                                  ? 'This is already the current active version.'
+                                  : 'Switch to this version'
+                              }
+                              className={`flex h-8 items-center justify-center gap-1 rounded-full border px-2.5 text-[10px] font-bold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                                isDark
+                                  ? 'border-[#3a526f] text-[#8fbfff] hover:bg-[#182238]'
+                                  : 'border-[#b8d4f0] text-[#003fb1] hover:bg-[#eef4ff]'
+                              }`}
+                            >
+                              {isSwitching ? 'Switching...' : 'Switch'}
+                            </button>
                             <button
                               type="button"
                               onClick={() => {

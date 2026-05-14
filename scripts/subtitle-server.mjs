@@ -1639,6 +1639,7 @@ const server = createServer(async (request, response) => {
       editorSource: "/api/editor/source?sessionId=...",
       editorVersions: "/api/editor/versions?sessionId=...",
       saveEditorVersion: "/api/editor/version/save",
+      switchEditorVersion: "/api/editor/version/switch",
       downloadEditorVersion:
         "/api/editor/version/download?sessionId=...&versionName=...",
       deleteEditorVersion: "/api/editor/version/delete",
@@ -1845,6 +1846,52 @@ const server = createServer(async (request, response) => {
       await rm(versionPath, { force: true });
       const versions = await listEditorVersions(session);
       sendJson(response, 200, { ok: true, deleted: versionName, versions });
+      return;
+    }
+
+    if (url.pathname === "/api/editor/version/switch") {
+      const payload = parseJsonBody(body);
+      const sessionId =
+        typeof payload?.sessionId === "string" ? payload.sessionId : "";
+      const versionName =
+        typeof payload?.versionName === "string" ? payload.versionName : "";
+      const session = getEditorSession(sessionId);
+      const baseName = sanitizeBaseName(session.baseFileName);
+      const prefix = `${session.id}-${baseName}_`;
+      if (
+        !versionName.startsWith(prefix) ||
+        !versionName.endsWith(".mp4") ||
+        versionName.includes("/") ||
+        versionName.includes("\\")
+      ) {
+        throw new Error("Invalid version name.");
+      }
+
+      const versionPath = join(EDITOR_SESSION_DIR, versionName);
+      const duration = await getMediaDuration(versionPath);
+      const switchedFileName = versionName
+        .slice(`${session.id}-`.length)
+        .replace(/\.mp4$/i, "");
+
+      session.filePath = versionPath;
+      session.fileName = switchedFileName;
+      session.duration = duration;
+      session.segments = [
+        {
+          id: 1,
+          label: "Clip 1",
+          start: 0,
+          end: duration,
+        },
+      ];
+      session.selectedSegmentId = 1;
+      session.nextSegmentId = 2;
+
+      const versions = await listEditorVersions(session);
+      sendJson(response, 200, {
+        session: serializeEditorSession(session),
+        versions,
+      });
       return;
     }
 

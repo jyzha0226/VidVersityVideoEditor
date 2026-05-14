@@ -734,6 +734,32 @@ export async function deleteEditorSessionVersion(
   return normalizeEditorVersions(payload)
 }
 
+export async function switchEditorSessionVersion(
+  sessionId: string,
+  versionName: string,
+): Promise<{ session: EditorSessionState; versions: EditorVersionInfo[] }> {
+  const apiBaseUrl = resolveSubtitleApiUrl()
+  const response = await fetch(`${apiBaseUrl}/api/editor/version/switch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, versionName }),
+  })
+  const payload = (await response.json().catch(() => null)) as
+    | (EditorVersionsApiResponse & { session?: EditorSessionApiResponse })
+    | null
+
+  if (!response.ok) {
+    throw new Error(
+      payload?.error || 'Could not switch to the selected version.',
+    )
+  }
+
+  return {
+    session: normalizeEditorSession(payload?.session ?? null),
+    versions: normalizeEditorVersions(payload),
+  }
+}
+
 export async function saveEditorSessionVersion(
   sessionId: string,
   options?: {
