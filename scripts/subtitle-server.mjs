@@ -1804,16 +1804,23 @@ const server = createServer(async (request, response) => {
       } catch (error) {
         const reason =
           error instanceof Error ? error.message : "AI service unavailable.";
+        const fallbackSuggestion =
+          url.pathname === "/api/ai/chapter-suggestions" && transcript.length > 0
+            ? buildChapterSuggestionFromTranscript(transcript)
+            : normalizeAISuggestion(buildSafeAISuggestion(reason), prompt);
+        fallbackSuggestion.notes = Array.isArray(fallbackSuggestion.notes)
+          ? [reason, ...fallbackSuggestion.notes]
+          : [reason];
         const debugEnabled = process.env.AI_DEBUG === "1";
         sendJson(
           response,
           200,
           debugEnabled
             ? {
-                suggestion: buildSafeAISuggestion(reason),
+                suggestion: fallbackSuggestion,
                 debug: { error: reason },
               }
-            : { suggestion: buildSafeAISuggestion(reason) },
+            : { suggestion: fallbackSuggestion },
         );
       }
       return;

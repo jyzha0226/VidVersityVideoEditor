@@ -2657,6 +2657,47 @@ export default function HomePage(): JSX.Element {
     }
   }
 
+  const isEditorSessionNotFoundError = (error: unknown): boolean =>
+    error instanceof Error && /editor session not found/i.test(error.message)
+
+  const recreateEditorSessionFromCurrentVideo = async (): Promise<EditorSessionState | null> => {
+    const videoFile = await ensureVideoFile()
+    if (!videoFile) {
+      setEditorStatus('error')
+      setEditorError('Upload a local video file to use real split editing.')
+      return null
+    }
+
+    try {
+      setEditorStatus('syncing')
+      const session = await createEditorSessionFromVideo(videoFile)
+      const nextSegments = relabelSegmentsForChapters(session.segments)
+      setEditorSessionId(session.sessionId)
+      setSelectedCategory(session.category || selectedCategory)
+      setSegments(nextSegments)
+      applyClipSelection(
+        nextSegments,
+        session.selectedSegmentId != null ? [session.selectedSegmentId] : [],
+        session.selectedSegmentId ?? nextSegments[0]?.id ?? null,
+      )
+      setEditorStatus('ready')
+      setEditorError(null)
+      setChapterNameDrafts({})
+      return {
+        ...session,
+        segments: nextSegments,
+      }
+    } catch (error) {
+      setEditorStatus('error')
+      setEditorError(
+        error instanceof Error
+          ? error.message
+          : 'Could not recreate the editor session for this video.',
+      )
+      return null
+    }
+  }
+
   const handleSplitAtPlayhead = async () => {
     setActiveWorkflowStep('clean')
     if (!selectedSegment || !hasSingleSelectedSegment) return
@@ -4472,6 +4513,84 @@ export default function HomePage(): JSX.Element {
             setEditorStatus('ready')
             executionNotes.push('AI chapter suggestions applied to timeline splits and chapter metadata.')
           } catch (error) {
+            if (isEditorSessionNotFoundError(error)) {
+              executionNotes.push(
+                'Detected expired editor session. Recreating session and retrying chapter apply once.',
+              )
+              const recoveredSession = await recreateEditorSessionFromCurrentVideo()
+              if (recoveredSession) {
+                try {
+                  setEditorStatus('syncing')
+                  let workingSession = await replaceEditorSessionSegments(
+                    recoveredSession.sessionId,
+                    recoveredSession.segments,
+                    recoveredSession.selectedSegmentId,
+                  )
+                  const splitPoints = aiPendingSuggestion.chapters
+                    .map((chapter) => chapter.start)
+                    .filter((start): start is string => typeof start === 'string')
+                    .map((start) => parseEditableTimestamp(start))
+                    .filter((value): value is number => value != null && Number.isFinite(value))
+                    .filter((value) => value > 0)
+                    .sort((a, b) => a - b)
+                  for (const splitAtSeconds of splitPoints) {
+                    const containing = workingSession.segments.find(
+                      (segment) =>
+                        splitAtSeconds > segment.start + 0.1 &&
+                        splitAtSeconds < segment.end - 0.1,
+                    )
+                    if (!containing) continue
+                    workingSession = await splitEditorSessionAtTime(
+                      recoveredSession.sessionId,
+                      containing.id,
+                      splitAtSeconds,
+                    )
+                  }
+                  const nextSegments = preserveChapterLabels(
+                    recoveredSession.segments,
+                    workingSession.segments,
+                  )
+                  const renamedSegments = nextSegments.map((segment, index) => ({
+                    ...segment,
+                    label: aiPendingSuggestion.chapters[index]?.title?.trim() || segment.label,
+                  }))
+                  setSegments(renamedSegments)
+                  setChapterSummaryDrafts(
+                    Object.fromEntries(
+                      renamedSegments.map((segment, index) => [
+                        segment.id,
+                        aiPendingSuggestion.chapters[index]?.summary ?? '',
+                      ]),
+                    ),
+                  )
+                  setChapterThumbnailDrafts(
+                    Object.fromEntries(
+                      renamedSegments.map((segment, index) => [
+                        segment.id,
+                        aiPendingSuggestion.chapters[index]?.thumbnailTime ??
+                          aiPendingSuggestion.chapters[index]?.start ??
+                          null,
+                      ]),
+                    ),
+                  )
+                  setRightPanelView('chapters')
+                  setActiveWorkflowStep('chapters')
+                  setEditorStatus('ready')
+                  executionNotes.push(
+                    'AI chapter suggestions applied after recovering editor session.',
+                  )
+                  continue
+                } catch (retryError) {
+                  setEditorStatus('error')
+                  executionNotes.push(
+                    retryError instanceof Error
+                      ? `Chapter apply failed after session recovery: ${retryError.message}`
+                      : 'Chapter apply failed after session recovery.',
+                  )
+                  continue
+                }
+              }
+            }
             setEditorStatus('error')
             executionNotes.push(
               error instanceof Error ? `Chapter apply failed: ${error.message}` : 'Chapter apply failed unexpectedly.',
