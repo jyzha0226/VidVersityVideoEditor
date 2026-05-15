@@ -967,6 +967,59 @@ function normalizeSegmentLabel(label: string | null | undefined, index: number):
   return trimmed
 }
 
+function normalizeNamedRangeLabel(label: string): string {
+  const normalized = label.trim().replace(/\s+/g, ' ')
+  if (!normalized) return ''
+  if (/^(the\s+)?(introduction|intro|opening|片头)$/i.test(normalized)) {
+    return 'Introduction'
+  }
+  return normalized
+}
+
+function readNamedRangeRemovedFromParameters(
+  parameters: Record<string, unknown> | null | undefined,
+): string | null {
+  const raw = parameters?.namedRangeRemoved
+  if (typeof raw !== 'string') {
+    return null
+  }
+  const normalized = normalizeNamedRangeLabel(raw)
+  return normalized.length > 0 ? normalized : null
+}
+
+function inferNamedRangeRemovedFromText(text: string): string | null {
+  const normalizedText = text.trim().replace(/\s+/g, ' ')
+  if (!normalizedText) return null
+  const latinPattern =
+    /(?:cut|remove|trim)\s+(?:the\s+)?([a-zA-Z][a-zA-Z0-9 _-]{0,50}?)\s+from\s+\d{1,2}:\d{2}(?::\d{2})?\s+(?:to|-)\s+\d{1,2}:\d{2}(?::\d{2})?/i
+  const chinesePattern =
+    /(?:剪掉|剪辑|剪|删除)\s*(?:第?\s*)?([\u4e00-\u9fffA-Za-z0-9 _-]{1,30}?)\s*(?:从)\s*\d{1,2}:\d{2}(?::\d{2})?\s*(?:到|至|-)\s*\d{1,2}:\d{2}(?::\d{2})?/i
+  const matched =
+    normalizedText.match(latinPattern)?.[1] ??
+    normalizedText.match(chinesePattern)?.[1] ??
+    null
+  if (!matched) return null
+  const normalized = normalizeNamedRangeLabel(matched)
+  return normalized.length > 0 ? normalized : null
+}
+
+function readNamedRangeRemovedFromNotes(notes: string[] | null | undefined): string | null {
+  if (!Array.isArray(notes) || notes.length === 0) return null
+  for (const note of notes) {
+    if (typeof note !== 'string') continue
+    const matched =
+      note.match(/described as\s+["']?([^"'.\n]+)["']?/i)?.[1] ??
+      note.match(/removed range[:\s]+["']?([^"'.\n]+)["']?/i)?.[1] ??
+      null
+    if (!matched) continue
+    const normalized = normalizeNamedRangeLabel(matched)
+    if (normalized.length > 0) {
+      return normalized
+    }
+  }
+  return null
+}
+
 function relabelSegmentsForChapters(segments: ClipSegment[]): ClipSegment[] {
   return segments.map((segment, index) => ({
     ...segment,
@@ -4367,6 +4420,15 @@ export default function HomePage(): JSX.Element {
           selectedSegments.length > 0
             ? [...orderedSelectedSegmentIds]
             : segments.map((segment) => segment.id)
+        const latestUserPrompt =
+          [...aiMessages].reverse().find((message) => message.role === 'user')?.text ?? ''
+        const namedRemovedLabel =
+          operation.action === 'remove' || operation.action === 'keep'
+            ? readNamedRangeRemovedFromParameters(aiPendingSuggestion.parameters) ??
+              inferNamedRangeRemovedFromText(operation.text ?? '') ??
+              inferNamedRangeRemovedFromText(latestUserPrompt) ??
+              readNamedRangeRemovedFromNotes(aiPendingSuggestion.notes)
+            : null
 
         try {
           setEditorStatus('syncing')
@@ -4379,13 +4441,31 @@ export default function HomePage(): JSX.Element {
           )
           setHistory((prev) => [...prev.slice(-29), previousState])
           const nextSegments = preserveChapterLabels(segments, nextSession.segments)
-          setSegments(nextSegments)
+          const renameTargetSegmentId =
+            namedRemovedLabel && nextSegments.length > 0
+              ? nextSession.selectedSegmentId ?? nextSegments[0]?.id ?? null
+              : null
+          const renamedSegments =
+            renameTargetSegmentId != null && namedRemovedLabel
+              ? nextSegments.map((segment) =>
+                  segment.id === renameTargetSegmentId
+                    ? { ...segment, label: namedRemovedLabel }
+                    : segment,
+                )
+              : nextSegments
+          setSegments(renamedSegments)
+          if (renameTargetSegmentId != null && namedRemovedLabel) {
+            setChapterNameDrafts((prev) => ({
+              ...prev,
+              [renameTargetSegmentId]: namedRemovedLabel,
+            }))
+          }
           applyClipSelection(
-            nextSegments,
+            renamedSegments,
             nextSession.selectedSegmentId != null
               ? [nextSession.selectedSegmentId]
               : [],
-            nextSession.selectedSegmentId ?? nextSegments[0]?.id ?? null,
+            nextSession.selectedSegmentId ?? renamedSegments[0]?.id ?? null,
           )
           setCutRange(buildFullCutRange(cutEndSeconds - cutStartSeconds))
           setIsCutModeEnabled(false)
@@ -4394,6 +4474,11 @@ export default function HomePage(): JSX.Element {
           executionNotes.push(
             `${operation.action === 'remove' ? 'Cut' : 'Keep'} applied for ${operation.start} to ${operation.end} (outside removed).`,
           )
+          if (renameTargetSegmentId != null && namedRemovedLabel) {
+            executionNotes.push(
+              `Renamed resulting chapter to "${namedRemovedLabel}" from AI named range metadata.`,
+            )
+          }
         } catch (error) {
           setEditorStatus('error')
           executionNotes.push(
