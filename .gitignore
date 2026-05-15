@@ -35,5 +35,5 @@ venv/
 .venv312/
 venv312/
 
-# Local Ollama model definition (optional / machine-specific; uncomment next line to untrack)
+# Local Ollama model definition (optional / machine-specific)
 # Modelfile.txt
