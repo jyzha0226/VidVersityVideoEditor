@@ -1471,7 +1471,7 @@ function buildChapterSuggestionFromTranscript(transcript) {
   }
 
   const chapterCount = Math.min(
-    6,
+    20,
     Math.max(2, Math.ceil(normalizedTranscript.length / 25)),
   );
   const chunkSize = Math.max(

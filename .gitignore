@@ -32,3 +32,8 @@ temp_audio/
 *.wav
 .env
 venv/
+.venv312/
+venv312/
+
+# Local Ollama model definition (optional / machine-specific; uncomment next line to untrack)
+# Modelfile.txt
