@@ -1,7 +1,8 @@
-﻿import React, {
+import React, {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -11,10 +12,15 @@ import {
   BookOpen,
   Brush,
   Check,
+  CheckCheck,
   Clapperboard,
+  CircleX,
   Files,
+  Download,
   FolderArchive,
   HelpCircle,
+  History,
+  Lightbulb,
   Mic,
   Moon,
   Pause,
@@ -26,6 +32,7 @@ import {
   SkipForward,
   Sparkles,
   RotateCcw,
+  Redo2,
   Save,
   PanelRightClose,
   PanelRightOpen,
@@ -50,15 +57,21 @@ import {
   type AudioActivityDetectionResult,
   cutEditorSessionToRange,
   createEditorSessionFromVideo,
+  deleteEditorSessionVersion,
   deleteSilenceRangesFromEditorSession,
   detectSilenceFromVideo,
   detectSilenceInEditorSession,
   downloadEditorSessionSourceFile,
+  downloadEditorSessionVersion,
   type EditorSessionState,
+  type EditorVersionInfo,
   exportEditorSessionVideo,
+  listEditorSessionVersions,
   mergeEditorSessionSegments,
   replaceEditorSessionSegments,
+  saveEditorSessionVersion,
   splitEditorSessionAtTime,
+  switchEditorSessionVersion,
   generateSubtitlesFromVideo,
   updateEditorSessionCategory,
 } from '../subtitles/api'
@@ -105,6 +118,7 @@ interface ClipSegment {
   label: string
   start: number
   end: number
+  sourceRanges?: ClipSourceRange[]
 }
 
 interface AISuggestion {
@@ -119,6 +133,11 @@ interface TimelineThumbnail {
   id: string
   src: string
   time: number
+}
+
+interface ClipSourceRange {
+  start: number
+  end: number
 }
 
 interface OriginalTimelineSection {
@@ -152,14 +171,84 @@ type EditorStatus = 'idle' | 'syncing' | 'ready' | 'error'
 type ExportStatus = 'idle' | 'processing' | 'error'
 type ExportKind = 'clip' | 'video'
 type AppendStatus = 'idle' | 'processing'
+type MergeStatus = 'idle' | 'processing'
 type SubtitleTimingField = 'start' | 'end'
 type SubtitleEntryStatus = 'idle' | 'uploading' | 'generating' | 'success'
-type RightPanelView = 'ai' | 'silence' | 'subtitles' | 'chapters' | 'clean' | 'done'
+type RightPanelView = 'ai' | 'silence' | 'subtitles' | 'chapters' | 'done'
 type CutHandle = 'start' | 'end'
 type PreviewPlaybackMode = 'edited' | 'original'
 type WorkflowStepId = 'clean' | 'polish' | 'chapters' | 'course' | ''
+type DoneActionKind =
+  | 'save-draft'
+  | 'archive-video'
+  | 'add-existing-course'
+  | 'add-new-course'
 
 const CUT_RANGE_MIN_GAP = 0.1
+
+/** Used when AI returns trim_silence but omits numeric duration — avoids deleting every detected gap */
+const DEFAULT_AI_TRIM_SILENCE_SECONDS = 3
+/** Detector API min-gap: keep low so server returns gaps; trim threshold applied client-side afterward */
+const TRIM_SILENCE_DETECT_ENUM_SECONDS = 0.45
+
+function parsePositiveSecondsForAISilence(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value > 0 ? value : null
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    const direct = Number(trimmed)
+    if (Number.isFinite(direct) && direct > 0) return direct
+    const matched = trimmed.match(/(\d+(?:\.\d+)?)/)
+    if (!matched) return null
+    const parsed = Number(matched[1])
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+  }
+  return null
+}
+
+function readTrimSilenceSecondsFromParameters(
+  params: Record<string, unknown>,
+): number | null {
+  const keys = [
+    'minSilenceSeconds',
+    'minSilenceDuration',
+    'thresholdSeconds',
+    'min_silence_seconds',
+    'min_silence_duration',
+    'threshold_seconds',
+    'silentGapMinSeconds',
+  ]
+  for (const key of keys) {
+    const parsed = parsePositiveSecondsForAISilence(params[key])
+    if (parsed != null) return parsed
+  }
+  return null
+}
+
+/** Parse phrases like “longer than 3 seconds” from assistant notes / user chat */
+function inferTrimSilenceThresholdFromTextBlob(blob: string): number | null {
+  const text = blob.trim().toLowerCase()
+  if (!text) return null
+  const patterns = [
+    /(?:only\s+)?(?:long\s+silent\s+parts?\s+)?longer\s+than\s+(\d+(?:\.\d+)?)/i,
+    /more\s+than\s+(\d+(?:\.\d+)?)/i,
+    /at\s+least\s+(\d+(?:\.\d+)?)\s*(?:s(?:ec(?:onds?)?)?|seconds?)?/i,
+    /greater\s+than\s+(\d+(?:\.\d+)?)/i,
+    /over\s+(\d+(?:\.\d+)?)\s*(?:s(?:ec(?:onds?)?)?|seconds?)?/i,
+    />\s*(\d+(?:\.\d+)?)\s*(?:s(?:ec(?:onds?)?)?|seconds?)?\b/i,
+    /minimum\s+(?:silent\s+|silence\s+)?(?:pause|gap|silence\s+gap)\s+(?:of\s+)?(\d+(?:\.\d+)?)/i,
+    /(\d+(?:\.\d+)?)\s*(?:seconds?|secs)\b/i,
+    /(?:remove|trim|cut)\s+.{0,40}?(\d+(?:\.\d+)?)\s*(?:second|seconds|sec)s?\b/i,
+  ]
+  for (const re of patterns) {
+    const match = blob.match(re)
+    if (!match?.[1]) continue
+    const n = Number(match[1])
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  return null
+}
 
 interface ToolbarButtonProps {
   label: string
@@ -171,7 +260,9 @@ interface ToolbarButtonProps {
   disabled?: boolean
   danger?: boolean
   active?: boolean
+  emphasized?: boolean
   tone?: 'editor' | 'workspace' | 'global'
+  size?: 'default' | 'compact'
 }
 
 const AI_SUGGESTIONS: AISuggestion[] = [
@@ -207,8 +298,12 @@ const AI_QUICK_ACTIONS = [
 ]
 
 const CATEGORY_STORAGE_KEY = 'vidversity-video-categories'
+const DONE_METADATA_STORAGE_KEY = 'vidversity-done-action-metadata'
 const DEFAULT_CATEGORY_VALUE = '__none__'
 const NEW_CATEGORY_VALUE = '__new__'
+const EXISTING_COURSE_OPTIONS = ['Course 1', 'Course 2', 'Course 3']
+const EDITOR_HOTKEY_TEXT_ENTRY_TARGET_SELECTOR =
+  'input, textarea, select, [role="textbox"], [contenteditable]:not([contenteditable="false"])'
 
 function normalizeCategoryName(category: string): string {
   return category.trim().replace(/\s+/g, ' ')
@@ -338,6 +433,13 @@ function formatEditableTimestamp(seconds: number): string {
     .padStart(4, '0')}`
 }
 
+function isEditorHotkeyTextEntryTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    Boolean(target.closest(EDITOR_HOTKEY_TEXT_ENTRY_TARGET_SELECTOR))
+  )
+}
+
 function parseEditableTimestamp(value: string): number | null {
   const trimmed = value.trim()
   if (!trimmed) return null
@@ -376,6 +478,32 @@ function parseEditableTimestamp(value: string): number | null {
   return Math.max(0, hours * 3600 + minutes * 60 + seconds)
 }
 
+function getVideoTitleFromSource(
+  file?: File | null,
+  sourceUrl?: string | null,
+  fallbackUrl?: string | null,
+): string {
+  const fileName = file?.name?.trim()
+  if (fileName) {
+    return fileName.replace(/\.[^.]+$/, '')
+  }
+
+  const url = sourceUrl || fallbackUrl
+  if (!url) {
+    return 'Untitled Video'
+  }
+
+  try {
+    const parsedUrl = new URL(url, window.location.href)
+    const pathName = decodeURIComponent(parsedUrl.pathname)
+    const baseName = pathName.split('/').filter(Boolean).at(-1)
+    return baseName?.replace(/\.[^.]+$/, '') || 'Untitled Video'
+  } catch {
+    const baseName = url.split('/').filter(Boolean).at(-1)
+    return baseName?.replace(/\.[^.]+$/, '') || 'Untitled Video'
+  }
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
@@ -404,6 +532,8 @@ function ToolbarButton({
   disabled = false,
   danger = false,
   active = false,
+  emphasized = false,
+  size = 'default',
 }: ToolbarButtonProps): JSX.Element {
   const styles = active
     ? danger
@@ -413,23 +543,39 @@ function ToolbarButton({
       : isDark
         ? 'bg-[#1b3566] text-[#cfe3ff] shadow-[0_10px_24px_rgba(26,86,219,0.22)]'
         : 'bg-[#e8f0ff] text-[#00308a] shadow-[0_10px_24px_rgba(0,63,177,0.16)]'
+    : emphasized
+      ? danger
+        ? isDark
+          ? 'text-[#ffb7c0] hover:bg-[#2a1820]'
+          : 'text-[#a23535] hover:bg-[#fff1f1]'
+        : isDark
+          ? 'text-[#8bb8ff] hover:bg-[#22314a]'
+          : 'text-[#1a56db] hover:bg-[#f2f4f6]'
     : danger
       ? isDark
-        ? 'text-[#ff8f9a] hover:bg-[#2a1820]'
-        : 'text-[#a23535] hover:bg-[#fff1f1]'
+        ? 'text-[#ff8f9a]/75 hover:bg-[#2a1820] hover:text-[#ffb7c0]'
+        : 'text-[#a23535]/70 hover:bg-[#fff1f1] hover:text-[#a23535]'
       : isDark
-        ? 'text-[#d6deec] hover:bg-[#22314a] hover:text-[#f2f6ff]'
-        : 'text-[#5b687c] hover:bg-[#f2f4f6] hover:text-[#37465d]'
+        ? 'text-[#8fa2c2] hover:bg-[#22314a] hover:text-[#f2f6ff]'
+        : 'text-[#7a8798] hover:bg-[#f2f4f6] hover:text-[#37465d]'
 
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`group relative flex flex-col items-center gap-0.5 overflow-visible rounded-lg px-2.5 py-1.5 transition disabled:cursor-not-allowed disabled:opacity-40 ${styles}`}
+      className={`group relative flex flex-col items-center gap-0.5 overflow-visible rounded-lg transition disabled:cursor-not-allowed disabled:opacity-40 ${
+        size === 'compact' ? 'px-2 py-1' : 'px-2.5 py-1.5'
+      } ${styles}`}
     >
-      <Icon className="h-3.5 w-3.5" />
-      <span className="text-[8px] font-bold uppercase tracking-[0.18em]">
+      <Icon className={size === 'compact' ? 'h-3 w-3' : 'h-3.5 w-3.5'} />
+      <span
+        className={`${active || emphasized ? 'font-extrabold' : 'font-semibold'} uppercase ${
+          size === 'compact'
+            ? 'text-[7px] tracking-[0.14em]'
+            : 'text-[8px] tracking-[0.18em]'
+        }`}
+      >
         {label}
       </span>
       {guidedMode && (
@@ -679,7 +825,7 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
     return (
       <section className="flex flex-1 min-h-0 w-full items-center justify-center px-4 py-4 xl:px-6 xl:py-5">
         <div className="w-full max-w-[900px]">
-          <div className="mb-3 flex items-center justify-between">
+          <div className="mb-2 flex items-center justify-between">
             <span
               className={`rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-[0.18em] ${
                 playbackMode === 'original'
@@ -697,7 +843,7 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
           {videoUrl ? (
             <video
               ref={videoRef}
-              className="aspect-video max-h-[42vh] w-full bg-black object-contain"
+              className="aspect-video max-h-[44vh] w-full bg-black object-contain"
               src={videoUrl}
               playsInline
               onLoadedMetadata={(event) => {
@@ -735,7 +881,7 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
             <button
               type="button"
               onClick={handleUploadClick}
-              className="relative aspect-video max-h-[42vh] w-full overflow-hidden bg-black text-left transition hover:bg-[#05070b]"
+              className="relative aspect-video max-h-[44vh] w-full overflow-hidden bg-black text-left transition hover:bg-[#05070b]"
               aria-label="Upload video"
             >
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 text-white">
@@ -768,6 +914,100 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
 function createInitialSegments(duration: number): ClipSegment[] {
   const safeDuration = Math.max(1, duration || 180)
   return [{ id: 1, label: 'Chapter 1', start: 0, end: safeDuration }]
+}
+
+function getClipSourceRanges(segment: ClipSegment): ClipSourceRange[] {
+  const ranges =
+    Array.isArray(segment.sourceRanges) && segment.sourceRanges.length > 0
+      ? segment.sourceRanges
+      : [{ start: segment.start, end: segment.end }]
+
+  return ranges
+    .map((range) => ({
+      start: Number(range.start),
+      end: Number(range.end),
+    }))
+    .filter(
+      (range) =>
+        Number.isFinite(range.start) &&
+        Number.isFinite(range.end) &&
+        range.end > range.start,
+    )
+}
+
+function getClipDuration(segment: ClipSegment): number {
+  return getClipSourceRanges(segment).reduce(
+    (sum, range) => sum + Math.max(0, range.end - range.start),
+    0,
+  )
+}
+
+function getClipSourceStart(segment: ClipSegment): number {
+  return getClipSourceRanges(segment)[0]?.start ?? segment.start
+}
+
+function getClipSourceEnd(segment: ClipSegment): number {
+  const ranges = getClipSourceRanges(segment)
+  return ranges[ranges.length - 1]?.end ?? segment.end
+}
+
+function isSourceTimeInsideClip(segment: ClipSegment, time: number): boolean {
+  return getClipSourceRanges(segment).some(
+    (range) => time >= range.start && time <= range.end,
+  )
+}
+
+function mapClipEditedOffsetToSourceTime(
+  segment: ClipSegment,
+  editedOffset: number,
+): number {
+  const ranges = getClipSourceRanges(segment)
+  if (ranges.length === 0) return segment.start
+
+  let consumedDuration = 0
+  const safeOffset = Math.max(0, editedOffset)
+
+  for (let index = 0; index < ranges.length; index += 1) {
+    const range = ranges[index]
+    const duration = range.end - range.start
+    const nextConsumedDuration = consumedDuration + duration
+    if (safeOffset <= nextConsumedDuration || index === ranges.length - 1) {
+      return range.start + clamp(safeOffset - consumedDuration, 0, duration)
+    }
+    consumedDuration = nextConsumedDuration
+  }
+
+  return ranges[ranges.length - 1].end
+}
+
+function mapSourceTimeToClipEditedOffset(
+  segment: ClipSegment,
+  sourceTime: number,
+): number {
+  const ranges = getClipSourceRanges(segment)
+  let consumedDuration = 0
+
+  for (const range of ranges) {
+    const duration = range.end - range.start
+    if (sourceTime >= range.start && sourceTime <= range.end) {
+      return consumedDuration + clamp(sourceTime - range.start, 0, duration)
+    }
+    consumedDuration += duration
+  }
+
+  return clamp(sourceTime - segment.start, 0, getClipDuration(segment))
+}
+
+function formatClipSourceRange(segment: ClipSegment): string {
+  const ranges = getClipSourceRanges(segment)
+  if (ranges.length <= 1) {
+    const range = ranges[0] ?? { start: segment.start, end: segment.end }
+    return `${formatClock(range.start)} - ${formatClock(range.end)}`
+  }
+
+  return ranges
+    .map((range) => `${formatClock(range.start)}-${formatClock(range.end)}`)
+    .join(', ')
 }
 
 function getDefaultChapterLabel(index: number): string {
@@ -811,15 +1051,17 @@ function preserveChapterLabels(
     const matches = normalizedNextSegments
       .map((segment, nextIndex) => ({ segment, nextIndex }))
       .filter(({ segment }) => {
-        const startsInside = segment.start >= previousSegment.start - tolerance
-        const endsInside = segment.end <= previousSegment.end + tolerance
+        const startsInside =
+          getClipSourceStart(segment) >= getClipSourceStart(previousSegment) - tolerance
+        const endsInside =
+          getClipSourceEnd(segment) <= getClipSourceEnd(previousSegment) + tolerance
         const overlaps =
-          segment.end > previousSegment.start + tolerance &&
-          segment.start < previousSegment.end - tolerance
+          getClipSourceEnd(segment) > getClipSourceStart(previousSegment) + tolerance &&
+          getClipSourceStart(segment) < getClipSourceEnd(previousSegment) - tolerance
 
         return startsInside && endsInside && overlaps
       })
-      .sort((left, right) => left.segment.start - right.segment.start)
+      .sort((left, right) => getClipSourceStart(left.segment) - getClipSourceStart(right.segment))
 
     if (matches.length === 0) {
       return
@@ -855,8 +1097,9 @@ function isTimelineUnedited(
   }
 
   return (
-    Math.abs(segment.start) < 0.001 &&
-    Math.abs(segment.end - videoDuration) < 0.001
+    Math.abs(getClipSourceStart(segment)) < 0.001 &&
+    Math.abs(getClipSourceEnd(segment) - videoDuration) < 0.001 &&
+    getClipSourceRanges(segment).length === 1
   )
 }
 
@@ -978,7 +1221,7 @@ function buildTimelineSegmentLayouts(
   let selectedOffset = 0
 
   return segments.map((segment) => {
-    const duration = Math.max(0, segment.end - segment.start)
+    const duration = getClipDuration(segment)
     const isSelected = selectedSegmentIdSet.has(segment.id)
     const layout: TimelineSegmentLayout = {
       segmentId: segment.id,
@@ -1077,7 +1320,9 @@ function getSegmentTimelineFrames(
 
   const frames = thumbnails.filter(
     (thumbnail) =>
-      thumbnail.time >= segment.start && thumbnail.time < segment.end,
+      getClipSourceRanges(segment).some(
+        (range) => thumbnail.time >= range.start && thumbnail.time < range.end,
+      ),
   )
 
   if (frames.length > 0) {
@@ -1088,12 +1333,12 @@ function getSegmentTimelineFrames(
     if (closest == null) return thumbnail
 
     const thumbnailDistance = Math.min(
-      Math.abs(thumbnail.time - segment.start),
-      Math.abs(thumbnail.time - segment.end),
+      Math.abs(thumbnail.time - getClipSourceStart(segment)),
+      Math.abs(thumbnail.time - getClipSourceEnd(segment)),
     )
     const closestDistance = Math.min(
-      Math.abs(closest.time - segment.start),
-      Math.abs(closest.time - segment.end),
+      Math.abs(closest.time - getClipSourceStart(segment)),
+      Math.abs(closest.time - getClipSourceEnd(segment)),
     )
 
     return thumbnailDistance < closestDistance ? thumbnail : closest
@@ -1111,16 +1356,17 @@ function buildOriginalTimelineSections(
     return []
   }
 
-  const sortedSegments = [...segments]
-    .filter((segment) => segment.end > segment.start)
+  const sortedRanges = segments
+    .flatMap((segment) => getClipSourceRanges(segment))
+    .filter((range) => range.end > range.start)
     .sort((left, right) => left.start - right.start)
 
   const sections: OriginalTimelineSection[] = []
   let cursor = 0
 
-  sortedSegments.forEach((segment) => {
-    const start = clamp(segment.start, 0, safeDuration)
-    const end = clamp(segment.end, 0, safeDuration)
+  sortedRanges.forEach((range) => {
+    const start = clamp(range.start, 0, safeDuration)
+    const end = clamp(range.end, 0, safeDuration)
 
     if (start > cursor) {
       sections.push({
@@ -1164,7 +1410,7 @@ function buildOriginalTimelineMarkers(
 
   return segments
     .slice(1)
-    .map((segment) => clamp(segment.start, 0, safeDuration))
+    .map((segment) => clamp(getClipSourceStart(segment), 0, safeDuration))
     .filter((value) => value > 0 && value < safeDuration)
     .filter((value) => {
       const key = value.toFixed(3)
@@ -1217,13 +1463,8 @@ export default function HomePage(): JSX.Element {
   const [guidedMode, setGuidedMode] = useState(true)
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false)
   const [aiPromptDraft, setAiPromptDraft] = useState('')
-  const [aiMessages, setAiMessages] = useState<AIDraftMessage[]>([
-    {
-      id: 'assistant-seed',
-      role: 'assistant',
-      text: 'AI actions will appear here once the backend is connected. For now, suggestion chips can prefill a request and Send stores it in this workspace panel.',
-    },
-  ])
+  const [areAIQuickActionsVisible, setAreAIQuickActionsVisible] = useState(true)
+  const [aiMessages, setAiMessages] = useState<AIDraftMessage[]>([])
   const [aiPendingSuggestion, setAiPendingSuggestion] = useState<AIEditSuggestion | null>(
     null,
   )
@@ -1269,6 +1510,7 @@ export default function HomePage(): JSX.Element {
   const [activeExportKind, setActiveExportKind] = useState<ExportKind | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
   const [appendStatus, setAppendStatus] = useState<AppendStatus>('idle')
+  const [mergeStatus, setMergeStatus] = useState<MergeStatus>('idle')
   const [timelineThumbnails, setTimelineThumbnails] = useState<TimelineThumbnail[]>([])
   const [waveformSamples, setWaveformSamples] = useState<number[]>([])
   const [timelineMediaReady, setTimelineMediaReady] = useState(false)
@@ -1279,6 +1521,7 @@ export default function HomePage(): JSX.Element {
   const [dragOverSegmentId, setDragOverSegmentId] = useState<number | null>(null)
   const [timelineZoom, setTimelineZoom] = useState(1)
   const [history, setHistory] = useState<EditorHistoryEntry[]>([])
+  const [redoHistory, setRedoHistory] = useState<EditorHistoryEntry[]>([])
   const [activeWorkflowStep, setActiveWorkflowStep] = useState<WorkflowStepId>('')
   const [previewPlaybackMode, setPreviewPlaybackMode] =
     useState<PreviewPlaybackMode>('edited')
@@ -1288,6 +1531,28 @@ export default function HomePage(): JSX.Element {
   )
   const [newCategoryDraft, setNewCategoryDraft] = useState('')
   const [isCreateCategoryModalOpen, setIsCreateCategoryModalOpen] = useState(false)
+  const [doneActionKind, setDoneActionKind] = useState<DoneActionKind | null>(null)
+  const [doneVideoTitleDraft, setDoneVideoTitleDraft] = useState('')
+  const [doneCategoryDraft, setDoneCategoryDraft] = useState('')
+  const [doneCourseDraft, setDoneCourseDraft] = useState(EXISTING_COURSE_OPTIONS[0])
+  const [doneNewCourseNameDraft, setDoneNewCourseNameDraft] = useState('')
+  const [isVersionsModalOpen, setIsVersionsModalOpen] = useState(false)
+  const [editorVersions, setEditorVersions] = useState<EditorVersionInfo[]>([])
+  const [versionsStatus, setVersionsStatus] =
+    useState<'idle' | 'loading' | 'error'>('idle')
+  const [versionsError, setVersionsError] = useState<string | null>(null)
+  const [saveVersionStatus, setSaveVersionStatus] =
+    useState<'idle' | 'saving' | 'error'>('idle')
+  const [saveVersionError, setSaveVersionError] = useState<string | null>(null)
+  const [deletingVersionName, setDeletingVersionName] = useState<string | null>(
+    null,
+  )
+  const [switchingVersionName, setSwitchingVersionName] = useState<string | null>(
+    null,
+  )
+  const [downloadingVersionName, setDownloadingVersionName] = useState<
+    string | null
+  >(null)
   const [cutRange, setCutRange] = useState<{ start: number; end: number }>({
     start: 0,
     end: 180,
@@ -1295,10 +1560,18 @@ export default function HomePage(): JSX.Element {
   const [isCutModeEnabled, setIsCutModeEnabled] = useState(false)
 
   const videoPreviewRef = useRef<VideoPreviewHandle | null>(null)
+  const timelineScrollRef = useRef<HTMLDivElement | null>(null)
   const timelineTrackRef = useRef<HTMLDivElement | null>(null)
+  const aiChatEndRef = useRef<HTMLDivElement | null>(null)
+  const shouldCenterPlayheadAfterZoomRef = useRef(false)
   const subtitleUploadInputRef = useRef<HTMLInputElement | null>(null)
   const appendVideoInputRef = useRef<HTMLInputElement | null>(null)
-  const previousWorkspaceViewRef = useRef<Exclude<RightPanelView, 'clean'>>('ai')
+  const previousWorkspaceViewRef = useRef<RightPanelView>('ai')
+  const clipHotkeyNavigationSegmentIdRef = useRef<number | null>(null)
+
+  const resetClipHotkeyNavigation = () => {
+    clipHotkeyNavigationSegmentIdRef.current = null
+  }
 
   const applyClipSelection = (
     nextSegments: ClipSegment[],
@@ -1324,7 +1597,12 @@ export default function HomePage(): JSX.Element {
   const selectSingleClip = (
     segmentId: number | null,
     nextSegments: ClipSegment[] = segments,
+    options: { preserveClipHotkeyNavigation?: boolean } = {},
   ) => {
+    if (!options.preserveClipHotkeyNavigation) {
+      resetClipHotkeyNavigation()
+    }
+
     applyClipSelection(
       nextSegments,
       segmentId != null ? [segmentId] : [],
@@ -1342,6 +1620,7 @@ export default function HomePage(): JSX.Element {
     setSelectedId(initialSegments[0]?.id ?? null)
     setSelectedSegmentIds(initialSegments[0] ? [initialSegments[0].id] : [])
     setHistory([])
+    setRedoHistory([])
     setEditorError(null)
     setExportStatus('idle')
     setActiveExportKind(null)
@@ -1526,11 +1805,11 @@ export default function HomePage(): JSX.Element {
     videoDuration && videoDuration > 0
       ? videoDuration
       : segments.length > 0
-        ? segments[segments.length - 1].end
+        ? Math.max(...segments.map((segment) => getClipSourceEnd(segment)))
         : 180
   const editedDuration = Math.max(
     0,
-    segments.reduce((sum, segment) => sum + (segment.end - segment.start), 0),
+    segments.reduce((sum, segment) => sum + getClipDuration(segment), 0),
   )
   const segmentTimelineLayouts = useMemo(
     () => buildTimelineSegmentLayouts(segments, new Set(orderedSelectedSegmentIds)),
@@ -1567,7 +1846,7 @@ export default function HomePage(): JSX.Element {
   const cutRangeEndRatio =
     editedDuration > 0 ? cutRangeEndEditedTime / editedDuration : 1
   const timelinePlayheadSegmentIndex = segments.findIndex(
-    (segment) => currentTime >= segment.start && currentTime <= segment.end,
+    (segment) => isSourceTimeInsideClip(segment, currentTime),
   )
   const activeTimelineSegmentIndex =
     timelinePlayheadSegmentIndex >= 0 ? timelinePlayheadSegmentIndex : selectedIndex
@@ -1577,16 +1856,12 @@ export default function HomePage(): JSX.Element {
     activeTimelineSegmentIndex > 0
       ? segments
           .slice(0, activeTimelineSegmentIndex)
-          .reduce((sum, segment) => sum + (segment.end - segment.start), 0)
+          .reduce((sum, segment) => sum + getClipDuration(segment), 0)
       : 0
   const timelinePlayheadEditedTime = activeTimelineSegment
     ? clamp(
         activeTimelineSegmentOffset +
-          clamp(
-            currentTime - activeTimelineSegment.start,
-            0,
-            Math.max(activeTimelineSegment.end - activeTimelineSegment.start, 0),
-          ),
+          mapSourceTimeToClipEditedOffset(activeTimelineSegment, currentTime),
         0,
         editedDuration,
       )
@@ -1604,6 +1879,28 @@ export default function HomePage(): JSX.Element {
   const sourcePlayheadRatio =
     totalDuration > 0 ? clamp(currentTime / totalDuration, 0, 1) : 0
 
+  useLayoutEffect(() => {
+    if (!shouldCenterPlayheadAfterZoomRef.current) {
+      return
+    }
+
+    shouldCenterPlayheadAfterZoomRef.current = false
+    const scrollContainer = timelineScrollRef.current
+    if (!scrollContainer) {
+      return
+    }
+
+    const maxScrollLeft = Math.max(
+      0,
+      scrollContainer.scrollWidth - scrollContainer.clientWidth,
+    )
+    const playheadScrollLeft =
+      timelinePlayheadRatio * scrollContainer.scrollWidth -
+      scrollContainer.clientWidth / 2
+
+    scrollContainer.scrollLeft = clamp(playheadScrollLeft, 0, maxScrollLeft)
+  }, [timelinePlayheadRatio, timelineZoom])
+
   const silenceReviewItems = silenceSegments.map((segment, index) => ({
     ...segment,
     key: createSilenceSegmentKey(segment.start, segment.end, index),
@@ -1619,6 +1916,7 @@ export default function HomePage(): JSX.Element {
     Boolean(selectedVideoFile || videoSourceUrl || preloadedVideoUrl) &&
     (
       history.length > 0 ||
+      redoHistory.length > 0 ||
       Boolean(editorSessionId) ||
       Boolean(selectedCategory) ||
       subtitleSegments.length > 0 ||
@@ -1630,7 +1928,7 @@ export default function HomePage(): JSX.Element {
 	      id: 'clean',
 	      step: 'Step 1',
 	      label: 'Clean',
-	      tooltip: 'Remove unwanted sections, add videos, and undo edits.',
+	      tooltip: 'Use the toolbar below the video to cut, split, merge, delete, or arrange chapters.',
 	      icon: Brush,
 	    },
     {
@@ -1665,6 +1963,7 @@ export default function HomePage(): JSX.Element {
 
   const pushHistory = () => {
     setHistory((prev) => [...prev.slice(-29), captureEditorState()])
+    setRedoHistory([])
   }
 
   const confirmDiscardChanges = () => {
@@ -1729,25 +2028,21 @@ export default function HomePage(): JSX.Element {
     setDraggedSegmentId(null)
     setDragOverSegmentId(null)
     setHistory([])
+    setRedoHistory([])
     setPreviewPlaybackMode('edited')
     setSelectedCategory('')
     setNewCategoryDraft('')
     setCutRange(buildFullCutRange(editedDuration || videoDuration || 180))
   }
 
-	  const handleUndo = async () => {
-	    if (history.length === 0) return
-	    setActiveWorkflowStep('clean')
-
-    const previous = history[history.length - 1]
-    setHistory((prev) => prev.slice(0, -1))
-    setSegments(relabelSegmentsForChapters(previous.segments))
-    applyClipSelection(
-      relabelSegmentsForChapters(previous.segments),
-      previous.selectedIds,
-      previous.selectedId,
-    )
-    setSubtitleSegments(previous.subtitleSegments)
+  const restoreEditorState = async (
+    state: EditorHistoryEntry,
+    errorMessage: string,
+  ) => {
+    const localSegments = relabelSegmentsForChapters(state.segments)
+    setSegments(localSegments)
+    applyClipSelection(localSegments, state.selectedIds, state.selectedId)
+    setSubtitleSegments(state.subtitleSegments)
 
     if (!editorSessionId) return
 
@@ -1755,8 +2050,8 @@ export default function HomePage(): JSX.Element {
       setEditorStatus('syncing')
       const session = await replaceEditorSessionSegments(
         editorSessionId,
-        previous.segments,
-        previous.selectedId,
+        state.segments,
+        state.selectedId,
         selectedCategory,
       )
       const nextSegments = relabelSegmentsForChapters(session.segments)
@@ -1765,26 +2060,43 @@ export default function HomePage(): JSX.Element {
         nextSegments,
         session.selectedSegmentId != null
           ? [session.selectedSegmentId]
-          : previous.selectedIds,
-        session.selectedSegmentId ?? previous.selectedId,
+          : state.selectedIds,
+        session.selectedSegmentId ?? state.selectedId,
       )
       setEditorStatus('ready')
       setEditorError(null)
     } catch (error) {
       setEditorStatus('error')
-      setEditorError(
-        error instanceof Error
-          ? error.message
-          : 'Could not restore the previous editor state.',
-      )
+      setEditorError(error instanceof Error ? error.message : errorMessage)
     }
   }
 
+	  const handleUndo = async () => {
+	    if (history.length === 0) return
+	    setActiveWorkflowStep('clean')
+
+    const previous = history[history.length - 1]
+    setRedoHistory((prev) => [...prev.slice(-29), captureEditorState()])
+    setHistory((prev) => prev.slice(0, -1))
+    await restoreEditorState(previous, 'Could not restore the previous editor state.')
+  }
+
+  const handleRedo = async () => {
+    if (redoHistory.length === 0) return
+    setActiveWorkflowStep('clean')
+
+    const next = redoHistory[redoHistory.length - 1]
+    setHistory((prev) => [...prev.slice(-29), captureEditorState()])
+    setRedoHistory((prev) => prev.slice(0, -1))
+    await restoreEditorState(next, 'Could not redo the editor state.')
+  }
+
   const handleSeek = (timeInSeconds: number) => {
+    resetClipHotkeyNavigation()
     setPreviewPlaybackMode('edited')
     const safeTime = Math.max(0, Math.min(timeInSeconds, totalDuration))
     const containingSegment = segments.find(
-      (segment) => safeTime >= segment.start && safeTime <= segment.end,
+      (segment) => isSourceTimeInsideClip(segment, safeTime),
     )
     if (containingSegment) {
       setSelectedId(containingSegment.id)
@@ -1799,6 +2111,7 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleSeekOriginal = (timeInSeconds: number, shouldPlay = false) => {
+    resetClipHotkeyNavigation()
     const safeTime = Math.max(0, Math.min(timeInSeconds, totalDuration))
     setPreviewPlaybackMode('original')
     videoPreviewRef.current?.seekTo(safeTime)
@@ -1820,13 +2133,14 @@ export default function HomePage(): JSX.Element {
 
     for (let index = 0; index < segments.length; index += 1) {
       const segment = segments[index]
-      const segmentDuration = Math.max(segment.end - segment.start, 0)
+      const segmentDuration = getClipDuration(segment)
       const nextConsumedDuration = consumedDuration + segmentDuration
 
       if (safeEditedTime <= nextConsumedDuration || index === segments.length - 1) {
-        const nextTime =
-          segment.start +
-          clamp(safeEditedTime - consumedDuration, 0, Math.max(segmentDuration, 0))
+        const nextTime = mapClipEditedOffsetToSourceTime(
+          segment,
+          clamp(safeEditedTime - consumedDuration, 0, segmentDuration),
+        )
         handleSeek(nextTime)
         return
       }
@@ -1848,26 +2162,6 @@ export default function HomePage(): JSX.Element {
     seekEditedTimelineToTime(ratio * editedDuration)
   }
 
-	  const handleOpenCleanPanel = () => {
-	    setActiveWorkflowStep('clean')
-	    if (rightPanelView === 'clean' && !isRightPanelCollapsed) {
-      setIsRightPanelCollapsed(true)
-      setIsCutModeEnabled(false)
-      setActiveCutHandle(null)
-      return
-    }
-
-    if (rightPanelView !== 'clean') {
-      previousWorkspaceViewRef.current = rightPanelView
-    }
-    setRightPanelView('clean')
-    setIsCutModeEnabled(false)
-    setActiveCutHandle(null)
-    setIsRightPanelCollapsed(false)
-    setEditorError(null)
-    setCutRange(buildFullCutRange(selectedCutDuration))
-  }
-
 	  const handleActivateCutMode = () => {
 	    setActiveWorkflowStep('clean')
 	    if (isCutModeEnabled) {
@@ -1876,12 +2170,6 @@ export default function HomePage(): JSX.Element {
       return
     }
 
-    if (rightPanelView !== 'clean') {
-      previousWorkspaceViewRef.current = rightPanelView
-      setRightPanelView('clean')
-    }
-
-    setIsRightPanelCollapsed(false)
     setEditorError(null)
     setCutRange(buildFullCutRange(selectedCutDuration))
     setIsArrangeModeEnabled(false)
@@ -1928,20 +2216,17 @@ export default function HomePage(): JSX.Element {
     }
   }
 
-	  const handleRemoveSilence = async () => {
-	    setActiveWorkflowStep('polish')
-	    if (rightPanelView === 'silence' && !isRightPanelCollapsed) {
-      setIsRightPanelCollapsed(true)
-      setIsCutModeEnabled(false)
-      setActiveCutHandle(null)
-      return
-    }
-
+  const openSilenceReviewPanel = () => {
+    setActiveWorkflowStep('polish')
     previousWorkspaceViewRef.current = 'silence'
     setRightPanelView('silence')
     setIsCutModeEnabled(false)
     setActiveCutHandle(null)
     setIsRightPanelCollapsed(false)
+  }
+
+  const handleDetectSilence = async () => {
+    openSilenceReviewPanel()
 
     const isUneditedTimeline = isTimelineUnedited(segments, videoDuration)
     const silenceDetectionOptions = {
@@ -2126,35 +2411,11 @@ export default function HomePage(): JSX.Element {
 	    setActiveWorkflowStep(stepId)
 	    setIsCutModeEnabled(false)
 	    setActiveCutHandle(null)
-	    setIsRightPanelCollapsed(false)
+	    setIsRightPanelCollapsed(true)
 
 	    if (stepId === 'clean') {
-	      if (rightPanelView !== 'clean') {
-	        previousWorkspaceViewRef.current = rightPanelView
-	      }
-	      setRightPanelView('clean')
 	      setEditorError(null)
 	      setCutRange(buildFullCutRange(selectedCutDuration))
-	      return
-	    }
-
-	    if (stepId === 'polish') {
-	      previousWorkspaceViewRef.current = 'subtitles'
-	      setRightPanelView('subtitles')
-	      setSubtitleError(null)
-	      return
-	    }
-
-	    if (stepId === 'chapters') {
-	      previousWorkspaceViewRef.current = 'chapters'
-	      setRightPanelView('chapters')
-	      setSceneStatus('pending')
-	      return
-	    }
-
-	    if (stepId === 'course') {
-	      previousWorkspaceViewRef.current = 'done'
-	      setRightPanelView('done')
 	    }
 	  }
 
@@ -2216,6 +2477,7 @@ export default function HomePage(): JSX.Element {
 
       const nextSegments = preserveChapterLabels(segments, nextSession.segments)
       setHistory((prev) => [...prev.slice(-29), previousState])
+      setRedoHistory([])
       setSegments(nextSegments)
       applyClipSelection(
         nextSegments,
@@ -2367,6 +2629,7 @@ export default function HomePage(): JSX.Element {
       )
 
       setHistory((prev) => [...prev.slice(-29), previousState])
+      setRedoHistory([])
       const nextSegments = preserveChapterLabels(segments, nextSession.segments)
       setEditorError(null)
       setSegments(nextSegments)
@@ -2386,7 +2649,7 @@ export default function HomePage(): JSX.Element {
           return sum
         }
 
-        return sum + (segment.end - segment.start)
+        return sum + getClipDuration(segment)
       }, 0)
       setCutRange(buildFullCutRange(nextSelectedDuration))
 
@@ -2458,7 +2721,49 @@ export default function HomePage(): JSX.Element {
     }
   }
 
+  const isEditorSessionNotFoundError = (error: unknown): boolean =>
+    error instanceof Error && /editor session not found/i.test(error.message)
+
+  const recreateEditorSessionFromCurrentVideo = async (): Promise<EditorSessionState | null> => {
+    const videoFile = await ensureVideoFile()
+    if (!videoFile) {
+      setEditorStatus('error')
+      setEditorError('Upload a local video file to use real split editing.')
+      return null
+    }
+
+    try {
+      setEditorStatus('syncing')
+      const session = await createEditorSessionFromVideo(videoFile)
+      const nextSegments = relabelSegmentsForChapters(session.segments)
+      setEditorSessionId(session.sessionId)
+      setSelectedCategory(session.category || selectedCategory)
+      setSegments(nextSegments)
+      applyClipSelection(
+        nextSegments,
+        session.selectedSegmentId != null ? [session.selectedSegmentId] : [],
+        session.selectedSegmentId ?? nextSegments[0]?.id ?? null,
+      )
+      setEditorStatus('ready')
+      setEditorError(null)
+      setChapterNameDrafts({})
+      return {
+        ...session,
+        segments: nextSegments,
+      }
+    } catch (error) {
+      setEditorStatus('error')
+      setEditorError(
+        error instanceof Error
+          ? error.message
+          : 'Could not recreate the editor session for this video.',
+      )
+      return null
+    }
+  }
+
   const handleSplitAtPlayhead = async () => {
+    setActiveWorkflowStep('clean')
     if (!selectedSegment || !hasSingleSelectedSegment) return
     const playhead = currentTime
     const minGap = 1
@@ -2484,6 +2789,7 @@ export default function HomePage(): JSX.Element {
 
       const nextSegments = preserveChapterLabels(segments, nextSession.segments)
       setHistory((prev) => [...prev.slice(-29), previousState])
+      setRedoHistory([])
       setSegments(nextSegments)
       applyClipSelection(
         nextSegments,
@@ -2545,27 +2851,22 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleMergeSelectedClips = async () => {
+    setActiveWorkflowStep('clean')
     if (!canMergeSelectedSegments) return
 
     const session = await ensureEditorSession()
     if (!session) return
 
     try {
+      setMergeStatus('processing')
       setEditorStatus('syncing')
       setEditorError(null)
+      const previousState = captureEditorState()
 
       const nextSession = await mergeEditorSessionSegments(
         session.sessionId,
         orderedSelectedSegmentIds,
       )
-      const mergedSourceFile = await downloadEditorSessionSourceFile(
-        nextSession.sessionId,
-      )
-      const mergedSourceUrl = URL.createObjectURL(mergedSourceFile)
-      const remappedSubtitles =
-        subtitleSegments.length > 0
-          ? remapSubtitlesToEditedTimeline(subtitleSegments, session.segments)
-          : []
       const nextSegments = preserveChapterLabels(segments, nextSession.segments)
       const nextSelectedSegment =
         (nextSession.selectedSegmentId != null
@@ -2574,17 +2875,19 @@ export default function HomePage(): JSX.Element {
             ) ?? null
           : null) ?? nextSegments[0] ?? null
 
-      setSelectedVideoFile(mergedSourceFile)
-      setVideoSourceUrl(mergedSourceUrl)
-      setVideoDuration(nextSession.duration)
       setSegments(nextSegments)
       applyClipSelection(
         nextSegments,
         nextSelectedSegment ? [nextSelectedSegment.id] : [],
         nextSelectedSegment?.id ?? null,
       )
-      setCurrentTime(nextSelectedSegment?.start ?? 0)
-      setHistory([])
+      const nextSeekTime = nextSelectedSegment
+        ? getClipSourceStart(nextSelectedSegment)
+        : 0
+      videoPreviewRef.current?.seekTo(nextSeekTime)
+      setCurrentTime(nextSeekTime)
+      setHistory((prev) => [...prev.slice(-29), previousState])
+      setRedoHistory([])
       setEditorStatus('ready')
       setIsPlaying(false)
       setSilenceStatus('idle')
@@ -2593,12 +2896,8 @@ export default function HomePage(): JSX.Element {
       setSelectedSilenceSegmentKeys([])
       setStagedSilenceSegmentKeys([])
       setSilenceNotice(
-        'The merge rebuilt the working source media. Run silence detection again if you want to review the merged timeline.',
+        'Run silence detection again if you want to review the merged timeline.',
       )
-      if (subtitleSegments.length > 0) {
-        setSubtitleSegments(remappedSubtitles)
-        setSubtitleTimingDrafts({})
-      }
       setChapterNameDrafts({})
     } catch (error) {
       setEditorStatus('error')
@@ -2607,10 +2906,13 @@ export default function HomePage(): JSX.Element {
           ? error.message
           : 'Could not merge the selected chapters.',
       )
+    } finally {
+      setMergeStatus('idle')
     }
   }
 
   const handleDeleteSelectedClip = () => {
+    setActiveWorkflowStep('clean')
     if (!selectedSegment || !hasSingleSelectedSegment) return
     pushHistory()
 
@@ -2650,6 +2952,8 @@ export default function HomePage(): JSX.Element {
     segmentId: number,
     options: { extendSelection?: boolean; toggleSelection?: boolean } = {},
   ) => {
+    resetClipHotkeyNavigation()
+
     const anchorId =
       selectedId ??
       orderedSelectedSegmentIds[orderedSelectedSegmentIds.length - 1] ??
@@ -2686,6 +2990,7 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleToggleArrangeMode = () => {
+    setActiveWorkflowStep('clean')
     const nextIsEnabled = !isArrangeModeEnabled
     if (nextIsEnabled) {
       setIsCutModeEnabled(false)
@@ -3015,6 +3320,7 @@ export default function HomePage(): JSX.Element {
       setEditorStatus('ready')
       setIsPlaying(false)
       setHistory([])
+      setRedoHistory([])
       setSubtitleSegments([])
       setSubtitleStatus('idle')
       setSubtitleError(null)
@@ -3063,9 +3369,291 @@ export default function HomePage(): JSX.Element {
 
     setCategoryOptions((prev) => mergeCategoryOptions(prev, nextCategory))
     setSelectedCategory(nextCategory)
+    setDoneCategoryDraft(nextCategory)
     setNewCategoryDraft('')
     setIsCreateCategoryModalOpen(false)
     setEditorError(null)
+  }
+
+  const getDoneActionLabel = (action: DoneActionKind): string => {
+    if (action === 'save-draft') return 'Save Draft'
+    if (action === 'archive-video') return 'Archive Video'
+    if (action === 'add-existing-course') return 'Add Video to Existing Course'
+    return 'Add Video to New Course'
+  }
+
+  const getDoneActionConfirmLabel = (action: DoneActionKind): string => {
+    if (action === 'save-draft') return 'Save'
+    if (action === 'archive-video') return 'Archive'
+    return 'Add'
+  }
+
+  const handleOpenDoneActionModal = (action: DoneActionKind) => {
+    setDoneActionKind(action)
+    setDoneVideoTitleDraft(
+      getVideoTitleFromSource(selectedVideoFile, videoSourceUrl, preloadedVideoUrl),
+    )
+    setDoneCategoryDraft(selectedCategory)
+    setDoneCourseDraft(EXISTING_COURSE_OPTIONS[0])
+    setDoneNewCourseNameDraft('')
+  }
+
+  const handleCloseDoneActionModal = () => {
+    setDoneActionKind(null)
+    setDoneVideoTitleDraft('')
+    setDoneCategoryDraft('')
+    setDoneCourseDraft(EXISTING_COURSE_OPTIONS[0])
+    setDoneNewCourseNameDraft('')
+  }
+
+  const handleDoneActionCategorySelect = (value: string) => {
+    if (value === NEW_CATEGORY_VALUE) {
+      setIsCreateCategoryModalOpen(true)
+      return
+    }
+
+    setDoneCategoryDraft(value === DEFAULT_CATEGORY_VALUE ? '' : value)
+  }
+
+  const handleSubmitDoneAction = () => {
+    if (!doneActionKind || typeof window === 'undefined') {
+      return
+    }
+
+    const nextTitle =
+      doneVideoTitleDraft.trim() ||
+      getVideoTitleFromSource(selectedVideoFile, videoSourceUrl, preloadedVideoUrl)
+    const nextCategory = normalizeCategoryName(doneCategoryDraft)
+    const record = {
+      action: doneActionKind,
+      actionLabel: getDoneActionLabel(doneActionKind),
+      title: nextTitle,
+      category: nextCategory,
+      course: doneActionKind === 'add-existing-course' ? doneCourseDraft : '',
+      newCourseName:
+        doneActionKind === 'add-new-course'
+          ? doneNewCourseNameDraft.trim()
+          : '',
+      savedAt: new Date().toISOString(),
+    }
+
+    window.localStorage.setItem(DONE_METADATA_STORAGE_KEY, JSON.stringify(record))
+    setSelectedCategory(nextCategory)
+    setCategoryOptions((prev) => mergeCategoryOptions(prev, nextCategory))
+    handleCloseDoneActionModal()
+  }
+
+  const formatVersionDialogError = (
+    error: unknown,
+    fallbackMessage: string,
+  ): string => {
+    const rawMessage = error instanceof Error ? error.message : fallbackMessage
+    const message = rawMessage.trim()
+
+    if (
+      /route not found|not support|cannot (save|download|delete|list|switch).*version/i.test(
+        message,
+      )
+    ) {
+      return 'The subtitle server is running, but this route is unavailable. Restart the server with the latest code (`npm run subtitles:server`).'
+    }
+
+    if (/failed to fetch|networkerror|load failed|fetch failed/i.test(message)) {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        return 'Network appears offline. Reconnect and try again.'
+      }
+      return 'Cannot reach the local subtitle server at http://127.0.0.1:8787. Start it with `npm run subtitles:server` and try again.'
+    }
+
+    if (/ECONNREFUSED|ENOTFOUND|ERR_CONNECTION_REFUSED/i.test(message)) {
+      return 'Could not connect to the local subtitle server. Make sure it is running on port 8787.'
+    }
+
+    return message.length > 0 ? message : fallbackMessage
+  }
+
+  const loadEditorVersions = async (sessionId: string) => {
+    setVersionsStatus('loading')
+    setVersionsError(null)
+    try {
+      const list = await listEditorSessionVersions(sessionId)
+      setEditorVersions(list)
+      setVersionsStatus('idle')
+    } catch (error) {
+      setVersionsStatus('error')
+      setVersionsError(
+        formatVersionDialogError(error, 'Could not load saved versions.'),
+      )
+    }
+  }
+
+  const handleOpenVersionsModal = async () => {
+    setSaveVersionStatus('idle')
+    setSaveVersionError(null)
+    setDeletingVersionName(null)
+    setSwitchingVersionName(null)
+    setDownloadingVersionName(null)
+    setIsVersionsModalOpen(true)
+
+    const session = await ensureEditorSession()
+    if (!session) {
+      setVersionsStatus('error')
+      setVersionsError(
+        'Upload a video to start a session before viewing saved versions.',
+      )
+      return
+    }
+    await loadEditorVersions(session.sessionId)
+  }
+
+  const handleCloseVersionsModal = () => {
+    setIsVersionsModalOpen(false)
+    setSaveVersionStatus('idle')
+    setSaveVersionError(null)
+    setVersionsError(null)
+    setDeletingVersionName(null)
+    setSwitchingVersionName(null)
+    setDownloadingVersionName(null)
+  }
+
+  const handleSaveCurrentVersion = async () => {
+    const session = await ensureEditorSession()
+    if (!session) return
+
+    try {
+      setSaveVersionStatus('saving')
+      setSaveVersionError(null)
+
+      const syncedSession = await replaceEditorSessionSegments(
+        session.sessionId,
+        segments,
+        selectedId,
+        selectedCategory,
+      )
+      const result = await saveEditorSessionVersion(syncedSession.sessionId, {
+        segments,
+        subtitles: subtitleSegments,
+      })
+      setEditorVersions(result.versions)
+      setSaveVersionStatus('idle')
+    } catch (error) {
+      setSaveVersionStatus('error')
+      setSaveVersionError(
+        formatVersionDialogError(
+          error,
+          'Could not save the current edit as a new version.',
+        ),
+      )
+    }
+  }
+
+  const handleSwitchEditorVersion = async (versionName: string) => {
+    if (!editorSessionId) return
+    try {
+      setSwitchingVersionName(versionName)
+      setVersionsError(null)
+      setEditorStatus('syncing')
+      setEditorError(null)
+
+      const result = await switchEditorSessionVersion(editorSessionId, versionName)
+      const sourceFile = await downloadEditorSessionSourceFile(result.session.sessionId)
+      const sourceUrl = URL.createObjectURL(sourceFile)
+      const nextSegments = relabelSegmentsForChapters(result.session.segments)
+      const nextSelectedId = result.session.selectedSegmentId ?? nextSegments[0]?.id ?? null
+
+      setSelectedVideoFile(sourceFile)
+      setVideoSourceUrl(sourceUrl)
+      setVideoDuration(result.session.duration)
+      setCutRange(buildFullCutRange(result.session.duration))
+      setCurrentTime(0)
+      setSegments(nextSegments)
+      applyClipSelection(
+        nextSegments,
+        nextSelectedId != null ? [nextSelectedId] : [],
+        nextSelectedId,
+      )
+      setEditorSessionId(result.session.sessionId)
+      setSelectedCategory(result.session.category)
+      setChapterNameDrafts({})
+      setChapterSummaryDrafts({})
+      setChapterThumbnailDrafts({})
+      setEditorVersions(result.versions)
+      setIsPlaying(false)
+      setHistory([])
+      setRedoHistory([])
+      setSubtitleSegments([])
+      setSubtitleStatus('idle')
+      setSubtitleError(null)
+      setSubtitleTimingDrafts({})
+      setSilenceStatus('idle')
+      setSilenceError(null)
+      setSilenceSegments([])
+      setSelectedSilenceSegmentKeys([])
+      setStagedSilenceSegmentKeys([])
+      setSilenceNotice(
+        'Switched to the selected source version. Regenerate subtitles or silence detection for this version.',
+      )
+      setEditorStatus('ready')
+      videoPreviewRef.current?.pause()
+      videoPreviewRef.current?.seekTo(0)
+    } catch (error) {
+      setEditorStatus('error')
+      setEditorError(
+        formatVersionDialogError(
+          error,
+          'Could not switch to the selected version.',
+        ),
+      )
+      setVersionsError(
+        formatVersionDialogError(
+          error,
+          'Could not switch to the selected version.',
+        ),
+      )
+    } finally {
+      setSwitchingVersionName(null)
+    }
+  }
+
+  const handleDeleteEditorVersion = async (versionName: string) => {
+    if (!editorSessionId) return
+    try {
+      setDeletingVersionName(versionName)
+      setVersionsError(null)
+      const list = await deleteEditorSessionVersion(
+        editorSessionId,
+        versionName,
+      )
+      setEditorVersions(list)
+    } catch (error) {
+      setVersionsError(
+        formatVersionDialogError(error, 'Could not delete the selected version.'),
+      )
+    } finally {
+      setDeletingVersionName(null)
+    }
+  }
+
+  const handleDownloadEditorVersion = async (versionName: string) => {
+    if (!editorSessionId) return
+    try {
+      setDownloadingVersionName(versionName)
+      setVersionsError(null)
+      const rendered = await downloadEditorSessionVersion(
+        editorSessionId,
+        versionName,
+      )
+      downloadRenderedVideo(rendered)
+    } catch (error) {
+      setVersionsError(
+        formatVersionDialogError(
+          error,
+          'Could not download the selected version.',
+        ),
+      )
+    } finally {
+      setDownloadingVersionName(null)
+    }
   }
 
   const handleSubtitleFileSelected = async (
@@ -3116,17 +3704,12 @@ export default function HomePage(): JSX.Element {
     } else {
       if (previewPlaybackMode === 'edited' && selectedSegment) {
         const currentPreviewTime = videoPreviewRef.current.getCurrentTime()
-        const clipEndBoundary = Math.max(
-          selectedSegment.start,
-          selectedSegment.end - 0.05,
-        )
 
-        if (
-          currentPreviewTime < selectedSegment.start ||
-          currentPreviewTime >= clipEndBoundary
-        ) {
-          videoPreviewRef.current.seekTo(selectedSegment.start)
-          setCurrentTime(selectedSegment.start)
+        if (!isSourceTimeInsideClip(selectedSegment, currentPreviewTime)) {
+          const clipStart = getClipSourceStart(selectedSegment)
+          resetClipHotkeyNavigation()
+          videoPreviewRef.current.seekTo(clipStart)
+          setCurrentTime(clipStart)
         }
       }
       videoPreviewRef.current.play()
@@ -3134,8 +3717,204 @@ export default function HomePage(): JSX.Element {
   }
 
   const handleStepFrame = (direction: -1 | 1) => {
+    resetClipHotkeyNavigation()
     videoPreviewRef.current?.stepFrame(direction)
   }
+
+  const handleJumpSeconds = (direction: -1 | 1) => {
+    if (previewPlaybackMode === 'original') {
+      handleSeekOriginal(clamp(currentTime + direction, 0, totalDuration))
+      return
+    }
+
+    if (activeTimelineSegment && editedDuration > 0) {
+      seekEditedTimelineToTime(timelinePlayheadEditedTime + direction)
+      return
+    }
+
+    handleSeek(currentTime + direction)
+  }
+
+  const handleSelectClipBesidePlayhead = (side: 'next' | 'previous') => {
+    if (segments.length === 0 || segmentTimelineLayouts.length === 0) return
+
+    const hotkeyNavigationIndex =
+      clipHotkeyNavigationSegmentIdRef.current == null
+        ? -1
+        : segments.findIndex(
+            (segment) => segment.id === clipHotkeyNavigationSegmentIdRef.current,
+          )
+    const targetSegment = hotkeyNavigationIndex >= 0
+      ? (() => {
+          const nextIndex =
+            hotkeyNavigationIndex + (side === 'next' ? 1 : -1)
+          return nextIndex >= 0 && nextIndex < segments.length
+            ? segments[nextIndex]
+            : null
+        })()
+      : (() => {
+          const playheadTime = clamp(timelinePlayheadEditedTime, 0, editedDuration)
+          const boundaryTolerance = 0.001
+          const targetLayout =
+            side === 'next'
+              ? segmentTimelineLayouts.find(
+                  (layout) =>
+                    layout.duration > 0 &&
+                    layout.globalStart >= playheadTime - boundaryTolerance,
+                )
+              : [...segmentTimelineLayouts]
+                  .reverse()
+                  .find(
+                    (layout) =>
+                      layout.duration > 0 &&
+                      layout.globalEnd <= playheadTime + boundaryTolerance,
+                  )
+
+          if (!targetLayout) return null
+
+          return (
+            segments.find((segment) => segment.id === targetLayout.segmentId) ??
+            null
+          )
+        })()
+
+    if (!targetSegment) return
+
+    setActiveWorkflowStep('clean')
+    setIsCutModeEnabled(false)
+    setActiveCutHandle(null)
+    selectSingleClip(targetSegment.id, segments, {
+      preserveClipHotkeyNavigation: true,
+    })
+    clipHotkeyNavigationSegmentIdRef.current = targetSegment.id
+  }
+
+  const handleSelectAllClips = () => {
+    if (segments.length === 0) return
+
+    const allSegmentIds = segments.map((segment) => segment.id)
+    resetClipHotkeyNavigation()
+    setActiveWorkflowStep('clean')
+    setIsCutModeEnabled(false)
+    setActiveCutHandle(null)
+    applyClipSelection(segments, allSegmentIds, selectedId ?? allSegmentIds[0] ?? null)
+  }
+
+  const handleDeselectClips = () => {
+    resetClipHotkeyNavigation()
+    setSelectedId(null)
+    setSelectedSegmentIds([])
+    setIsCutModeEnabled(false)
+    setActiveCutHandle(null)
+  }
+
+  useEffect(() => {
+    const handleEditorKeyDown = (event: KeyboardEvent) => {
+      if (
+        doneActionKind != null ||
+        isCreateCategoryModalOpen ||
+        isVersionsModalOpen ||
+        isEditorHotkeyTextEntryTarget(event.target)
+      ) {
+        return
+      }
+
+      const key = event.key.toLowerCase()
+      const hasPrimaryModifier = event.ctrlKey || event.metaKey
+      const hasNoSystemModifier = !event.ctrlKey && !event.metaKey && !event.altKey
+      const isArrowKey =
+        event.key === 'ArrowLeft' ||
+        event.key === 'ArrowRight' ||
+        event.key === 'ArrowUp' ||
+        event.key === 'ArrowDown'
+
+      if (event.repeat && !isArrowKey) {
+        return
+      }
+
+      if (hasPrimaryModifier && !event.altKey && key === 'z') {
+        event.preventDefault()
+        if (event.shiftKey) {
+          void handleRedo()
+        } else {
+          void handleUndo()
+        }
+        return
+      }
+
+      if (hasPrimaryModifier && !event.altKey && !event.shiftKey && key === 'e') {
+        event.preventDefault()
+        if (exportStatus !== 'processing' && editorStatus !== 'syncing') {
+          void handleExportVideo()
+        }
+        return
+      }
+
+      if (hasPrimaryModifier && !event.altKey && !event.shiftKey && key === 'a') {
+        event.preventDefault()
+        handleSelectAllClips()
+        return
+      }
+
+      if (hasNoSystemModifier && !event.shiftKey && event.code === 'Space') {
+        event.preventDefault()
+        handleTogglePlayback()
+        return
+      }
+
+      if (
+        hasNoSystemModifier &&
+        (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
+      ) {
+        event.preventDefault()
+        const direction = event.key === 'ArrowLeft' ? -1 : 1
+        if (event.shiftKey) {
+          handleJumpSeconds(direction)
+        } else {
+          handleStepFrame(direction)
+        }
+        return
+      }
+
+      if (
+        hasNoSystemModifier &&
+        !event.shiftKey &&
+        (event.key === 'ArrowUp' || event.key === 'ArrowDown')
+      ) {
+        event.preventDefault()
+        handleSelectClipBesidePlayhead(
+          event.key === 'ArrowUp' ? 'next' : 'previous',
+        )
+        return
+      }
+
+      if (hasNoSystemModifier && !event.shiftKey && key === 's') {
+        event.preventDefault()
+        void handleSplitAtPlayhead()
+        return
+      }
+
+      if (
+        hasNoSystemModifier &&
+        !event.shiftKey &&
+        (event.key === 'Delete' || event.key === 'Backspace')
+      ) {
+        event.preventDefault()
+        handleDeleteSelectedClip()
+        return
+      }
+
+      if (hasNoSystemModifier && !event.shiftKey && event.key === 'Escape') {
+        event.preventDefault()
+        handleDeselectClips()
+      }
+    }
+
+    window.addEventListener('keydown', handleEditorKeyDown)
+    return () => {
+      window.removeEventListener('keydown', handleEditorKeyDown)
+    }
+  })
 
   useEffect(() => {
     if (
@@ -3147,15 +3926,26 @@ export default function HomePage(): JSX.Element {
       return
     }
 
-    const clipEndBoundary = Math.max(
-      selectedSegment.start,
-      selectedSegment.end - 0.05,
+    const ranges = getClipSourceRanges(selectedSegment)
+    const currentRange = ranges.find(
+      (range) => currentTime >= range.start && currentTime < range.end - 0.05,
     )
 
-    if (currentTime < clipEndBoundary) {
+    if (currentRange) {
       return
     }
 
+    const nextRange = ranges.find((range) => currentTime < range.start)
+    if (nextRange) {
+      videoPreviewRef.current.seekTo(nextRange.start)
+      setCurrentTime(nextRange.start)
+      return
+    }
+
+    const clipEndBoundary = Math.max(
+      getClipSourceStart(selectedSegment),
+      getClipSourceEnd(selectedSegment) - 0.05,
+    )
     videoPreviewRef.current.pause()
     videoPreviewRef.current.seekTo(clipEndBoundary)
     setCurrentTime(clipEndBoundary)
@@ -3178,7 +3968,13 @@ export default function HomePage(): JSX.Element {
   }, [hasUnsavedChanges])
 
   const handleTimelineZoom = (direction: -1 | 1) => {
-    setTimelineZoom((prev) => clamp(prev + direction * 0.5, 1, 4))
+    const nextZoom = clamp(timelineZoom + direction * 0.5, 1, 4)
+    if (nextZoom === timelineZoom) {
+      return
+    }
+
+    shouldCenterPlayheadAfterZoomRef.current = true
+    setTimelineZoom(nextZoom)
   }
 
   const handleSendAIPrompt = async () => {
@@ -3206,6 +4002,7 @@ export default function HomePage(): JSX.Element {
       },
     ])
     setAiPromptDraft('')
+    setAreAIQuickActionsVisible(false)
     setAiRequestStatus('sending')
 
     try {
@@ -3244,6 +4041,23 @@ export default function HomePage(): JSX.Element {
       ])
     }
   }
+
+  useEffect(() => {
+    if (rightPanelView !== 'ai' || isRightPanelCollapsed) return
+
+    const frameId = window.requestAnimationFrame(() => {
+      aiChatEndRef.current?.scrollIntoView({ block: 'end', behavior: 'smooth' })
+    })
+
+    return () => window.cancelAnimationFrame(frameId)
+  }, [
+    aiMessages,
+    aiPendingSuggestion,
+    aiRequestStatus,
+    isApplyingAISuggestion,
+    isRightPanelCollapsed,
+    rightPanelView,
+  ])
 
   useEffect(() => {
     if (!isTimelineDragging) return
@@ -3495,58 +4309,69 @@ export default function HomePage(): JSX.Element {
         try {
           setEditorStatus('syncing')
           const previousState = captureEditorState()
-          const parsePositiveSeconds = (value: unknown): number | null => {
-            if (typeof value === 'number') {
-              return Number.isFinite(value) && value > 0 ? value : null
-            }
-            if (typeof value === 'string') {
-              const direct = Number(value)
-              if (Number.isFinite(direct) && direct > 0) {
-                return direct
-              }
-              const matched = value.match(/(\d+(?:\.\d+)?)/)
-              if (!matched) return null
-              const parsed = Number(matched[1])
-              return Number.isFinite(parsed) && parsed > 0 ? parsed : null
-            }
-            return null
-          }
-          const rawThreshold = aiPendingSuggestion.parameters?.minSilenceSeconds
-          const fallbackThreshold = parsePositiveSeconds(operation.text)
+
+          const lastUserMessage = [...aiMessages]
+            .reverse()
+            .find((m) => m.role === 'user')
+          const userChatBlob = aiMessages
+            .filter((m) => m.role === 'user')
+            .map((m) => m.text)
+            .join('\n')
+          const fromLastUser = lastUserMessage
+            ? inferTrimSilenceThresholdFromTextBlob(lastUserMessage.text)
+            : null
+          const fromAllUserChat = inferTrimSilenceThresholdFromTextBlob(userChatBlob)
+          const fromAssistantNotes = inferTrimSilenceThresholdFromTextBlob(
+            aiPendingSuggestion.notes.join('\n'),
+          )
+          const fromParameters = readTrimSilenceSecondsFromParameters(
+            aiPendingSuggestion.parameters,
+          )
+          const fallbackOpText = parsePositiveSecondsForAISilence(operation.text)
+
+          const thresholdSecondsExplicit =
+            fallbackOpText ??
+            fromLastUser ??
+            fromAllUserChat ??
+            fromParameters ??
+            fromAssistantNotes
           const thresholdSeconds =
-            parsePositiveSeconds(rawThreshold) ?? fallbackThreshold
-          const detection =
-            silenceSegments.length > 0
-              ? {
-                  audioDuration:
-                    silenceSegments[silenceSegments.length - 1]?.end ??
-                    session.duration,
-                  silenceSegments,
-                  speechSegments: [],
+            thresholdSecondsExplicit ?? DEFAULT_AI_TRIM_SILENCE_SECONDS
+
+          if (fromParameters != null && thresholdSecondsExplicit != null) {
+            if (fromParameters !== thresholdSecondsExplicit) {
+              executionNotes.push(
+                `Using silence threshold ${thresholdSecondsExplicit}s from your chat (model suggested ${fromParameters}s).`,
+              )
+            }
+          } else if (thresholdSecondsExplicit == null) {
+            executionNotes.push(
+              `No silence duration parsed from chat or model; removing only gaps ≥ ${thresholdSeconds}s. Say e.g. "longer than 1 second" to change.`,
+            )
+          }
+
+          const detectEnumerateMinSeconds = Math.min(
+            TRIM_SILENCE_DETECT_ENUM_SECONDS,
+            thresholdSeconds,
+          )
+
+          const detection = isTimelineUnedited(segments, videoDuration)
+            ? await (async () => {
+                const videoFile = await ensureVideoFile()
+                if (!videoFile) {
+                  throw new Error(
+                    'Upload a local video file before trimming silence with AI.',
+                  )
                 }
-              : isTimelineUnedited(segments, videoDuration)
-                ? await (async () => {
-                    const videoFile = await ensureVideoFile()
-                    if (!videoFile) {
-                      throw new Error(
-                        'Upload a local video file before trimming silence with AI.',
-                      )
-                    }
-                    return detectSilenceFromVideo(videoFile, {
-                      noiseThresholdDb: -35,
-                      minSilenceDuration:
-                        thresholdSeconds != null && Number.isFinite(thresholdSeconds)
-                          ? thresholdSeconds
-                          : 0.6,
-                      minSegmentDuration: 0.25,
-                    })
-                  })()
-                : await detectSilenceInEditorSession(session.sessionId, {
-                    minSilenceDuration:
-                      thresholdSeconds != null && Number.isFinite(thresholdSeconds)
-                        ? thresholdSeconds
-                        : undefined,
-                  })
+                return detectSilenceFromVideo(videoFile, {
+                  noiseThresholdDb: -35,
+                  minSilenceDuration: detectEnumerateMinSeconds,
+                  minSegmentDuration: 0.25,
+                })
+              })()
+            : await detectSilenceInEditorSession(session.sessionId, {
+                minSilenceDuration: detectEnumerateMinSeconds,
+              })
           let resolvedSilenceSegments = detection.silenceSegments
           if (
             resolvedSilenceSegments.length === 0 &&
@@ -3556,18 +4381,19 @@ export default function HomePage(): JSX.Element {
             if (videoFile) {
               const sourceDetection = await detectSilenceFromVideo(videoFile, {
                 noiseThresholdDb: -35,
-                minSilenceDuration:
-                  thresholdSeconds != null && Number.isFinite(thresholdSeconds)
-                    ? thresholdSeconds
-                    : 0.6,
+                minSilenceDuration: detectEnumerateMinSeconds,
                 minSegmentDuration: 0.25,
               })
+              const overlapFloor = Math.min(
+                TRIM_SILENCE_DETECT_ENUM_SECONDS,
+                thresholdSeconds,
+              )
               resolvedSilenceSegments = sourceDetection.silenceSegments
                 .map((silence) => {
                   for (const segment of segments) {
                     const start = Math.max(silence.start, segment.start)
                     const end = Math.min(silence.end, segment.end)
-                    if (end - start >= 0.6) {
+                    if (end - start >= overlapFloor) {
                       return { start, end }
                     }
                   }
@@ -3579,16 +4405,13 @@ export default function HomePage(): JSX.Element {
           const candidateDurations = resolvedSilenceSegments.map((segment) =>
             Number((segment.end - segment.start).toFixed(2)),
           )
-          const targetSilenceSegments =
-            thresholdSeconds != null && Number.isFinite(thresholdSeconds)
-              ? resolvedSilenceSegments.filter(
-                  (segment) => segment.end - segment.start >= thresholdSeconds,
-                )
-              : resolvedSilenceSegments
+          const targetSilenceSegments = resolvedSilenceSegments.filter(
+            (segment) => segment.end - segment.start >= thresholdSeconds,
+          )
           executionNotes.push(
-            `Silence debug: candidates=${resolvedSilenceSegments.length}, durations=[${candidateDurations.join(
+            `Silence debug: candidates=${resolvedSilenceSegments.length}, detectMin=${detectEnumerateMinSeconds.toFixed(2)}s, trim≥${thresholdSeconds.toFixed(2)}s, durations=[${candidateDurations.slice(0, 120).join(
               ', ',
-            )}], threshold=${thresholdSeconds ?? 'none'}.`,
+            )}${candidateDurations.length > 120 ? ', …' : ''}].`,
           )
           if (targetSilenceSegments.length === 0) {
             executionNotes.push('No silence segments detected to remove.')
@@ -3615,7 +4438,8 @@ export default function HomePage(): JSX.Element {
           setSelectedSilenceSegmentKeys([])
           setStagedSilenceSegmentKeys([])
           executionNotes.push(
-            `Silence trim applied to ${targetSilenceSegments.length} detected ranges.`,
+            `Silence trim applied to ${targetSilenceSegments.length} gaps ≥ ${thresholdSeconds}s.`,
+            'Silence list in the Silence panel was cleared (timestamps shifted). Click Detect Silence to refresh overlays.',
           )
         } catch (error) {
           setEditorStatus('error')
@@ -3763,6 +4587,84 @@ export default function HomePage(): JSX.Element {
             setEditorStatus('ready')
             executionNotes.push('AI chapter suggestions applied to timeline splits and chapter metadata.')
           } catch (error) {
+            if (isEditorSessionNotFoundError(error)) {
+              executionNotes.push(
+                'Detected expired editor session. Recreating session and retrying chapter apply once.',
+              )
+              const recoveredSession = await recreateEditorSessionFromCurrentVideo()
+              if (recoveredSession) {
+                try {
+                  setEditorStatus('syncing')
+                  let workingSession = await replaceEditorSessionSegments(
+                    recoveredSession.sessionId,
+                    recoveredSession.segments,
+                    recoveredSession.selectedSegmentId,
+                  )
+                  const splitPoints = aiPendingSuggestion.chapters
+                    .map((chapter) => chapter.start)
+                    .filter((start): start is string => typeof start === 'string')
+                    .map((start) => parseEditableTimestamp(start))
+                    .filter((value): value is number => value != null && Number.isFinite(value))
+                    .filter((value) => value > 0)
+                    .sort((a, b) => a - b)
+                  for (const splitAtSeconds of splitPoints) {
+                    const containing = workingSession.segments.find(
+                      (segment) =>
+                        splitAtSeconds > segment.start + 0.1 &&
+                        splitAtSeconds < segment.end - 0.1,
+                    )
+                    if (!containing) continue
+                    workingSession = await splitEditorSessionAtTime(
+                      recoveredSession.sessionId,
+                      containing.id,
+                      splitAtSeconds,
+                    )
+                  }
+                  const nextSegments = preserveChapterLabels(
+                    recoveredSession.segments,
+                    workingSession.segments,
+                  )
+                  const renamedSegments = nextSegments.map((segment, index) => ({
+                    ...segment,
+                    label: aiPendingSuggestion.chapters[index]?.title?.trim() || segment.label,
+                  }))
+                  setSegments(renamedSegments)
+                  setChapterSummaryDrafts(
+                    Object.fromEntries(
+                      renamedSegments.map((segment, index) => [
+                        segment.id,
+                        aiPendingSuggestion.chapters[index]?.summary ?? '',
+                      ]),
+                    ),
+                  )
+                  setChapterThumbnailDrafts(
+                    Object.fromEntries(
+                      renamedSegments.map((segment, index) => [
+                        segment.id,
+                        aiPendingSuggestion.chapters[index]?.thumbnailTime ??
+                          aiPendingSuggestion.chapters[index]?.start ??
+                          null,
+                      ]),
+                    ),
+                  )
+                  setRightPanelView('chapters')
+                  setActiveWorkflowStep('chapters')
+                  setEditorStatus('ready')
+                  executionNotes.push(
+                    'AI chapter suggestions applied after recovering editor session.',
+                  )
+                  continue
+                } catch (retryError) {
+                  setEditorStatus('error')
+                  executionNotes.push(
+                    retryError instanceof Error
+                      ? `Chapter apply failed after session recovery: ${retryError.message}`
+                      : 'Chapter apply failed after session recovery.',
+                  )
+                  continue
+                }
+              }
+            }
             setEditorStatus('error')
             executionNotes.push(
               error instanceof Error ? `Chapter apply failed: ${error.message}` : 'Chapter apply failed unexpectedly.',
@@ -3926,6 +4828,37 @@ export default function HomePage(): JSX.Element {
         </div>
       ) : null}
 
+      {mergeStatus === 'processing' ? (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-[#0b1220]/55 px-4 backdrop-blur-sm">
+          <div
+            className={`w-full max-w-sm rounded-[28px] border px-6 py-6 text-center shadow-[0_24px_80px_rgba(15,23,42,0.28)] ${
+              isDark
+                ? 'border-[#31415a] bg-[#111827] text-[#edf2ff]'
+                : 'border-[#d9dde5] bg-white text-[#191c1e]'
+            }`}
+          >
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-[rgba(26,86,219,0.12)]">
+              <span className="h-7 w-7 animate-spin rounded-full border-2 border-[#1a56db] border-t-transparent" />
+            </div>
+            <h2
+              className={`mt-4 text-[15px] font-bold uppercase tracking-[0.2em] ${
+                isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+              }`}
+            >
+              Merging Chapters
+            </h2>
+            <p
+              className={`mt-3 text-sm leading-6 ${
+                isDark ? 'text-[#c6d3eb]' : 'text-[#515f74]'
+              }`}
+            >
+              VidVersity is merging the selected chapters and rebuilding the
+              working video. This can take a moment.
+            </p>
+          </div>
+        </div>
+      ) : null}
+
       {subtitleStatus === 'processing' ? (
         <div className="fixed inset-0 z-[120] flex items-center justify-center bg-[#0b1220]/55 px-4 backdrop-blur-sm">
           <div
@@ -4051,9 +4984,13 @@ export default function HomePage(): JSX.Element {
 
       <div
         className={`grid h-[calc(100vh-68px)] grid-cols-1 overflow-visible ${
-          isRightPanelCollapsed
-            ? 'xl:grid-cols-[248px_minmax(0,1fr)_72px]'
-            : 'xl:grid-cols-[248px_minmax(0,1fr)_340px]'
+          guidedMode
+            ? isRightPanelCollapsed
+              ? 'xl:grid-cols-[248px_minmax(0,1fr)_72px]'
+              : 'xl:grid-cols-[248px_minmax(0,1fr)_340px]'
+            : isRightPanelCollapsed
+              ? 'xl:grid-cols-[minmax(0,1fr)_72px]'
+              : 'xl:grid-cols-[minmax(0,1fr)_340px]'
         } ${isDark ? 'bg-[#0b1220]' : 'bg-[#f7f9fb]'}`}
       >
         <Dialog
@@ -4106,6 +5043,426 @@ export default function HomePage(): JSX.Element {
           </DialogContent>
         </Dialog>
 
+        <Dialog
+          open={doneActionKind != null}
+          onOpenChange={(open) => {
+            if (!open) {
+              handleCloseDoneActionModal()
+            }
+          }}
+        >
+          <DialogContent
+            className={`sm:max-w-[460px] ${
+              isDark
+                ? 'border-[#243149] bg-[#0f172a] text-[#edf2ff]'
+                : 'border-[#e3e7ee] bg-white text-[#191c1e]'
+            }`}
+          >
+            <DialogHeader>
+              <DialogTitle>
+                {doneActionKind ? getDoneActionLabel(doneActionKind) : 'Video Details'}
+              </DialogTitle>
+            </DialogHeader>
+
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <label
+                  className={`block text-[10px] font-bold uppercase tracking-[0.18em] ${
+                    isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+                  }`}
+                  htmlFor="done-video-title"
+                >
+                  Video Title
+                </label>
+                <Input
+                  id="done-video-title"
+                  value={doneVideoTitleDraft}
+                  onChange={(event) => setDoneVideoTitleDraft(event.target.value)}
+                  className={`h-10 rounded-xl text-sm ${
+                    isDark
+                      ? 'border-[#31415a] bg-[#111827] text-[#edf2ff] placeholder:text-[#64748b]'
+                      : 'border-[#d9dde5] bg-white text-[#191c1e] placeholder:text-[#8a94a6]'
+                  }`}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label
+                  className={`block text-[10px] font-bold uppercase tracking-[0.18em] ${
+                    isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+                  }`}
+                >
+                  Video Category
+                </label>
+                <Select
+                  value={doneCategoryDraft || DEFAULT_CATEGORY_VALUE}
+                  onValueChange={handleDoneActionCategorySelect}
+                >
+                  <SelectTrigger
+                    className={`h-10 rounded-xl border text-sm ${
+                      isDark
+                        ? 'border-[#31415a] bg-[#111827] text-[#edf2ff]'
+                        : 'border-[#d9dde5] bg-white text-[#191c1e]'
+                    }`}
+                  >
+                    <SelectValue placeholder="Select a category" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={DEFAULT_CATEGORY_VALUE}>
+                      No category
+                    </SelectItem>
+                    <SelectItem value={NEW_CATEGORY_VALUE}>
+                      New category
+                    </SelectItem>
+                    {categoryOptions.map((category) => (
+                      <SelectItem key={category} value={category}>
+                        {category}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {doneActionKind === 'add-existing-course' ? (
+                <div className="space-y-2">
+                  <label
+                    className={`block text-[10px] font-bold uppercase tracking-[0.18em] ${
+                      isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+                    }`}
+                  >
+                    Course
+                  </label>
+                  <Select
+                    value={doneCourseDraft}
+                    onValueChange={setDoneCourseDraft}
+                  >
+                    <SelectTrigger
+                      className={`h-10 rounded-xl border text-sm ${
+                        isDark
+                          ? 'border-[#31415a] bg-[#111827] text-[#edf2ff]'
+                          : 'border-[#d9dde5] bg-white text-[#191c1e]'
+                      }`}
+                    >
+                      <SelectValue placeholder="Select a course" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {EXISTING_COURSE_OPTIONS.map((course) => (
+                        <SelectItem key={course} value={course}>
+                          {course}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : null}
+
+              {doneActionKind === 'add-new-course' ? (
+                <div className="space-y-2">
+                  <label
+                    className={`block text-[10px] font-bold uppercase tracking-[0.18em] ${
+                      isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+                    }`}
+                    htmlFor="done-new-course-name"
+                  >
+                    New Course Name
+                  </label>
+                  <Input
+                    id="done-new-course-name"
+                    value={doneNewCourseNameDraft}
+                    onChange={(event) =>
+                      setDoneNewCourseNameDraft(event.target.value)
+                    }
+                    placeholder="e.g. Biology 101"
+                    className={`h-10 rounded-xl text-sm ${
+                      isDark
+                        ? 'border-[#31415a] bg-[#111827] text-[#edf2ff] placeholder:text-[#64748b]'
+                        : 'border-[#d9dde5] bg-white text-[#191c1e] placeholder:text-[#8a94a6]'
+                    }`}
+                  />
+                </div>
+              ) : null}
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={handleCloseDoneActionModal}
+                  className={`flex h-10 items-center justify-center rounded-xl border px-4 text-sm font-semibold transition ${
+                    isDark
+                      ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb] hover:bg-[#182238]'
+                      : 'border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb]'
+                  }`}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSubmitDoneAction}
+                  disabled={doneVideoTitleDraft.trim().length === 0}
+                  className={`flex h-10 items-center justify-center rounded-xl px-4 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                    isDark
+                      ? 'bg-[#1a56db] text-white hover:bg-[#2b67ec]'
+                      : 'bg-[#003fb1] text-white hover:bg-[#1a56db]'
+                  }`}
+                >
+                  {doneActionKind ? getDoneActionConfirmLabel(doneActionKind) : 'Save'}
+                </button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog
+          open={isVersionsModalOpen}
+          onOpenChange={(open) => {
+            if (!open) {
+              handleCloseVersionsModal()
+            }
+          }}
+        >
+          <DialogContent
+            className={`sm:max-w-[560px] ${
+              isDark
+                ? 'border-[#243149] bg-[#0f172a] text-[#edf2ff]'
+                : 'border-[#e3e7ee] bg-white text-[#191c1e]'
+            }`}
+          >
+            <DialogHeader>
+              <DialogTitle>Saved versions</DialogTitle>
+            </DialogHeader>
+
+            <div className="space-y-4">
+              <p
+                className={`text-[12px] leading-5 ${
+                  isDark ? 'text-[#8aa0c4]' : 'text-[#515f74]'
+                }`}
+              >
+                The original upload is kept as <span className="font-semibold">_original</span>.
+                Each saved edit is stored with a <span className="font-semibold">_YYYYMMDD_HHMMSS</span>{' '}
+                timestamp. You can review what is already saved, remove versions
+                you no longer need, or save the current edit as a new version.
+              </p>
+
+              {versionsError ? (
+                <div
+                  className={`rounded-xl border px-3 py-2 text-[12px] ${
+                    isDark
+                      ? 'border-[#6f3a45] bg-[#3d1f24] text-[#ff8f9a]'
+                      : 'border-[#f0b8b8] bg-[#fdecec] text-[#a23535]'
+                  }`}
+                >
+                  {versionsError}
+                </div>
+              ) : null}
+
+              <div
+                className={`max-h-[260px] overflow-auto rounded-2xl border ${
+                  isDark
+                    ? 'border-[#243149] bg-[#111827]'
+                    : 'border-[#e3e7ee] bg-[#fbfcfd]'
+                }`}
+              >
+                {versionsStatus === 'loading' ? (
+                  <div
+                    className={`px-3 py-6 text-center text-[12px] ${
+                      isDark ? 'text-[#8aa0c4]' : 'text-[#515f74]'
+                    }`}
+                  >
+                    Loading saved versions...
+                  </div>
+                ) : editorVersions.length === 0 ? (
+                  <div
+                    className={`px-3 py-6 text-center text-[12px] ${
+                      isDark ? 'text-[#8aa0c4]' : 'text-[#515f74]'
+                    }`}
+                  >
+                    No saved versions yet for this session.
+                  </div>
+                ) : (
+                  <ul className="divide-y divide-transparent">
+                    {editorVersions.map((version) => {
+                      const isDeleting = deletingVersionName === version.fileName
+                      const isSwitching = switchingVersionName === version.fileName
+                      const isDownloading =
+                        downloadingVersionName === version.fileName
+                      const canDelete = !version.isOriginal && !version.isCurrent
+                      const sizeMb = version.sizeBytes / (1024 * 1024)
+                      const displayName = version.displayName.replace(
+                        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i,
+                        '',
+                      )
+                      const createdLabel = version.createdAt
+                        ? new Date(version.createdAt).toLocaleString()
+                        : ''
+                      return (
+                        <li
+                          key={version.fileName}
+                          className={`flex flex-col gap-2 border-b px-3 py-2 last:border-b-0 sm:flex-row sm:items-start sm:justify-between sm:gap-3 ${
+                            isDark
+                              ? 'border-[#243149]'
+                              : 'border-[#e3e7ee]'
+                          }`}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span
+                                className={`line-clamp-2 break-all text-[12px] font-semibold ${
+                                  isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'
+                                }`}
+                                title={displayName}
+                              >
+                                {displayName}
+                              </span>
+                              {version.isOriginal ? (
+                                <span
+                                  className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.16em] ${
+                                    isDark
+                                      ? 'border-[#3a6f59] text-[#8fffb1]'
+                                      : 'border-[#b8f0c9] text-[#1f7a3a]'
+                                  }`}
+                                >
+                                  Original
+                                </span>
+                              ) : null}
+                              {version.isCurrent ? (
+                                <span
+                                  className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.16em] ${
+                                    isDark
+                                      ? 'border-[#3a526f] text-[#8fbfff]'
+                                      : 'border-[#b8d4f0] text-[#003fb1]'
+                                  }`}
+                                >
+                                  Current
+                                </span>
+                              ) : null}
+                            </div>
+                            <div
+                              className={`mt-1 text-[10px] ${
+                                isDark ? 'text-[#8aa0c4]' : 'text-[#8a94a6]'
+                              }`}
+                            >
+                              {createdLabel}
+                              {sizeMb > 0
+                                ? ` · ${sizeMb.toFixed(sizeMb >= 10 ? 0 : 1)} MB`
+                                : ''}
+                            </div>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-2 self-end sm:self-start">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void handleSwitchEditorVersion(version.fileName)
+                              }}
+                              disabled={version.isCurrent || isSwitching}
+                              title={
+                                version.isCurrent
+                                  ? 'This is already the current active version.'
+                                  : 'Switch to this version'
+                              }
+                              className={`flex h-8 items-center justify-center gap-1 rounded-full border px-2.5 text-[10px] font-bold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                                isDark
+                                  ? 'border-[#3a526f] text-[#8fbfff] hover:bg-[#182238]'
+                                  : 'border-[#b8d4f0] text-[#003fb1] hover:bg-[#eef4ff]'
+                              }`}
+                            >
+                              {isSwitching ? 'Switching...' : 'Switch'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void handleDownloadEditorVersion(
+                                  version.fileName,
+                                )
+                              }}
+                              disabled={isDownloading}
+                              className={`flex h-8 items-center justify-center gap-1 rounded-full border px-2.5 text-[10px] font-bold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                                isDark
+                                  ? 'border-[#31415a] text-[#c6d3eb] hover:bg-[#182238]'
+                                  : 'border-[#d9dde5] text-[#515f74] hover:bg-[#f7f9fb]'
+                              }`}
+                            >
+                              <Download className="h-3.5 w-3.5" />
+                              {isDownloading ? '...' : 'Download'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void handleDeleteEditorVersion(version.fileName)
+                              }}
+                              disabled={!canDelete || isDeleting}
+                              title={
+                                !canDelete
+                                  ? version.isOriginal
+                                    ? 'The original version cannot be deleted.'
+                                    : 'The current active version cannot be deleted.'
+                                  : 'Delete this version'
+                              }
+                              className={`flex h-8 items-center justify-center gap-1 rounded-full border px-2.5 text-[10px] font-bold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                                isDark
+                                  ? 'border-[#6f3a45] text-[#ff8f9a] hover:bg-[#3d1f24]'
+                                  : 'border-[#f0b8b8] text-[#a23535] hover:bg-[#fdecec]'
+                              }`}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              {isDeleting ? '...' : 'Delete'}
+                            </button>
+                          </div>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                )}
+              </div>
+
+              {saveVersionError ? (
+                <div
+                  className={`rounded-xl border px-3 py-2 text-[12px] ${
+                    isDark
+                      ? 'border-[#6f3a45] bg-[#3d1f24] text-[#ff8f9a]'
+                      : 'border-[#f0b8b8] bg-[#fdecec] text-[#a23535]'
+                  }`}
+                >
+                  {saveVersionError}
+                </div>
+              ) : null}
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={handleCloseVersionsModal}
+                  className={`flex h-10 items-center justify-center rounded-xl border px-4 text-sm font-semibold transition ${
+                    isDark
+                      ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb] hover:bg-[#182238]'
+                      : 'border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb]'
+                  }`}
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleSaveCurrentVersion()
+                  }}
+                  disabled={
+                    saveVersionStatus === 'saving' ||
+                    editorStatus === 'syncing' ||
+                    (!selectedVideoFile && !editorSessionId)
+                  }
+                  className={`flex h-10 items-center justify-center gap-2 rounded-xl px-4 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                    isDark
+                      ? 'bg-[#1a56db] text-white hover:bg-[#2b67ec]'
+                      : 'bg-[#003fb1] text-white hover:bg-[#1a56db]'
+                  }`}
+                >
+                  <Save className="h-4 w-4" />
+                  {saveVersionStatus === 'saving'
+                    ? 'Saving Version...'
+                    : 'Save Current Edit as New Version'}
+                </button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
+
         <input
           ref={subtitleUploadInputRef}
           type="file"
@@ -4121,13 +5478,14 @@ export default function HomePage(): JSX.Element {
           onChange={handleAppendVideoSelected}
         />
 
-        <aside
-          className={`hidden min-h-0 overflow-visible border-r px-4 py-4 xl:flex xl:flex-col xl:justify-between ${
-            isDark
-              ? 'border-[#243149] bg-[#121a2b]'
-              : 'border-[#d9dde5] bg-[#f2f4f6]'
-          }`}
-        >
+        {guidedMode ? (
+          <aside
+            className={`hidden min-h-0 overflow-visible border-r px-4 py-4 xl:flex xl:flex-col xl:justify-between ${
+              isDark
+                ? 'border-[#243149] bg-[#121a2b]'
+                : 'border-[#d9dde5] bg-[#f2f4f6]'
+            }`}
+          >
 	          <div className="space-y-5">
 	            <div
 	              className={`rounded-[20px] border px-3 py-3 ${
@@ -4222,119 +5580,21 @@ export default function HomePage(): JSX.Element {
 	              </div>
 	            </div>
 
-            <div
-              className={`rounded-[20px] border px-4 py-4 ${
-                isDark
-                  ? 'border-[#243149] bg-[#0f172a]'
-                  : 'border-[#e3e7ee] bg-white'
-              }`}
-            >
-	              <p
-	                className={`text-[11px] font-bold uppercase tracking-[0.18em] ${
-	                  isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
-	                }`}
-	              >
-	                Video Category
-	              </p>
-
-              <div className="mt-4">
-                <Select
-                  value={selectedCategory || DEFAULT_CATEGORY_VALUE}
-                  onValueChange={handleCategorySelect}
-                >
-                  <SelectTrigger
-                    className={`h-10 rounded-xl border text-sm ${
-                      isDark
-                        ? 'border-[#31415a] bg-[#111827] text-[#edf2ff]'
-                        : 'border-[#d9dde5] bg-white text-[#191c1e]'
-                    }`}
-                  >
-                    <SelectValue placeholder="Select a category" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={DEFAULT_CATEGORY_VALUE}>
-                      No category
-                    </SelectItem>
-                    <SelectItem value={NEW_CATEGORY_VALUE}>
-                      New category
-                    </SelectItem>
-                    {categoryOptions.map((category) => (
-                      <SelectItem key={category} value={category}>
-                        {category}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-	            </div>
-	          </div>
-
-	          <div
-	            className={`mt-5 rounded-[20px] border px-4 py-4 ${
-	              isDark
-	                ? 'border-[#243149] bg-[#0f172a]'
-	                : 'border-[#e3e7ee] bg-white'
-	            }`}
-	          >
-	            <p
-	              className={`text-[11px] font-bold uppercase tracking-[0.18em] ${
-	                isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
-	              }`}
-	            >
-	              Session Status
-	            </p>
-	            <div className="mt-3 space-y-3">
-	              <div className="flex items-center justify-between text-[12px]">
-	                <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
-	                  Video loaded
-	                </span>
-	                <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
-	                  {selectedVideoFile || videoSourceUrl ? 'Ready' : 'Waiting'}
-	                </span>
-	              </div>
-	              <div className="flex items-center justify-between text-[12px]">
-	                <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
-	                  Subtitles
-	                </span>
-	                <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
-	                  {subtitleSegments.length > 0
-	                    ? `${subtitleSegments.length} loaded`
-	                    : subtitleStatus === 'processing'
-	                      ? 'Processing'
-	                      : 'Not added'}
-	                </span>
-	              </div>
-	              <div className="flex items-center justify-between text-[12px]">
-	                <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
-	                  Silence cleanup
-	                </span>
-	                <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
-	                  {silenceStatus === 'processing'
-	                    ? 'Analyzing'
-	                    : silenceStatus === 'success'
-	                      ? `${selectedSilenceCount}/${silenceSegments.length} selected`
-	                      : 'Ready'}
-	                </span>
-	              </div>
-	              <div className="flex items-center justify-between text-[12px]">
-	                <span className={isDark ? 'text-[#9fb0ca]' : 'text-[#57657a]'}>
-	                  Guided mode
-	                </span>
-	                <span className={isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'}>
-	                  {guidedMode ? 'On' : 'Off'}
-	                </span>
-	              </div>
-	            </div>
 	          </div>
 
 	        </aside>
+        ) : null}
 
         <main
           className={`min-h-0 min-w-0 overflow-y-auto overflow-x-hidden ${
             isDark ? 'bg-[#0b1220]' : 'bg-[#f7f9fb]'
           }`}
         >
-          <div className="mx-auto flex min-h-full w-full max-w-[1120px] flex-col px-3 py-3 xl:px-4 xl:py-4">
+          <div
+            className={`mx-auto flex min-h-full w-full flex-col px-3 py-2.5 xl:px-4 xl:py-3 ${
+              guidedMode ? 'max-w-[1120px]' : 'max-w-[1368px]'
+            }`}
+          >
             <div
               className={`flex min-h-0 flex-1 flex-col overflow-visible rounded-[32px] border shadow-[0_20px_60px_rgba(15,23,42,0.08)] ${
                 isDark
@@ -4408,16 +5668,16 @@ export default function HomePage(): JSX.Element {
 		                    </span>
 		                  ) : null}
 		                </button>
-	                <div className="mx-auto w-full max-w-[1040px] px-4 py-3">
+	                <div className="mx-auto w-full max-w-[1040px] px-4 py-2.5">
                   <div
-                    className={`rounded-[24px] border px-4 py-2.5 shadow-[0_18px_50px_rgba(15,23,42,0.06)] ${
+                    className={`rounded-[20px] border px-3 py-2 shadow-[0_14px_36px_rgba(15,23,42,0.05)] ${
                       isDark
                         ? 'border-[#243149] bg-[#0f172a]'
                         : 'border-[#d9dde5] bg-white'
                     }`}
                   >
                     <div
-                      className={`mb-2.5 flex flex-wrap items-center justify-center gap-3 border-b pb-2.5 ${
+                      className={`mb-2 flex flex-wrap items-center justify-center gap-2.5 border-b pb-2 ${
                         isDark ? 'border-[#243149]' : 'border-[#edf0f4]'
                       }`}
                     >
@@ -4510,75 +5770,152 @@ export default function HomePage(): JSX.Element {
                       </div>
                     </div>
 
-	                    <div className="flex flex-wrap items-center justify-center gap-2">
+	                    <div className="flex flex-wrap items-stretch justify-center gap-1.5">
 	                      <div
-	                        className={`flex items-center gap-1 rounded-2xl border px-1.5 py-1 ${
-	                          activeWorkflowStep === 'clean'
-	                            ? isDark
-	                              ? 'border-[#8bb8ff] bg-[#182238]'
-	                              : 'border-[#7aa4ff] bg-[#eef3ff]'
-	                            : isDark
-	                              ? 'border-[#243149] bg-[#111827]'
-	                              : 'border-[#e3e7ee] bg-[#fbfcfd]'
-	                        }`}
+	                        className="flex items-start gap-1 px-1 py-1"
 	                      >
+	                        <div className="flex flex-col items-center gap-1">
+	                          <ToolbarButton
+	                            label="Cut"
+	                            tooltip={
+	                              isCutModeEnabled
+	                                ? 'Turn off cut mode without applying the selected range.'
+	                                : 'Activate cut mode so you can drag the pink range handles across the selected clips on the timeline.'
+	                            }
+	                            guidedMode={guidedMode}
+	                            isDark={isDark}
+	                            onClick={handleActivateCutMode}
+	                            icon={Scissors}
+	                            disabled={!canCutSelectedSegments}
+	                            active={isCutModeEnabled}
+	                            emphasized={activeWorkflowStep === 'clean'}
+	                            tone="workspace"
+	                          />
+	                          {isCutModeEnabled ? (
+	                            <div className="flex items-center gap-1">
+	                              <ToolbarButton
+	                                label="Apply Cut"
+	                                tooltip="Apply the selected cut range and remove everything outside it from the selected clips."
+	                                guidedMode={guidedMode}
+	                                isDark={isDark}
+	                                onClick={() => {
+	                                  void handleCutVideo()
+	                                }}
+	                                icon={CheckCheck}
+	                                disabled={!canCutSelectedSegments}
+	                                emphasized={activeWorkflowStep === 'clean'}
+	                                tone="workspace"
+	                                size="compact"
+	                              />
+	                              <ToolbarButton
+	                                label="Cancel"
+	                                tooltip="Cancel cut mode and keep the timeline unchanged."
+	                                guidedMode={guidedMode}
+	                                isDark={isDark}
+	                                onClick={handleActivateCutMode}
+	                                icon={CircleX}
+	                                emphasized={activeWorkflowStep === 'clean'}
+	                                tone="workspace"
+	                                size="compact"
+	                              />
+	                            </div>
+	                          ) : null}
+	                        </div>
 	                        <ToolbarButton
-	                          label="Clean"
-	                          tooltip="Open cleaning tools to keep a range, split at the playhead, or delete a selected section."
+	                          label="Split"
+	                          tooltip="Split the selected chapter at the playhead."
 	                          guidedMode={guidedMode}
 	                          isDark={isDark}
-	                          onClick={handleOpenCleanPanel}
-	                          icon={Brush}
-	                          active={rightPanelView === 'clean' && !isRightPanelCollapsed}
-	                          tone="editor"
+	                          onClick={() => {
+	                            void handleSplitAtPlayhead()
+	                          }}
+	                          icon={Split}
+	                          disabled={!selectedSegment || !hasSingleSelectedSegment}
+	                          emphasized={activeWorkflowStep === 'clean'}
+	                          tone="workspace"
 	                        />
 	                        <ToolbarButton
-	                          label="Add Video"
-	                          tooltip="Add another video to the end of the timeline."
+	                          label="Merge"
+	                          tooltip="Merge works when two or more adjacent chapters are selected on the timeline. Use Shift-click for a range, or Cmd/Ctrl-click to add chapters to the selection."
 	                          guidedMode={guidedMode}
 	                          isDark={isDark}
-	                          onClick={handleAppendVideoClick}
-	                          icon={Plus}
-	                          disabled={
-	                            appendStatus === 'processing' ||
-	                            exportStatus === 'processing' ||
-	                            editorStatus === 'syncing' ||
-	                            (!selectedVideoFile && !videoSourceUrl && !preloadedVideoUrl)
-	                          }
-	                          tone="global"
+	                          onClick={() => {
+	                            void handleMergeSelectedClips()
+	                          }}
+	                          icon={Clapperboard}
+	                          disabled={!canMergeSelectedSegments}
+	                          emphasized={activeWorkflowStep === 'clean'}
+	                          tone="workspace"
+	                        />
+	                        <ToolbarButton
+	                          label="Delete"
+	                          tooltip="Delete the selected chapter from the timeline."
+	                          guidedMode={guidedMode}
+	                          isDark={isDark}
+	                          onClick={handleDeleteSelectedClip}
+	                          icon={Trash2}
+	                          disabled={!selectedSegment || !hasSingleSelectedSegment}
+	                          danger
+	                          emphasized={activeWorkflowStep === 'clean'}
+	                          tone="workspace"
+	                        />
+	                        <ToolbarButton
+	                          label="Arrange"
+	                          tooltip="Enable drag-and-drop so you can reorder chapters directly on the timeline."
+	                          guidedMode={guidedMode}
+	                          isDark={isDark}
+	                          onClick={handleToggleArrangeMode}
+	                          icon={Files}
+	                          active={isArrangeModeEnabled}
+	                          emphasized={activeWorkflowStep === 'clean'}
+	                          tone="workspace"
 	                        />
 	                        <ToolbarButton
 	                          label="Undo"
 	                          tooltip="Undo your last change."
 	                          guidedMode={guidedMode}
 	                          isDark={isDark}
-	                          onClick={handleUndo}
+	                          onClick={() => {
+	                            void handleUndo()
+	                          }}
 	                          icon={RotateCcw}
 	                          disabled={history.length === 0}
+	                          emphasized={activeWorkflowStep === 'clean'}
+	                          tone="global"
+	                        />
+	                        <ToolbarButton
+	                          label="Redo"
+	                          tooltip="Redo the last change you undid."
+	                          guidedMode={guidedMode}
+	                          isDark={isDark}
+	                          onClick={() => {
+	                            void handleRedo()
+	                          }}
+	                          icon={Redo2}
+	                          disabled={redoHistory.length === 0}
+	                          emphasized={activeWorkflowStep === 'clean'}
 	                          tone="global"
 	                        />
 	                      </div>
+	                      <span
+	                        className={`my-2 w-px self-stretch ${
+	                          isDark ? 'bg-[#31415a]' : 'bg-[#d9dde5]'
+	                        }`}
+	                        aria-hidden="true"
+	                      />
 
 	                      <div
-	                        className={`flex items-center gap-1 rounded-2xl border px-1.5 py-1 ${
-	                          activeWorkflowStep === 'polish'
-	                            ? isDark
-	                              ? 'border-[#8bb8ff] bg-[#182238]'
-	                              : 'border-[#7aa4ff] bg-[#eef3ff]'
-	                            : isDark
-	                              ? 'border-[#243149] bg-[#111827]'
-	                              : 'border-[#e3e7ee] bg-[#fbfcfd]'
-	                        }`}
+	                        className="flex items-start gap-1 px-1 py-1"
 	                      >
 	                        <ToolbarButton
 	                          label="Silencer"
 	                          tooltip="Find silent parts you may want to remove."
 	                          guidedMode={guidedMode}
 	                          isDark={isDark}
-	                          onClick={handleRemoveSilence}
+	                          onClick={openSilenceReviewPanel}
 	                          icon={Mic}
-	                          disabled={silenceStatus === 'processing'}
 	                          active={rightPanelView === 'silence' && !isRightPanelCollapsed}
+	                          emphasized={activeWorkflowStep === 'polish'}
 	                          tone="editor"
 	                        />
 	                        <ToolbarButton
@@ -4594,20 +5931,19 @@ export default function HomePage(): JSX.Element {
 	                          icon={Subtitles}
 	                          disabled={subtitleStatus === 'processing'}
 	                          active={rightPanelView === 'subtitles' && !isRightPanelCollapsed}
+	                          emphasized={activeWorkflowStep === 'polish'}
 	                          tone="workspace"
 	                        />
 	                      </div>
+	                      <span
+	                        className={`my-2 w-px self-stretch ${
+	                          isDark ? 'bg-[#31415a]' : 'bg-[#d9dde5]'
+	                        }`}
+	                        aria-hidden="true"
+	                      />
 
 	                      <div
-	                        className={`flex items-center gap-1 rounded-2xl border px-1.5 py-1 ${
-	                          activeWorkflowStep === 'chapters'
-	                            ? isDark
-	                              ? 'border-[#8bb8ff] bg-[#182238]'
-	                              : 'border-[#7aa4ff] bg-[#eef3ff]'
-	                            : isDark
-	                              ? 'border-[#243149] bg-[#111827]'
-	                              : 'border-[#e3e7ee] bg-[#fbfcfd]'
-	                        }`}
+	                        className="flex items-start gap-1 px-1 py-1"
 	                      >
 	                        <ToolbarButton
 	                          label="Chapters"
@@ -4617,20 +5953,19 @@ export default function HomePage(): JSX.Element {
 	                          onClick={handleOpenChaptersPanel}
 	                          icon={Clapperboard}
 	                          active={rightPanelView === 'chapters' && !isRightPanelCollapsed}
+	                          emphasized={activeWorkflowStep === 'chapters'}
 	                          tone="workspace"
 	                        />
 	                      </div>
+	                      <span
+	                        className={`my-2 w-px self-stretch ${
+	                          isDark ? 'bg-[#31415a]' : 'bg-[#d9dde5]'
+	                        }`}
+	                        aria-hidden="true"
+	                      />
 
 	                      <div
-	                        className={`flex items-center gap-1 rounded-2xl border px-1.5 py-1 ${
-	                          activeWorkflowStep === 'course'
-	                            ? isDark
-	                              ? 'border-[#8bb8ff] bg-[#182238]'
-	                              : 'border-[#7aa4ff] bg-[#eef3ff]'
-	                            : isDark
-	                              ? 'border-[#243149] bg-[#111827]'
-	                              : 'border-[#e3e7ee] bg-[#fbfcfd]'
-	                        }`}
+	                        className="flex items-start gap-1 px-1 py-1"
 	                      >
 	                        <ToolbarButton
 	                          label="Done"
@@ -4640,6 +5975,7 @@ export default function HomePage(): JSX.Element {
 	                          onClick={handleOpenDonePanel}
 	                          icon={Check}
 	                          active={rightPanelView === 'done' && !isRightPanelCollapsed}
+	                          emphasized={activeWorkflowStep === 'course'}
 	                          tone="global"
 	                        />
 	                      </div>
@@ -4648,7 +5984,7 @@ export default function HomePage(): JSX.Element {
                 </div>
 
                 {subtitleError ? (
-                  <div className="mx-auto w-full max-w-[1040px] px-4 pb-4">
+                  <div className="mx-auto w-full max-w-[1040px] px-4 pb-2">
                     <div
                       className={`max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-[20px] border px-4 py-3 text-[12px] leading-5 ${
                         isDark
@@ -4662,7 +5998,7 @@ export default function HomePage(): JSX.Element {
                 ) : null}
 
                 {silenceError ? (
-                  <div className="mx-auto w-full max-w-[1040px] px-4 pb-4">
+                  <div className="mx-auto w-full max-w-[1040px] px-4 pb-2">
                     <div
                       className={`max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-[20px] border px-4 py-3 text-[12px] leading-5 ${
                         isDark
@@ -4676,7 +6012,7 @@ export default function HomePage(): JSX.Element {
                 ) : null}
 
                 {editorError ? (
-                  <div className="mx-auto w-full max-w-[1040px] px-4 pb-4">
+                  <div className="mx-auto w-full max-w-[1040px] px-4 pb-2">
                     <div
                       className={`max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-[20px] border px-4 py-3 text-[12px] leading-5 ${
                         isDark
@@ -4690,7 +6026,7 @@ export default function HomePage(): JSX.Element {
                 ) : null}
 
                 {exportError ? (
-                  <div className="mx-auto w-full max-w-[1040px] px-4 pb-4">
+                  <div className="mx-auto w-full max-w-[1040px] px-4 pb-2">
                     <div
                       className={`max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-[20px] border px-4 py-3 text-[12px] leading-5 ${
                         isDark
@@ -4703,15 +6039,15 @@ export default function HomePage(): JSX.Element {
                   </div>
                 ) : null}
 
-                <div className="mx-auto w-full max-w-[1040px] px-4 pb-4">
+                <div className="mx-auto w-full max-w-[1040px] px-4 pb-2.5">
                   <div
-                    className={`rounded-[24px] border px-4 py-3 shadow-[0_18px_50px_rgba(15,23,42,0.06)] ${
+                    className={`rounded-[20px] border px-3 py-2.5 shadow-[0_14px_36px_rgba(15,23,42,0.05)] ${
                       isDark
                         ? 'border-[#243149] bg-[#0f172a]'
                         : 'border-[#d9dde5] bg-white'
                     }`}
                   >
-                    <div className="overflow-x-auto pb-1">
+                    <div ref={timelineScrollRef} className="overflow-x-auto pb-1">
                       <div className="relative min-w-full" style={{ width: `${timelineZoom * 100}%` }}>
                         <div className="relative">
                           <div
@@ -4724,14 +6060,14 @@ export default function HomePage(): JSX.Element {
                             }}
                           >
                             <div
-                              className={`relative flex min-h-[84px] items-stretch overflow-hidden rounded-2xl border ${
+                              className={`relative flex min-h-[58px] items-stretch overflow-hidden rounded-xl border ${
                                 isDark
                                   ? 'border-[#2b3950] bg-[#1a2435]'
                                   : 'border-[#dfe5ec] bg-[#eff3f8]'
                               }`}
                             >
                               {segments.map((segment) => {
-                                const duration = Math.max(0.1, segment.end - segment.start)
+                                const duration = Math.max(0.1, getClipDuration(segment))
                                 const isPrimarySelected = selectedId === segment.id
                                 const isSelected = selectedSegmentIdSet.has(segment.id)
                                 const isDragTarget =
@@ -4852,9 +6188,10 @@ export default function HomePage(): JSX.Element {
                                         0,
                                         1,
                                       )
-                                      const nextTime =
-                                        segment.start +
-                                        (segment.end - segment.start) * ratio
+                                      const nextTime = mapClipEditedOffsetToSourceTime(
+                                        segment,
+                                        getClipDuration(segment) * ratio,
+                                      )
                                       selectSingleClip(segment.id)
                                       handleSeek(nextTime)
                                       setIsTimelineDragging(true)
@@ -4916,13 +6253,13 @@ export default function HomePage(): JSX.Element {
                                       </span>
                                     ) : null}
 
-                                    <div className="relative z-10 px-3 py-2">
-                                      <div className="px-2 py-2 drop-shadow-[0_2px_8px_rgba(15,23,42,0.55)]">
-                                        <span className="block min-w-0 truncate text-[10px] font-bold uppercase tracking-[0.18em]">
+                                    <div className="relative z-10 px-2 py-1.5">
+                                      <div className="px-1.5 py-1.5 drop-shadow-[0_2px_8px_rgba(15,23,42,0.55)]">
+                                        <span className="block min-w-0 truncate text-[9px] font-bold uppercase tracking-[0.16em]">
                                           {segment.label}
                                         </span>
                                         <span
-                                          className={`mt-1 block text-[11px] ${
+                                          className={`mt-0.5 block text-[10px] ${
                                             isSelected
                                               ? isPrimarySelected
                                                 ? 'text-white'
@@ -4934,7 +6271,7 @@ export default function HomePage(): JSX.Element {
                                                 : 'text-white/95'
                                           }`}
                                         >
-                                          Source {formatClock(segment.start)} - {formatClock(segment.end)}
+                                          Source {formatClipSourceRange(segment)}
                                         </span>
                                       </div>
                                     </div>
@@ -4954,7 +6291,7 @@ export default function HomePage(): JSX.Element {
                                     style={{ left: `${timelinePlayheadRatio * 100}%` }}
                                   />
                                   <span
-                                    className="absolute bottom-7 rounded-full bg-[#111827] px-2 py-0.5 text-[9px] font-mono text-white shadow-sm"
+                                    className="absolute bottom-5 rounded-full bg-[#111827] px-2 py-0.5 text-[9px] font-mono text-white shadow-sm"
                                     style={getTimelineTimestampStyle(timelinePlayheadRatio)}
                                   >
                                     {formatEditableTimestamp(timelinePlayheadEditedTime)}
@@ -5080,18 +6417,9 @@ export default function HomePage(): JSX.Element {
                             </div>
                           </div>
 
-                          <div className="mt-3 px-1">
+                          <div className="mt-2 px-1">
                             <div
-                              className={`mb-1 flex items-center justify-between px-1 text-[9px] font-bold uppercase tracking-[0.18em] ${
-                                isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
-                              }`}
-                            >
-                              <span>Original Video Reference</span>
-                              <span>{formatClock(totalDuration)}</span>
-                            </div>
-
-                            <div
-                              className={`relative h-8 overflow-hidden rounded-xl border ${
+                              className={`relative h-5 overflow-hidden rounded-lg border ${
                                 isDark
                                   ? 'border-[#2b3950] bg-[#101827]'
                                   : 'border-[#dfe5ec] bg-[#f6f8fb]'
@@ -5160,7 +6488,7 @@ export default function HomePage(): JSX.Element {
                                     style={{ left: `${sourcePlayheadRatio * 100}%` }}
                                   />
                                   <span
-                                    className="absolute -top-7 rounded-full bg-[#111827] px-2 py-0.5 text-[9px] font-mono text-white shadow-sm"
+                                    className="absolute -top-6 rounded-full bg-[#111827] px-2 py-0.5 text-[9px] font-mono text-white shadow-sm"
                                     style={getTimelineTimestampStyle(sourcePlayheadRatio)}
                                   >
                                     {formatEditableTimestamp(currentTime)}
@@ -5172,35 +6500,6 @@ export default function HomePage(): JSX.Element {
                         </div>
 
                         <div className="pt-1">
-                          <div
-                            className={`mb-1 flex items-center justify-between px-2 text-[9px] font-bold uppercase tracking-[0.18em] ${
-                              isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
-                            }`}
-                          >
-                            <span>
-                              {segments.length} chapter{segments.length === 1 ? '' : 's'}
-                              {selectedSegments.length > 1
-                                ? ` · ${selectedSegments.length} selected`
-                                : ''}
-                            </span>
-                            <span>
-                              {editorStatus === 'syncing'
-                                ? 'Syncing editor'
-                                : editorSessionId
-                                  ? 'Editor session active'
-                                  : selectedVideoFile
-                                    ? 'Ready to create editor session'
-                                    : 'Upload a local video to edit'}
-                            </span>
-                          </div>
-                          <div
-                            className={`mb-1 flex items-center justify-between px-2 text-[9px] font-bold uppercase tracking-[0.18em] ${
-                              isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
-                            }`}
-                          >
-                            <span>Edited Timeline</span>
-                            <span>{formatClock(editedDuration)}</span>
-                          </div>
                           <div
                             className={`flex justify-between px-2 text-[9px] font-mono ${
                               isDark ? 'text-[#8fa2c2]' : 'text-[#737686]'
@@ -5234,9 +6533,7 @@ export default function HomePage(): JSX.Element {
 	          >
 	            {!isRightPanelCollapsed ? (
 	              <div className="flex items-center gap-2">
-                {rightPanelView === 'clean' ? (
-                  <Brush className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
-                ) : rightPanelView === 'silence' ? (
+                {rightPanelView === 'silence' ? (
                   <Mic className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
                 ) : rightPanelView === 'chapters' ? (
                   <Clapperboard className={`h-4 w-4 ${isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'}`} />
@@ -5251,10 +6548,8 @@ export default function HomePage(): JSX.Element {
                   className={`text-[12px] font-bold uppercase tracking-[0.18em] ${
                     isDark ? 'text-[#c6d3eb]' : 'text-[#515f74]'
                   }`}
-                >
-                  {rightPanelView === 'clean'
-                    ? 'Clean'
-                    : rightPanelView === 'silence'
+	                >
+                  {rightPanelView === 'silence'
                     ? 'Silence Review'
                     : rightPanelView === 'chapters'
                       ? 'Chapters'
@@ -5293,186 +6588,7 @@ export default function HomePage(): JSX.Element {
                   : 'border-[#d9dde5] bg-[linear-gradient(180deg,#ffffff_0%,#f7f9fb_100%)]'
               }`}
             >
-                {rightPanelView === 'clean' ? (
-                  <div className="flex min-h-0 flex-1 flex-col overflow-visible">
-                    <div
-                      className={`mb-4 rounded-2xl border p-2 ${
-                        isDark
-                          ? 'border-[#243149] bg-[#111827]'
-                          : 'border-[#e3e7ee] bg-[#fbfcfd]'
-                      }`}
-                    >
-                      <div className="grid grid-cols-3 gap-2">
-                        <ToolbarButton
-                          label="Cut"
-                          tooltip="Activate cut mode so you can drag the pink range handles across the selected clips on the timeline."
-                          guidedMode
-                          isDark={isDark}
-                          onClick={handleActivateCutMode}
-                          icon={Scissors}
-                          disabled={!canCutSelectedSegments}
-                          active={isCutModeEnabled}
-                          tone="workspace"
-                        />
-                        <ToolbarButton
-                          label="Split"
-                          tooltip="Split the selected chapter at the playhead."
-                          guidedMode
-                          isDark={isDark}
-                          onClick={() => {
-                            void handleSplitAtPlayhead()
-                          }}
-                          icon={Split}
-                          disabled={!selectedSegment || !hasSingleSelectedSegment}
-                          tone="workspace"
-                        />
-                        <ToolbarButton
-                          label="Arrange"
-                          tooltip="Enable drag-and-drop so you can reorder chapters directly on the timeline."
-                          guidedMode
-                          isDark={isDark}
-                          onClick={handleToggleArrangeMode}
-                          icon={Files}
-                          active={isArrangeModeEnabled}
-                          tone="workspace"
-                        />
-                      </div>
-                      <div className="mt-2 grid grid-cols-2 gap-2">
-                        <ToolbarButton
-                          label="Merge"
-                          tooltip="Merge works when two or more adjacent chapters are selected on the timeline. Use Shift-click for a range, or Cmd/Ctrl-click to add chapters to the selection."
-                          guidedMode
-                          isDark={isDark}
-                          onClick={() => {
-                            void handleMergeSelectedClips()
-                          }}
-                          icon={Clapperboard}
-                          disabled={!canMergeSelectedSegments}
-                          tone="workspace"
-                        />
-                        <ToolbarButton
-                          label="Delete"
-                          tooltip="Delete the selected chapter from the timeline."
-                          guidedMode
-                          isDark={isDark}
-                          onClick={handleDeleteSelectedClip}
-                          icon={Trash2}
-                          disabled={!selectedSegment || !hasSingleSelectedSegment}
-                          danger
-                          tone="workspace"
-                        />
-                      </div>
-                    </div>
-
-                    {isCutModeEnabled ? (
-                      <>
-                        <div
-                          className={`mb-4 rounded-2xl border px-4 py-3 text-[12px] leading-5 ${
-                            isDark
-                              ? 'border-[#243149] bg-[#111827] text-[#9fb0ca]'
-                              : 'border-[#e3e7ee] bg-[#fbfcfd] text-[#57657a]'
-                          }`}
-                        >
-                          Cut mode is active. Drag the two pink range handles across
-                          the selected clips to keep one continuous section from that
-                          selection. Unselected clips will stay unchanged.
-                        </div>
-
-                        <div className="mb-4">
-                          <ToolbarButton
-                            label="Apply Cut"
-                            tooltip="Apply the selected cut range and remove everything outside it from the selected clips."
-                            guidedMode
-                            isDark={isDark}
-                            onClick={() => {
-                              void handleCutVideo()
-                            }}
-                            icon={Scissors}
-                            disabled={!canCutSelectedSegments}
-                            tone="workspace"
-                          />
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-3">
-                          <div
-                            className={`rounded-2xl border px-4 py-3 ${
-                              isDark
-                                ? 'border-[#243149] bg-[#111827]'
-                                : 'border-[#e3e7ee] bg-[#fbfcfd]'
-                            }`}
-                          >
-                            <span
-                              className={`block text-[9px] font-bold uppercase tracking-[0.14em] ${
-                                isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
-                              }`}
-                            >
-                              Keep From
-                            </span>
-                            <span
-                              className={`mt-2 block text-[14px] font-semibold ${
-                                isDark ? 'text-[#e5edf9]' : 'text-[#233147]'
-                              }`}
-                            >
-                              {formatEditableTimestamp(normalizedCutRange.start)}
-                            </span>
-                          </div>
-
-                          <div
-                            className={`rounded-2xl border px-4 py-3 ${
-                              isDark
-                                ? 'border-[#243149] bg-[#111827]'
-                                : 'border-[#e3e7ee] bg-[#fbfcfd]'
-                            }`}
-                          >
-                            <span
-                              className={`block text-[9px] font-bold uppercase tracking-[0.14em] ${
-                                isDark ? 'text-[#8fa2c2]' : 'text-[#637287]'
-                              }`}
-                            >
-                              Keep To
-                            </span>
-                            <span
-                              className={`mt-2 block text-[14px] font-semibold ${
-                                isDark ? 'text-[#e5edf9]' : 'text-[#233147]'
-                              }`}
-                            >
-                              {formatEditableTimestamp(normalizedCutRange.end)}
-                            </span>
-                          </div>
-                        </div>
-
-                        <div
-                          className={`mt-4 rounded-2xl border border-dashed px-5 py-5 text-[12px] leading-6 ${
-                            isDark
-                              ? 'border-[#31415a] bg-[#111827] text-[#8fa2c2]'
-                              : 'border-[#c3c5d7] bg-[#fbfcfd] text-[#737686]'
-                          }`}
-                        >
-                          Remaining kept selection length:{' '}
-                          {formatEditableTimestamp(
-                            Math.max(
-                              CUT_RANGE_MIN_GAP,
-                              normalizedCutRange.end - normalizedCutRange.start,
-                            ),
-                          )}
-                        </div>
-                      </>
-                    ) : null}
-
-                    {isArrangeModeEnabled ? (
-                      <div
-                        className={`mt-4 rounded-2xl border px-4 py-3 text-[12px] leading-5 ${
-                          isDark
-                            ? 'border-[#5d2d56] bg-[#231321] text-[#ffb3de]'
-                            : 'border-[#f2b6d9] bg-[#fff4fa] text-[#a20f66]'
-                        }`}
-                      >
-                        Arrange mode is active. Drag chapters on the timeline to
-                        reorder them, and their current names will stay attached.
-                      </div>
-                    ) : null}
-                  </div>
-                ) : rightPanelView === 'silence' ? (
+                {rightPanelView === 'silence' ? (
                   <div className="flex min-h-0 flex-1 flex-col overflow-visible">
                   <div
                     className={`relative z-20 mb-4 overflow-visible rounded-2xl border p-2 ${
@@ -5488,7 +6604,7 @@ export default function HomePage(): JSX.Element {
                         guidedMode={guidedMode}
                         isDark={isDark}
                         onClick={() => {
-                          void handleRemoveSilence()
+                          void handleDetectSilence()
                         }}
                         icon={Mic}
                         disabled={silenceStatus === 'processing'}
@@ -5561,7 +6677,7 @@ export default function HomePage(): JSX.Element {
                             : 'border-[#c3c5d7] bg-[#fbfcfd] text-[#737686]'
                         }`}
                       >
-                        No silence ranges to review yet. Run Silencer to inspect
+                        No silence ranges to review yet. Click Detect to inspect
                         the full video when untouched, or all clips in the
                         current edit after you make timeline changes.
                       </div>
@@ -5611,8 +6727,7 @@ export default function HomePage(): JSX.Element {
                                         : 'bg-[#f2f4f6] text-[#515f74]'
                                     }`}
                                   >
-                                    {formatEditableTimestamp(segment.start)} -{' '}
-                                    {formatEditableTimestamp(segment.end)}
+                                    {formatClipSourceRange(segment)}
                                   </span>
                                   <span
                                     className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.14em] ${
@@ -5671,54 +6786,7 @@ export default function HomePage(): JSX.Element {
                 </div>
               ) : rightPanelView === 'chapters' ? (
                   <div className="flex min-h-0 flex-1 flex-col overflow-visible">
-                  <div
-                    className={`relative z-20 mb-4 overflow-visible rounded-2xl border p-2 ${
-                      isDark
-                        ? 'border-[#243149] bg-[#111827]'
-                        : 'border-[#e3e7ee] bg-[#fbfcfd]'
-                    }`}
-                  >
-                    <div className="grid grid-cols-2 gap-2">
-                      <ToolbarButton
-                        label="Split"
-                        tooltip="Split the selected chapter at the playhead."
-                        guidedMode={guidedMode}
-                        isDark={isDark}
-                        onClick={() => {
-                          void handleSplitAtPlayhead()
-                        }}
-                        icon={Split}
-                        disabled={!selectedSegment || !hasSingleSelectedSegment}
-                        tone="workspace"
-                      />
-                      <ToolbarButton
-                        label="Merge"
-                        tooltip="Merge the selected adjacent chapters into one chapter."
-                        guidedMode={guidedMode}
-                        isDark={isDark}
-                        onClick={() => {
-                          void handleMergeSelectedClips()
-                        }}
-                        icon={Clapperboard}
-                        disabled={!canMergeSelectedSegments}
-                        tone="workspace"
-                      />
-                    </div>
-                  </div>
-
                   <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                    <div
-                      className={`mb-4 rounded-2xl border px-4 py-3 text-[12px] leading-5 ${
-                        isDark
-                          ? 'border-[#243149] bg-[#111827] text-[#9fb0ca]'
-                          : 'border-[#e3e7ee] bg-[#fbfcfd] text-[#57657a]'
-                      }`}
-                    >
-                      {sceneStatus === 'pending'
-                        ? 'Split the full video into chapters, rename them, and jump to any chapter from this panel.'
-                        : 'Open Chapters to organize the video into named sections.'}
-                    </div>
-
                     {segments.length === 0 ? (
                       <div
                         className={`rounded-2xl border border-dashed px-5 py-5 text-[12px] leading-6 ${
@@ -5764,8 +6832,7 @@ export default function HomePage(): JSX.Element {
                                         : 'bg-white text-[#57657a]'
                                     }`}
                                   >
-                                    {formatEditableTimestamp(segment.start)} -{' '}
-                                    {formatEditableTimestamp(segment.end)}
+                                    {formatClipSourceRange(segment)}
                                   </span>
                                 </div>
 
@@ -5820,10 +6887,10 @@ export default function HomePage(): JSX.Element {
                                 {(() => {
                                   const thumbnailTimeDraft =
                                     chapterThumbnailDrafts[segment.id] ??
-                                    formatEditableTimestamp(segment.start)
+                                    formatEditableTimestamp(getClipSourceStart(segment))
                                   const thumbnailSeconds =
                                     parseEditableTimestamp(thumbnailTimeDraft) ??
-                                    segment.start
+                                    getClipSourceStart(segment)
                                   const thumbnail = timelineThumbnails.reduce<TimelineThumbnail | null>(
                                     (closest, frame) => {
                                       const distance = Math.abs(frame.time - thumbnailSeconds)
@@ -5878,7 +6945,7 @@ export default function HomePage(): JSX.Element {
                                     </button>
                                     <button
                                       type="button"
-                                      onClick={() => handleSeek(segment.start)}
+                                      onClick={() => handleSeek(getClipSourceStart(segment))}
                                       className="rounded-full bg-[#003fb1] px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-white"
                                     >
                                       Go To
@@ -6146,6 +7213,22 @@ export default function HomePage(): JSX.Element {
                     <div className="grid grid-cols-1 gap-2">
                       <button
                         type="button"
+                        onClick={() => {
+                          void handleOpenVersionsModal()
+                        }}
+                        disabled={!selectedVideoFile && !editorSessionId}
+                        className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                          isDark
+                            ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
+                            : 'border border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb] hover:text-[#003fb1]'
+                        }`}
+                      >
+                        <History className="h-4 w-4" />
+                        Save & Manage Versions
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenDoneActionModal('save-draft')}
                         className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${
                           isDark
                             ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
@@ -6157,6 +7240,7 @@ export default function HomePage(): JSX.Element {
                       </button>
                       <button
                         type="button"
+                        onClick={() => handleOpenDoneActionModal('archive-video')}
                         className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${
                           isDark
                             ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
@@ -6219,7 +7303,7 @@ export default function HomePage(): JSX.Element {
                     <div className="grid grid-cols-1 gap-2">
                       <button
                         type="button"
-                        onClick={() => {}}
+                        onClick={() => handleOpenDoneActionModal('add-existing-course')}
                         className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${
                           isDark
                             ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
@@ -6231,7 +7315,7 @@ export default function HomePage(): JSX.Element {
                       </button>
                       <button
                         type="button"
-                        onClick={() => {}}
+                        onClick={() => handleOpenDoneActionModal('add-new-course')}
                         className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition ${
                           isDark
                             ? 'border border-[#31415a] bg-[#182238] text-[#c6d3eb] hover:bg-[#1d2a42] hover:text-[#edf2ff]'
@@ -6247,34 +7331,53 @@ export default function HomePage(): JSX.Element {
               ) : (
                 <>
                   <div className="mb-4 flex items-center gap-3">
-                    <div
-                      className={`flex h-11 w-11 items-center justify-center rounded-2xl ${
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setAreAIQuickActionsVisible((isVisible) => !isVisible)
+                      }
+                      className={`flex h-11 w-11 items-center justify-center rounded-2xl transition ${
                         isDark
-                          ? 'bg-[#1b3566] text-[#9ec5ff]'
-                          : 'bg-[#eef3ff] text-[#003fb1]'
+                          ? 'bg-[#1b3566] text-[#9ec5ff] hover:bg-[#234178]'
+                          : 'bg-[#eef3ff] text-[#003fb1] hover:bg-[#dce8ff]'
                       }`}
+                      aria-pressed={areAIQuickActionsVisible}
+                      aria-label={
+                        areAIQuickActionsVisible
+                          ? 'Hide AI quick suggestions'
+                          : 'Show AI quick suggestions'
+                      }
+                      title={
+                        areAIQuickActionsVisible
+                          ? 'Hide AI quick suggestions'
+                          : 'Show AI quick suggestions'
+                      }
                     >
-                      <Send className="h-5 w-5" />
-                    </div>
+                      <Lightbulb className="h-5 w-5" />
+                    </button>
                   </div>
 
-                  <div className="mb-4 flex flex-wrap gap-2">
-                    {AI_QUICK_ACTIONS.map((item) => (
-                      <button
-                        key={item}
-                        type="button"
-                        disabled={!videoSourceUrl && !selectedVideoFile}
-                        onClick={() => setAiPromptDraft(item)}
-                        className={`rounded-full border px-3 py-2 text-left text-[12px] transition ${
-                          isDark
-                            ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb] hover:border-[#4b6388] hover:bg-[#131f33]'
-                            : 'border-[#d9dde5] bg-white text-[#515f74] hover:border-[#7aa4ff] hover:bg-[#f6f9ff]'
-                        } disabled:cursor-not-allowed disabled:opacity-45`}
-                      >
-                        {item}
-                      </button>
-                    ))}
-                  </div>
+                  {areAIQuickActionsVisible ? (
+                    <div className="mb-4 flex flex-wrap gap-2">
+                      {AI_QUICK_ACTIONS.map((item) => (
+                        <button
+                          key={item}
+                          type="button"
+                          disabled={!videoSourceUrl && !selectedVideoFile}
+                          onClick={() => {
+                            setAiPromptDraft(item)
+                          }}
+                          className={`rounded-full border px-3 py-2 text-left text-[12px] transition ${
+                            isDark
+                              ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb] hover:border-[#4b6388] hover:bg-[#131f33]'
+                              : 'border-[#d9dde5] bg-white text-[#515f74] hover:border-[#7aa4ff] hover:bg-[#f6f9ff]'
+                          } disabled:cursor-not-allowed disabled:opacity-45`}
+                        >
+                          {item}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
 
                   <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
                     <div className="flex-1 space-y-3 overflow-y-auto pr-1">
@@ -6345,10 +7448,71 @@ export default function HomePage(): JSX.Element {
                           </div>
                         </div>
                       )}
+                      <div ref={aiChatEndRef} />
                     </div>
 
                     <div
-                      className={`mt-4 flex items-end gap-2 rounded-2xl border px-3 py-3 ${
+                      className={`mt-4 rounded-2xl border px-3 py-2 text-[12px] font-semibold shadow-sm ${
+                        aiRequestStatus === 'error'
+                          ? isDark
+                            ? 'border-[#7f1d1d] bg-[#2a1218] text-[#fecdd3]'
+                            : 'border-[#fecaca] bg-[#fff1f2] text-[#9f1239]'
+                          : aiRequestStatus === 'success'
+                            ? isDark
+                              ? 'border-[#1d4f3a] bg-[#10231b] text-[#bbf7d0]'
+                              : 'border-[#bbf7d0] bg-[#f0fdf4] text-[#166534]'
+                            : aiRequestStatus === 'sending'
+                              ? isDark
+                                ? 'border-[#1b3566] bg-[#102345] text-[#bfdbfe]'
+                                : 'border-[#bfdbfe] bg-[#eff6ff] text-[#1d4ed8]'
+                              : isDark
+                                ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb]'
+                                : 'border-[#d9dde5] bg-[#f8fbff] text-[#334155]'
+                      }`}
+                    >
+                      {aiRequestStatus === 'sending' && 'AI is preparing your suggestion...'}
+                      {aiRequestStatus === 'success' && 'Suggestion is ready. Review it and choose Apply or Cancel.'}
+                      {aiRequestStatus === 'error' && 'AI request failed. Please try again.'}
+                      {aiRequestStatus === 'idle' && 'Enter your request and click Send.'}
+                    </div>
+
+                    {aiPendingSuggestion ? (
+                      <div
+                        className={`mt-3 flex items-center justify-between gap-2 rounded-2xl border px-3 py-2 ${
+                          isDark
+                            ? 'border-[#31415a] bg-[#102345] text-[#dbeafe]'
+                            : 'border-[#bfdbfe] bg-[#eff6ff] text-[#1e3a8a]'
+                        }`}
+                      >
+                        <p className="text-[12px] font-semibold">
+                          Pending suggestion: {aiPendingSuggestion.intent}
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={handleApplyAISuggestion}
+                            disabled={isApplyingAISuggestion}
+                            className="rounded-lg bg-[#003fb1] px-3 py-1.5 text-[12px] font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {isApplyingAISuggestion ? 'Applying…' : 'Apply'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleCancelAISuggestion}
+                            className={`rounded-lg border px-3 py-1.5 text-[12px] font-semibold ${
+                              isDark
+                                ? 'border-[#4b6388] text-[#dbeafe]'
+                                : 'border-[#7aa4ff] text-[#1e3a8a]'
+                            }`}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    <div
+                      className={`mt-3 flex items-end gap-2 rounded-2xl border px-3 py-3 ${
                         isDark
                           ? 'border-[#31415a] bg-[#111827]'
                           : 'border-[#d9dde5] bg-white'
@@ -6388,12 +7552,6 @@ export default function HomePage(): JSX.Element {
                         <Send className="h-4 w-4" />
                       </button>
                     </div>
-                    <p className="mt-2 text-[11px] opacity-70">
-                      {aiRequestStatus === 'sending' && 'AI is preparing your suggestion...'}
-                      {aiRequestStatus === 'success' && 'Suggestion is ready. Review it and choose Apply or Cancel.'}
-                      {aiRequestStatus === 'error' && 'AI request failed. Please try again.'}
-                      {aiRequestStatus === 'idle' && 'Enter your request and click Send.'}
-                    </p>
                     {!videoSourceUrl && !selectedVideoFile && (
                       <p className="mt-1 text-[11px] font-medium text-amber-500">
                         Upload a video first to enable AI Workspace suggestions.

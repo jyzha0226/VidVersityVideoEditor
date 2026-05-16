@@ -152,7 +152,26 @@ class FFmpegAudioActivityDetector:
                 f"ffmpeg is not installed or not available at {self.ffmpeg_bin}."
             ) from exc
 
+        # Debug logging
+        print(
+            f"[SILENCE DETECT DEBUG] threshold={self.silence_noise_threshold_db}dB, "
+            f"min_duration={self.silence_min_duration}s, "
+            f"audio_duration={audio_duration}s",
+            file=sys.stderr,
+        )
+        
         silence_segments = self._parse_silencedetect_output(ffmpeg_output, audio_duration)
+        print(
+            f"[SILENCE PARSE] Found {len(silence_segments)} silence segments",
+            file=sys.stderr,
+        )
+        for seg in silence_segments:
+            print(
+                f"  - {seg.start_time:.2f}s to {seg.end_time:.2f}s "
+                f"(duration: {seg.end_time - seg.start_time:.2f}s)",
+                file=sys.stderr,
+            )
+        
         return self._filter_short_segments(silence_segments)
 
     def detect_speech_segments(

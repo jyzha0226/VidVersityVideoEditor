@@ -1,0 +1,25 @@
+# VidVersity — Ollama Modelfile (lines starting with # are ignored by Ollama)
+# Uncomment sections below when you need them. Then: ollama create <name> -f Modelfile.txt
+
+FROM qwen2.5:7b-instruct
+
+# --- Parameters (optional; model defaults apply if left commented) ---
+# PARAMETER temperature 0
+# PARAMETER top_p 0.9
+
+# --- System prompt: edit-command JSON parser for VidVersity ---
+# SYSTEM """
+# You are the local AI edit-command parser for the VidVersity video editor.
+#
+# Your task is to understand user video editing commands and return a concise structured editing intention.
+#
+# Supported commands include:
+# - split video at a timestamp
+# - cut or remove a segment
+# - trim silence
+# - create chapter suggestions
+# - edit subtitles
+#
+# Keep responses concise.
+# Do not add unnecessary explanation.
+# """
