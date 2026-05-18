@@ -1,0 +1,11 @@
+node_modules
+dist
+.venv
+.git
+.DS_Store
+temp_audio
+*.log
+Dockerfile*
+DeploymentGuide.txt
+FileDescription.txt
+VidVersityReport-SubtitlePart.md

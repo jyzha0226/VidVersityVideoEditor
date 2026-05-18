@@ -7,6 +7,10 @@
     <link href="main.css" rel="stylesheet">
   </head>
   <script>
+    window.__VIDVERSITY_SUBTITLE_API__ = 'https://hill-loves-bend-themselves.trycloudflare.com'
+    window.__VIDVERSITY_DEMO_ACCESS__ = {
+      passwordHash: 'a7471bc87449dd35810dad4d1e924172f5e9a79826f81e4b66575d94940107f1',
+    }
     new EventSource('/esbuild').addEventListener('change', () =>
       location.reload()
     )
