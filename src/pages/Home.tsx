@@ -80,6 +80,7 @@ import type { SubtitleSegment } from '../subtitles/types'
 import { Input } from '../components/ui/input'
 import { requestAIChapterSuggestions, requestAIEditCommand } from '../ai/api'
 import type { AIEditSuggestion } from '../ai/types'
+import vidversityLogo from '../assets/vidversity-logo-colour.png'
 import {
   Dialog,
   DialogContent,
@@ -4887,8 +4888,12 @@ export default function HomePage(): JSX.Element {
 
       <header className="sticky top-0 z-40 flex items-center justify-between gap-3 bg-[#de34ab] px-5 py-3 text-white shadow-[0_12px_40px_rgba(222,52,171,0.28)] sm:items-end sm:pb-0 sm:pt-3">
         <div className="flex min-w-0 items-center gap-8 sm:items-end">
-          <div className="shrink-0 font-['Manrope'] text-xl font-extrabold tracking-[-0.04em] sm:pb-3">
-            Vidversity
+          <div className="shrink-0 sm:pb-3">
+            <img
+              src={vidversityLogo}
+              alt="Vidversity"
+              className="h-14 w-auto object-contain"
+            />
           </div>
           <nav className="hidden min-w-0 items-end gap-1 sm:ml-[112px] sm:flex">
             <NavLink

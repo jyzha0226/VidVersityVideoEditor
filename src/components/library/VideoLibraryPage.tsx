@@ -12,6 +12,7 @@ import {
 } from 'lucide-react'
 import { NavLink, useNavigate } from 'react-router'
 import { useTheme } from '../../theme/ThemeProvider'
+import vidversityLogo from '../../assets/vidversity-logo-colour.png'
 
 interface LibraryVideoItem {
   id: string
@@ -85,8 +86,12 @@ export default function VideoLibraryPage({
     >
       <header className="sticky top-0 z-40 flex items-center justify-between gap-3 bg-[#de34ab] px-5 py-3 text-white shadow-[0_12px_40px_rgba(222,52,171,0.28)] sm:items-end sm:pb-0 sm:pt-3">
         <div className="flex min-w-0 items-center gap-8 sm:items-end">
-          <div className="shrink-0 font-['Manrope'] text-xl font-extrabold tracking-[-0.04em] sm:pb-3">
-            Vidversity
+          <div className="shrink-0 sm:pb-3">
+            <img
+              src={vidversityLogo}
+              alt="Vidversity"
+              className="h-14 w-auto object-contain"
+            />
           </div>
           <nav className="hidden min-w-0 items-end gap-1 sm:ml-[112px] sm:flex">
             <NavLink to="/drafts" className={topTabClass}>
