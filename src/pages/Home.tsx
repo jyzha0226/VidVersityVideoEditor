@@ -14,6 +14,7 @@ import {
   Check,
   CheckCheck,
   Clapperboard,
+  CircleUserRound,
   CircleX,
   Files,
   Download,
@@ -106,7 +107,6 @@ interface VideoPreviewHandle {
 interface VideoPreviewPanelProps {
   subtitles: SubtitleSegment[]
   videoUrl?: string | null
-  playbackMode: 'edited' | 'original'
   onLoadedMetadata: (durationInSeconds: number) => void
   onTimeUpdate: (timeInSeconds: number) => void
   onPlaybackStateChange: (isPlaying: boolean) => void
@@ -137,12 +137,6 @@ interface TimelineThumbnail {
 }
 
 interface ClipSourceRange {
-  start: number
-  end: number
-}
-
-interface OriginalTimelineSection {
-  kind: 'kept' | 'removed'
   start: number
   end: number
 }
@@ -333,7 +327,7 @@ function readStoredCategories(): string[] {
           return false
         }
 
-        return (
+		                      return (
           items.findIndex(
             (candidate) => candidate.toLowerCase() === item.toLowerCase(),
           ) === index
@@ -710,7 +704,6 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
     {
       videoUrl: externalVideoUrl,
       subtitles,
-      playbackMode,
       onLoadedMetadata,
       onTimeUpdate,
       onPlaybackStateChange,
@@ -825,26 +818,12 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
 
     return (
       <section className="flex flex-1 min-h-0 w-full items-center justify-center px-4 py-4 xl:px-6 xl:py-5">
-        <div className="w-full max-w-[900px]">
-          <div className="mb-2 flex items-center justify-between">
-            <span
-              className={`rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-[0.18em] ${
-                playbackMode === 'original'
-                  ? 'bg-[#fff0f8] text-[#a20f66] dark:bg-[#31192e] dark:text-[#ffb3de]'
-                  : 'bg-[#eef3ff] text-[#003fb1] dark:bg-[#1b3566] dark:text-[#9ec5ff]'
-              }`}
-            >
-              {playbackMode === 'original'
-                ? 'Playing Original Video'
-                : 'Playing Edited Video'}
-            </span>
-          </div>
-
+        <div className="w-full max-w-[980px]">
           <div className="relative overflow-hidden rounded-[24px] bg-black shadow-[0_20px_60px_rgba(15,23,42,0.24)]">
           {videoUrl ? (
             <video
               ref={videoRef}
-              className="aspect-video max-h-[44vh] w-full bg-black object-contain"
+              className="aspect-video max-h-[50vh] w-full bg-black object-contain"
               src={videoUrl}
               playsInline
               onLoadedMetadata={(event) => {
@@ -882,7 +861,7 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
             <button
               type="button"
               onClick={handleUploadClick}
-              className="relative aspect-video max-h-[44vh] w-full overflow-hidden bg-black text-left transition hover:bg-[#05070b]"
+              className="relative aspect-video max-h-[50vh] w-full overflow-hidden bg-black text-left transition hover:bg-[#05070b]"
               aria-label="Upload video"
             >
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 text-white">
@@ -1348,81 +1327,6 @@ function getSegmentTimelineFrames(
   return nearest ? [nearest] : []
 }
 
-function buildOriginalTimelineSections(
-  segments: ClipSegment[],
-  totalDuration: number,
-): OriginalTimelineSection[] {
-  const safeDuration = Math.max(0, totalDuration)
-  if (safeDuration <= 0) {
-    return []
-  }
-
-  const sortedRanges = segments
-    .flatMap((segment) => getClipSourceRanges(segment))
-    .filter((range) => range.end > range.start)
-    .sort((left, right) => left.start - right.start)
-
-  const sections: OriginalTimelineSection[] = []
-  let cursor = 0
-
-  sortedRanges.forEach((range) => {
-    const start = clamp(range.start, 0, safeDuration)
-    const end = clamp(range.end, 0, safeDuration)
-
-    if (start > cursor) {
-      sections.push({
-        kind: 'removed',
-        start: cursor,
-        end: start,
-      })
-    }
-
-    if (end > start) {
-      sections.push({
-        kind: 'kept',
-        start,
-        end,
-      })
-      cursor = Math.max(cursor, end)
-    }
-  })
-
-  if (cursor < safeDuration) {
-    sections.push({
-      kind: 'removed',
-      start: cursor,
-      end: safeDuration,
-    })
-  }
-
-  return sections.filter((section) => section.end - section.start > 0.001)
-}
-
-function buildOriginalTimelineMarkers(
-  segments: ClipSegment[],
-  totalDuration: number,
-): number[] {
-  const safeDuration = Math.max(0, totalDuration)
-  if (safeDuration <= 0) {
-    return []
-  }
-
-  const seen = new Set<string>()
-
-  return segments
-    .slice(1)
-    .map((segment) => clamp(getClipSourceStart(segment), 0, safeDuration))
-    .filter((value) => value > 0 && value < safeDuration)
-    .filter((value) => {
-      const key = value.toFixed(3)
-      if (seen.has(key)) {
-        return false
-      }
-      seen.add(key)
-      return true
-    })
-}
-
 function reorderSegmentsById(
   segments: ClipSegment[],
   draggedId: number,
@@ -1537,6 +1441,8 @@ export default function HomePage(): JSX.Element {
   const [doneCategoryDraft, setDoneCategoryDraft] = useState('')
   const [doneCourseDraft, setDoneCourseDraft] = useState(EXISTING_COURSE_OPTIONS[0])
   const [doneNewCourseNameDraft, setDoneNewCourseNameDraft] = useState('')
+  const [versionVideoTitleDraft, setVersionVideoTitleDraft] = useState('')
+  const [versionCategoryDraft, setVersionCategoryDraft] = useState('')
   const [isVersionsModalOpen, setIsVersionsModalOpen] = useState(false)
   const [editorVersions, setEditorVersions] = useState<EditorVersionInfo[]>([])
   const [versionsStatus, setVersionsStatus] =
@@ -1869,16 +1775,6 @@ export default function HomePage(): JSX.Element {
     : 0
   const timelinePlayheadRatio =
     editedDuration > 0 ? clamp(timelinePlayheadEditedTime / editedDuration, 0, 1) : 0
-  const originalTimelineSections = useMemo(
-    () => buildOriginalTimelineSections(segments, totalDuration),
-    [segments, totalDuration],
-  )
-  const originalTimelineMarkers = useMemo(
-    () => buildOriginalTimelineMarkers(segments, totalDuration),
-    [segments, totalDuration],
-  )
-  const sourcePlayheadRatio =
-    totalDuration > 0 ? clamp(currentTime / totalDuration, 0, 1) : 0
 
   useLayoutEffect(() => {
     if (!shouldCenterPlayheadAfterZoomRef.current) {
@@ -3371,6 +3267,7 @@ export default function HomePage(): JSX.Element {
     setCategoryOptions((prev) => mergeCategoryOptions(prev, nextCategory))
     setSelectedCategory(nextCategory)
     setDoneCategoryDraft(nextCategory)
+    setVersionCategoryDraft(nextCategory)
     setNewCategoryDraft('')
     setIsCreateCategoryModalOpen(false)
     setEditorError(null)
@@ -3414,6 +3311,18 @@ export default function HomePage(): JSX.Element {
     }
 
     setDoneCategoryDraft(value === DEFAULT_CATEGORY_VALUE ? '' : value)
+  }
+
+  const handleVersionCategorySelect = (value: string) => {
+    if (value === NEW_CATEGORY_VALUE) {
+      setIsCreateCategoryModalOpen(true)
+      return
+    }
+
+    const nextCategory = value === DEFAULT_CATEGORY_VALUE ? '' : value
+    setVersionCategoryDraft(nextCategory)
+    setSelectedCategory(nextCategory)
+    setEditorError(null)
   }
 
   const handleSubmitDoneAction = () => {
@@ -3494,6 +3403,10 @@ export default function HomePage(): JSX.Element {
     setDeletingVersionName(null)
     setSwitchingVersionName(null)
     setDownloadingVersionName(null)
+    setVersionVideoTitleDraft(
+      getVideoTitleFromSource(selectedVideoFile, videoSourceUrl, preloadedVideoUrl),
+    )
+    setVersionCategoryDraft(selectedCategory)
     setIsVersionsModalOpen(true)
 
     const session = await ensureEditorSession()
@@ -3515,6 +3428,8 @@ export default function HomePage(): JSX.Element {
     setDeletingVersionName(null)
     setSwitchingVersionName(null)
     setDownloadingVersionName(null)
+    setVersionVideoTitleDraft('')
+    setVersionCategoryDraft('')
   }
 
   const handleSaveCurrentVersion = async () => {
@@ -4755,6 +4670,27 @@ export default function HomePage(): JSX.Element {
       ),
     [editedDuration],
   )
+  const originalEditorVersion = useMemo(
+    () => editorVersions.find((version) => version.isOriginal) ?? null,
+    [editorVersions],
+  )
+  const savedEditorVersions = useMemo(
+    () =>
+      editorVersions
+        .filter((version) => !version.isOriginal)
+        .sort((left, right) => left.createdAt - right.createdAt),
+    [editorVersions],
+  )
+  const getEditorVersionDisplayName = (version: EditorVersionInfo) =>
+    version.displayName.replace(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i,
+      '',
+    )
+  const versionBaseTitle =
+    versionVideoTitleDraft.trim() ||
+    getVideoTitleFromSource(selectedVideoFile, videoSourceUrl, preloadedVideoUrl)
+  const getDisplayVersionName = (versionNumber: number) =>
+    `${versionBaseTitle.trim().replace(/\s+/g, '_') || 'video'}_v${versionNumber}`
   const exportDialogTitle =
     activeExportKind === 'clip' ? 'Rendering Chapter' : 'Rendering Video'
   const exportDialogDescription =
@@ -4981,8 +4917,12 @@ export default function HomePage(): JSX.Element {
 	            <Bell className="h-4 w-4" />
 	            <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500" />
 	          </button>
-	          <div className="hidden h-9 w-9 items-center justify-center rounded-full border-2 border-white/25 bg-white/20 font-semibold sm:flex">
-	            NR
+	          <div
+	            className="hidden h-9 w-9 items-center justify-center rounded-full border-2 border-white/25 bg-white/20 text-white/90 backdrop-blur sm:flex"
+	            aria-label="User profile"
+	            title="User profile"
+	          >
+	            <CircleUserRound className="h-5 w-5" />
 	          </div>
         </div>
       </header>
@@ -5235,20 +5175,69 @@ export default function HomePage(): JSX.Element {
               <DialogTitle>Saved versions</DialogTitle>
             </DialogHeader>
 
-            <div className="space-y-4">
-              <p
-                className={`text-[12px] leading-5 ${
-                  isDark ? 'text-[#8aa0c4]' : 'text-[#515f74]'
-                }`}
-              >
-                The original upload is kept as <span className="font-semibold">_original</span>.
-                Each saved edit is stored with a <span className="font-semibold">_YYYYMMDD_HHMMSS</span>{' '}
-                timestamp. You can review what is already saved, remove versions
-                you no longer need, or save the current edit as a new version.
-              </p>
+		            <div className="space-y-4">
+		              <div className="grid gap-3 sm:grid-cols-2">
+		                <div className="space-y-2">
+		                  <label
+		                    className={`block text-[10px] font-bold uppercase tracking-[0.18em] ${
+		                      isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+		                    }`}
+		                    htmlFor="versions-video-title"
+		                  >
+		                    Video Title
+		                  </label>
+		                  <Input
+		                    id="versions-video-title"
+		                    value={versionVideoTitleDraft}
+		                    onChange={(event) => setVersionVideoTitleDraft(event.target.value)}
+		                    className={`h-10 rounded-xl text-sm ${
+		                      isDark
+		                        ? 'border-[#31415a] bg-[#111827] text-[#edf2ff] placeholder:text-[#64748b]'
+		                        : 'border-[#d9dde5] bg-white text-[#191c1e] placeholder:text-[#8a94a6]'
+		                    }`}
+		                  />
+		                </div>
 
-              {versionsError ? (
-                <div
+		                <div className="space-y-2">
+		                  <label
+		                    className={`block text-[10px] font-bold uppercase tracking-[0.18em] ${
+		                      isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+		                    }`}
+		                  >
+		                    Video Category
+		                  </label>
+		                  <Select
+		                    value={versionCategoryDraft || DEFAULT_CATEGORY_VALUE}
+		                    onValueChange={handleVersionCategorySelect}
+		                  >
+		                    <SelectTrigger
+		                      className={`h-10 rounded-xl border text-sm ${
+		                        isDark
+		                          ? 'border-[#31415a] bg-[#111827] text-[#edf2ff]'
+		                          : 'border-[#d9dde5] bg-white text-[#191c1e]'
+		                      }`}
+		                    >
+		                      <SelectValue placeholder="Select a category" />
+		                    </SelectTrigger>
+		                    <SelectContent>
+		                      <SelectItem value={DEFAULT_CATEGORY_VALUE}>
+		                        No category
+		                      </SelectItem>
+		                      <SelectItem value={NEW_CATEGORY_VALUE}>
+		                        New category
+		                      </SelectItem>
+		                      {categoryOptions.map((category) => (
+		                        <SelectItem key={category} value={category}>
+		                          {category}
+		                        </SelectItem>
+		                      ))}
+		                    </SelectContent>
+		                  </Select>
+		                </div>
+		              </div>
+
+		              {versionsError ? (
+	                <div
                   className={`rounded-xl border px-3 py-2 text-[12px] ${
                     isDark
                       ? 'border-[#6f3a45] bg-[#3d1f24] text-[#ff8f9a]'
@@ -5259,11 +5248,11 @@ export default function HomePage(): JSX.Element {
                 </div>
               ) : null}
 
-              <div
-                className={`max-h-[260px] overflow-auto rounded-2xl border ${
-                  isDark
-                    ? 'border-[#243149] bg-[#111827]'
-                    : 'border-[#e3e7ee] bg-[#fbfcfd]'
+	              <div
+	                className={`max-h-[320px] overflow-auto rounded-2xl border ${
+	                  isDark
+	                    ? 'border-[#243149] bg-[#111827]'
+	                    : 'border-[#e3e7ee] bg-[#fbfcfd]'
                 }`}
               >
                 {versionsStatus === 'loading' ? (
@@ -5274,33 +5263,21 @@ export default function HomePage(): JSX.Element {
                   >
                     Loading saved versions...
                   </div>
-                ) : editorVersions.length === 0 ? (
-                  <div
-                    className={`px-3 py-6 text-center text-[12px] ${
-                      isDark ? 'text-[#8aa0c4]' : 'text-[#515f74]'
-                    }`}
-                  >
-                    No saved versions yet for this session.
-                  </div>
-                ) : (
-                  <ul className="divide-y divide-transparent">
-                    {editorVersions.map((version) => {
-                      const isDeleting = deletingVersionName === version.fileName
-                      const isSwitching = switchingVersionName === version.fileName
-                      const isDownloading =
-                        downloadingVersionName === version.fileName
-                      const canDelete = !version.isOriginal && !version.isCurrent
-                      const sizeMb = version.sizeBytes / (1024 * 1024)
-                      const displayName = version.displayName.replace(
-                        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i,
-                        '',
-                      )
-                      const createdLabel = version.createdAt
-                        ? new Date(version.createdAt).toLocaleString()
-                        : ''
-                      return (
-                        <li
-                          key={version.fileName}
+	                ) : (
+	                  <ul className="divide-y divide-transparent">
+		                    {originalEditorVersion ? (() => {
+		                      const version = originalEditorVersion
+		                      const isSwitching = switchingVersionName === version.fileName
+		                      const isDownloading =
+		                        downloadingVersionName === version.fileName
+	                      const sizeMb = version.sizeBytes / (1024 * 1024)
+	                      const displayName = getEditorVersionDisplayName(version)
+	                      const createdLabel = version.createdAt
+	                        ? new Date(version.createdAt).toLocaleString()
+	                        : ''
+	                      return (
+	                        <li
+	                          key={version.fileName}
                           className={`flex flex-col gap-2 border-b px-3 py-2 last:border-b-0 sm:flex-row sm:items-start sm:justify-between sm:gap-3 ${
                             isDark
                               ? 'border-[#243149]'
@@ -5308,51 +5285,39 @@ export default function HomePage(): JSX.Element {
                           }`}
                         >
                           <div className="min-w-0 flex-1">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span
-                                className={`line-clamp-2 break-all text-[12px] font-semibold ${
-                                  isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'
-                                }`}
-                                title={displayName}
-                              >
-                                {displayName}
-                              </span>
-                              {version.isOriginal ? (
-                                <span
-                                  className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.16em] ${
-                                    isDark
-                                      ? 'border-[#3a6f59] text-[#8fffb1]'
-                                      : 'border-[#b8f0c9] text-[#1f7a3a]'
-                                  }`}
-                                >
-                                  Original
-                                </span>
-                              ) : null}
-                              {version.isCurrent ? (
-                                <span
-                                  className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.16em] ${
-                                    isDark
-                                      ? 'border-[#3a526f] text-[#8fbfff]'
-                                      : 'border-[#b8d4f0] text-[#003fb1]'
-                                  }`}
-                                >
-                                  Current
-                                </span>
-                              ) : null}
+	                            <div className="flex flex-wrap items-center gap-2">
+	                              <span
+	                                className={`line-clamp-2 break-all text-[12px] font-semibold ${
+	                                  isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'
+	                                }`}
+	                                title={displayName}
+	                              >
+	                                Original upload
+	                              </span>
+	                              <span
+	                                className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.16em] ${
+	                                  isDark
+	                                    ? 'border-[#3a6f59] text-[#8fffb1]'
+	                                    : 'border-[#b8f0c9] text-[#1f7a3a]'
+	                                }`}
+	                              >
+	                                Original
+	                              </span>
                             </div>
-                            <div
-                              className={`mt-1 text-[10px] ${
-                                isDark ? 'text-[#8aa0c4]' : 'text-[#8a94a6]'
-                              }`}
-                            >
-                              {createdLabel}
-                              {sizeMb > 0
-                                ? ` · ${sizeMb.toFixed(sizeMb >= 10 ? 0 : 1)} MB`
-                                : ''}
+	                            <div
+	                              className={`mt-1 text-[10px] ${
+	                                isDark ? 'text-[#8aa0c4]' : 'text-[#8a94a6]'
+	                              }`}
+	                            >
+		                              {displayName}
+	                              {sizeMb > 0
+	                                ? ` · ${sizeMb.toFixed(sizeMb >= 10 ? 0 : 1)} MB`
+	                                : ''}
                             </div>
                           </div>
-                          <div className="flex shrink-0 items-center gap-2 self-end sm:self-start">
-                            <button
+			                      <div className="flex shrink-0 flex-col items-end gap-1 self-end sm:self-start">
+			                        <div className="flex items-center gap-2">
+			                          <button
                               type="button"
                               onClick={() => {
                                 void handleSwitchEditorVersion(version.fileName)
@@ -5370,8 +5335,8 @@ export default function HomePage(): JSX.Element {
                               }`}
                             >
                               {isSwitching ? 'Switching...' : 'Switch'}
-                            </button>
-                            <button
+		                          </button>
+		                          <button
                               type="button"
                               onClick={() => {
                                 void handleDownloadEditorVersion(
@@ -5385,38 +5350,144 @@ export default function HomePage(): JSX.Element {
                                   : 'border-[#d9dde5] text-[#515f74] hover:bg-[#f7f9fb]'
                               }`}
                             >
-                              <Download className="h-3.5 w-3.5" />
-                              {isDownloading ? '...' : 'Download'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                void handleDeleteEditorVersion(version.fileName)
-                              }}
-                              disabled={!canDelete || isDeleting}
-                              title={
-                                !canDelete
-                                  ? version.isOriginal
-                                    ? 'The original version cannot be deleted.'
-                                    : 'The current active version cannot be deleted.'
-                                  : 'Delete this version'
-                              }
-                              className={`flex h-8 items-center justify-center gap-1 rounded-full border px-2.5 text-[10px] font-bold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-50 ${
-                                isDark
-                                  ? 'border-[#6f3a45] text-[#ff8f9a] hover:bg-[#3d1f24]'
-                                  : 'border-[#f0b8b8] text-[#a23535] hover:bg-[#fdecec]'
-                              }`}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                              {isDeleting ? '...' : 'Delete'}
-                            </button>
-                          </div>
-                        </li>
-                      )
-                    })}
-                  </ul>
-                )}
-              </div>
+	                              <Download className="h-3.5 w-3.5" />
+	                              {isDownloading ? '...' : 'Download'}
+		                          </button>
+		                        </div>
+		                        <span
+		                          className={`text-right text-[9px] ${
+		                            isDark ? 'text-[#64748b]' : 'text-[#8a94a6]'
+		                          }`}
+		                        >
+		                          {createdLabel}
+		                        </span>
+		                      </div>
+	                        </li>
+	                      )
+	                    })() : null}
+
+			                    {savedEditorVersions.map((version, index) => {
+	                      const isSwitching = switchingVersionName === version.fileName
+	                      const isDownloading =
+	                        downloadingVersionName === version.fileName
+	                      const isDeleting = deletingVersionName === version.fileName
+	                      const sizeMb = version.sizeBytes / (1024 * 1024)
+			                      const sourceDisplayName = getEditorVersionDisplayName(version)
+			                      const displayName = getDisplayVersionName(index + 1)
+	                      const createdLabel = version.createdAt
+	                        ? new Date(version.createdAt).toLocaleString()
+	                        : ''
+	                      return (
+	                        <li
+	                          key={version.fileName}
+	                          className={`flex flex-col gap-2 border-b px-3 py-2 last:border-b-0 sm:flex-row sm:items-start sm:justify-between sm:gap-3 ${
+	                            isDark
+	                              ? 'border-[#243149]'
+	                              : 'border-[#e3e7ee]'
+	                          }`}
+	                        >
+	                          <div className="min-w-0 flex-1">
+	                            <div className="flex flex-wrap items-center gap-2">
+	                              <span
+	                                className={`line-clamp-2 break-all text-[12px] font-semibold ${
+	                                  isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'
+	                                }`}
+		                                title={sourceDisplayName}
+	                              >
+	                                {displayName}
+	                              </span>
+	                              {version.isCurrent ? (
+	                                <span
+	                                  className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.16em] ${
+	                                    isDark
+	                                      ? 'border-[#3a526f] text-[#8fbfff]'
+	                                      : 'border-[#b8d4f0] text-[#003fb1]'
+	                                  }`}
+	                                >
+	                                  Current
+	                                </span>
+	                              ) : null}
+	                            </div>
+	                            <div
+	                              className={`mt-1 text-[10px] ${
+	                                isDark ? 'text-[#8aa0c4]' : 'text-[#8a94a6]'
+	                              }`}
+	                            >
+		                              Saved version
+		                              {sizeMb > 0
+		                                ? ` · ${sizeMb.toFixed(sizeMb >= 10 ? 0 : 1)} MB`
+		                                : ''}
+	                            </div>
+	                          </div>
+	                          <div className="flex shrink-0 flex-col items-end gap-1 self-end sm:self-start">
+	                            <div className="flex items-center gap-2">
+		                            {!version.isCurrent ? (
+		                              <button
+		                                type="button"
+		                                onClick={() => {
+		                                  void handleSwitchEditorVersion(version.fileName)
+		                                }}
+		                                disabled={isSwitching}
+		                                title="Switch to this version"
+		                                className={`flex h-8 items-center justify-center gap-1 rounded-full border px-2.5 text-[10px] font-bold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-50 ${
+		                                  isDark
+		                                    ? 'border-[#3a526f] text-[#8fbfff] hover:bg-[#182238]'
+		                                    : 'border-[#b8d4f0] text-[#003fb1] hover:bg-[#eef4ff]'
+		                                }`}
+		                              >
+		                                {isSwitching ? 'Switching...' : 'Switch'}
+		                              </button>
+		                            ) : null}
+	                            <button
+	                              type="button"
+	                              onClick={() => {
+	                                void handleDownloadEditorVersion(
+	                                  version.fileName,
+	                                )
+	                              }}
+	                              disabled={isDownloading}
+	                              className={`flex h-8 items-center justify-center gap-1 rounded-full border px-2.5 text-[10px] font-bold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-50 ${
+	                                isDark
+	                                  ? 'border-[#31415a] text-[#c6d3eb] hover:bg-[#182238]'
+	                                  : 'border-[#d9dde5] text-[#515f74] hover:bg-[#f7f9fb]'
+	                              }`}
+	                            >
+	                              <Download className="h-3.5 w-3.5" />
+	                              {isDownloading ? '...' : 'Download'}
+	                            </button>
+		                            {!version.isCurrent ? (
+		                              <button
+		                                type="button"
+		                                onClick={() => {
+		                                  void handleDeleteEditorVersion(version.fileName)
+		                                }}
+		                                disabled={isDeleting}
+		                                title="Delete this saved edit."
+		                                className={`flex h-8 items-center justify-center gap-1 rounded-full border px-2.5 text-[10px] font-bold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-50 ${
+		                                  isDark
+		                                    ? 'border-[#6f3a45] text-[#ff8f9a] hover:bg-[#3d1f24]'
+		                                    : 'border-[#f0b8b8] text-[#a23535] hover:bg-[#fdecec]'
+		                                }`}
+		                              >
+		                                <Trash2 className="h-3.5 w-3.5" />
+		                                {isDeleting ? '...' : 'Delete'}
+			                              </button>
+		                            ) : null}
+		                          </div>
+		                          <span
+		                            className={`text-right text-[9px] ${
+		                              isDark ? 'text-[#64748b]' : 'text-[#8a94a6]'
+		                            }`}
+		                          >
+		                            {createdLabel}
+		                          </span>
+		                          </div>
+	                        </li>
+	                      )
+	                    })}
+	                  </ul>
+	                )}
+	              </div>
 
               {saveVersionError ? (
                 <div
@@ -5430,40 +5501,38 @@ export default function HomePage(): JSX.Element {
                 </div>
               ) : null}
 
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={handleCloseVersionsModal}
+		              <div className="flex flex-wrap justify-end gap-2 pt-2">
+		                <button
+		                  type="button"
+		                  onClick={handleCloseVersionsModal}
                   className={`flex h-10 items-center justify-center rounded-xl border px-4 text-sm font-semibold transition ${
                     isDark
                       ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb] hover:bg-[#182238]'
                       : 'border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb]'
                   }`}
-                >
-                  Close
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    void handleSaveCurrentVersion()
-                  }}
-                  disabled={
-                    saveVersionStatus === 'saving' ||
-                    editorStatus === 'syncing' ||
-                    (!selectedVideoFile && !editorSessionId)
-                  }
-                  className={`flex h-10 items-center justify-center gap-2 rounded-xl px-4 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
-                    isDark
-                      ? 'bg-[#1a56db] text-white hover:bg-[#2b67ec]'
-                      : 'bg-[#003fb1] text-white hover:bg-[#1a56db]'
-                  }`}
-                >
-                  <Save className="h-4 w-4" />
-                  {saveVersionStatus === 'saving'
-                    ? 'Saving Version...'
-                    : 'Save Current Edit as New Version'}
-                </button>
-              </div>
+		                >
+		                  Close
+		                </button>
+		                <button
+		                  type="button"
+		                  onClick={() => {
+		                    void handleSaveCurrentVersion()
+		                  }}
+		                  disabled={
+		                    saveVersionStatus === 'saving' ||
+		                    editorStatus === 'syncing' ||
+		                    (!selectedVideoFile && !editorSessionId)
+		                  }
+	                  className={`flex h-10 items-center justify-center gap-2 rounded-xl px-4 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+	                    isDark
+	                      ? 'bg-[#1a56db] text-white hover:bg-[#2b67ec]'
+	                      : 'bg-[#003fb1] text-white hover:bg-[#1a56db]'
+	                  }`}
+		                >
+		                  <Save className="h-4 w-4" />
+		                  {saveVersionStatus === 'saving' ? 'Saving Version...' : 'Save Current Edit as New Version'}
+		                </button>
+		              </div>
             </div>
           </DialogContent>
         </Dialog>
@@ -5611,7 +5680,6 @@ export default function HomePage(): JSX.Element {
                 ref={videoPreviewRef}
                 videoUrl={videoSourceUrl ?? preloadedVideoUrl}
                 subtitles={subtitleSegments}
-                playbackMode={previewPlaybackMode}
                 onLoadedMetadata={(duration) => {
                   setVideoDuration(duration)
                   setCutRange(buildFullCutRange(duration))
@@ -6417,87 +6485,6 @@ export default function HomePage(): JSX.Element {
                                       </React.Fragment>
                                     )
                                   })}
-                                </div>
-                              ) : null}
-                            </div>
-                          </div>
-
-                          <div className="mt-2 px-1">
-                            <div
-                              className={`relative h-5 overflow-hidden rounded-lg border ${
-                                isDark
-                                  ? 'border-[#2b3950] bg-[#101827]'
-                                  : 'border-[#dfe5ec] bg-[#f6f8fb]'
-                              }`}
-                              onPointerDown={(event) => {
-                                if (event.pointerType === 'mouse' && event.button !== 0) {
-                                  return
-                                }
-
-                                const bounds = event.currentTarget.getBoundingClientRect()
-                                const ratio = clamp(
-                                  (event.clientX - bounds.left) / bounds.width,
-                                  0,
-                                  1,
-                                )
-                                handleSeekOriginal(ratio * totalDuration, true)
-                              }}
-                            >
-                              {originalTimelineSections.map((section, index) => {
-                                const left = totalDuration > 0 ? (section.start / totalDuration) * 100 : 0
-                                const width =
-                                  totalDuration > 0
-                                    ? ((section.end - section.start) / totalDuration) * 100
-                                    : 0
-
-                                return (
-                                  <div
-                                    key={`${section.kind}-${section.start}-${section.end}-${index}`}
-                                    className={`absolute inset-y-0 ${
-                                      section.kind === 'kept'
-                                        ? isDark
-                                          ? 'bg-[linear-gradient(90deg,#4b86e5_0%,#6fa8ff_100%)]'
-                                          : 'bg-[linear-gradient(90deg,#1a56db_0%,#5d8fff_100%)]'
-                                        : isDark
-                                          ? 'bg-[repeating-linear-gradient(135deg,rgba(148,163,184,0.18)_0px,rgba(148,163,184,0.18)_4px,rgba(15,23,42,0.05)_4px,rgba(15,23,42,0.05)_8px)]'
-                                          : 'bg-[repeating-linear-gradient(135deg,rgba(148,163,184,0.38)_0px,rgba(148,163,184,0.38)_4px,rgba(255,255,255,0.82)_4px,rgba(255,255,255,0.82)_8px)]'
-                                    }`}
-                                    style={{
-                                      left: `${left}%`,
-                                      width: `${Math.max(width, 0)}%`,
-                                    }}
-                                  />
-                                )
-                              })}
-
-                              {originalTimelineMarkers.map((marker) => (
-                                <span
-                                  key={marker}
-                                  className={`absolute inset-y-0 w-px -translate-x-1/2 ${
-                                    isDark ? 'bg-white/70' : 'bg-[#1a56db]'
-                                  }`}
-                                  style={{
-                                    left: `${(marker / totalDuration) * 100}%`,
-                                  }}
-                                />
-                              ))}
-
-                              {totalDuration > 0 ? (
-                                <div className="pointer-events-none absolute inset-0 z-20">
-                                  <span
-                                    className="absolute inset-y-0 w-0.5 -translate-x-1/2 bg-[#de34ab]"
-                                    style={{ left: `${sourcePlayheadRatio * 100}%` }}
-                                  />
-                                  <span
-                                    className="absolute top-0 h-0 w-0 -translate-x-1/2 border-x-[5px] border-b-[7px] border-x-transparent border-b-[#de34ab]"
-                                    style={{ left: `${sourcePlayheadRatio * 100}%` }}
-                                  />
-                                  <span
-                                    className="absolute -top-6 rounded-full bg-[#111827] px-2 py-0.5 text-[9px] font-mono text-white shadow-sm"
-                                    style={getTimelineTimestampStyle(sourcePlayheadRatio)}
-                                  >
-                                    {formatEditableTimestamp(currentTime)}
-                                  </span>
                                 </div>
                               ) : null}
                             </div>

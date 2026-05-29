@@ -65,6 +65,8 @@ const EDITOR_SESSION_DIR = join(TEMP_DIR, "editor-sessions");
 const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024;
 const MAX_EDITOR_VERSION_HISTORY = 5;
 const CUT_RANGE_MIN_GAP = 0.1;
+const EXPORT_CHAPTER_FADE_SECONDS = 3;
+const FREEZE_FRAME_SAMPLE_SECONDS = 0.08;
 const editorSessions = new Map();
 
 function sendJson(response, statusCode, payload) {
@@ -678,36 +680,45 @@ function buildSrtContent(segments) {
     .join("\n\n");
 }
 
-function remapSubtitlesForEditorTimeline(editorSegments, subtitles) {
+function remapSubtitlesForEditorTimeline(
+  editorSegments,
+  subtitles,
+  { chapterFadeSeconds = 0 } = {},
+) {
   if (!Array.isArray(subtitles) || subtitles.length === 0) {
     return [];
   }
 
   const remapped = [];
   let outputOffset = 0;
+  const fadePadding = Math.max(0, Number(chapterFadeSeconds) || 0);
 
   editorSegments.forEach((editorSegment) => {
-    const segmentDuration = editorSegment.end - editorSegment.start;
-    if (segmentDuration <= 0) {
-      return;
-    }
+    const sourceRanges = getEditorSegmentSourceRanges(editorSegment);
 
-    subtitles.forEach((subtitle) => {
-      const overlapStart = Math.max(editorSegment.start, subtitle.start);
-      const overlapEnd = Math.min(editorSegment.end, subtitle.end);
-
-      if (overlapEnd <= overlapStart) {
+    sourceRanges.forEach((range) => {
+      const segmentDuration = range.end - range.start;
+      if (segmentDuration <= 0) {
         return;
       }
 
-      remapped.push({
-        start: outputOffset + (overlapStart - editorSegment.start),
-        end: outputOffset + (overlapEnd - editorSegment.start),
-        text: subtitle.text,
-      });
-    });
+      subtitles.forEach((subtitle) => {
+        const overlapStart = Math.max(range.start, subtitle.start);
+        const overlapEnd = Math.min(range.end, subtitle.end);
 
-    outputOffset += segmentDuration;
+        if (overlapEnd <= overlapStart) {
+          return;
+        }
+
+        remapped.push({
+          start: outputOffset + fadePadding + (overlapStart - range.start),
+          end: outputOffset + fadePadding + (overlapEnd - range.start),
+          text: subtitle.text,
+        });
+      });
+
+      outputOffset += fadePadding + segmentDuration + fadePadding;
+    });
   });
 
   return remapped.filter((segment) => segment.end - segment.start >= 0.05);
@@ -1007,7 +1018,36 @@ async function appendEditorMedia(
   }
 }
 
-async function renderEditorSegmentsToFile(filePath, segments, outputPath) {
+function buildFrozenVideoFilter({
+  inputLabel,
+  outputLabel,
+  start,
+  end,
+  fadeSeconds,
+  fadeDirection,
+}) {
+  const sampleEnd =
+    fadeDirection === "in"
+      ? Math.min(end, start + FREEZE_FRAME_SAMPLE_SECONDS)
+      : end;
+  const sampleStart =
+    fadeDirection === "in"
+      ? start
+      : Math.max(start, end - FREEZE_FRAME_SAMPLE_SECONDS);
+
+  return `${inputLabel}trim=start=${sampleStart}:end=${sampleEnd},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=${fadeSeconds},trim=duration=${fadeSeconds},fade=t=${fadeDirection}:st=0:d=${fadeSeconds}${outputLabel}`;
+}
+
+function buildSilentAudioFilter(outputLabel, duration) {
+  return `anullsrc=r=48000:cl=stereo,atrim=duration=${duration},asetpts=PTS-STARTPTS${outputLabel}`;
+}
+
+async function renderEditorSegmentsToFile(
+  filePath,
+  segments,
+  outputPath,
+  { chapterFadeSeconds = 0 } = {},
+) {
   const { hasVideo, hasAudio } = await inspectMediaStreams(filePath);
   if (!hasVideo) {
     throw new Error("The uploaded file does not contain a video stream.");
@@ -1018,8 +1058,49 @@ async function renderEditorSegmentsToFile(filePath, segments, outputPath) {
   const renderRanges = segments.flatMap((segment) =>
     getEditorSegmentSourceRanges(segment),
   );
+  const fadeSeconds = Math.max(0, Number(chapterFadeSeconds) || 0);
 
   renderRanges.forEach((segment, index) => {
+    if (fadeSeconds > 0) {
+      filterParts.push(
+        buildFrozenVideoFilter({
+          inputLabel: "[0:v]",
+          outputLabel: `[v${index}pre]`,
+          start: segment.start,
+          end: segment.end,
+          fadeSeconds,
+          fadeDirection: "in",
+        }),
+        `[0:v]trim=start=${segment.start}:end=${segment.end},setpts=PTS-STARTPTS[v${index}main]`,
+        buildFrozenVideoFilter({
+          inputLabel: "[0:v]",
+          outputLabel: `[v${index}post]`,
+          start: segment.start,
+          end: segment.end,
+          fadeSeconds,
+          fadeDirection: "out",
+        }),
+      );
+      if (hasAudio) {
+        filterParts.push(
+          buildSilentAudioFilter(`[a${index}pre]`, fadeSeconds),
+          `[0:a]atrim=start=${segment.start}:end=${segment.end},asetpts=PTS-STARTPTS,aformat=sample_rates=48000:channel_layouts=stereo[a${index}main]`,
+          buildSilentAudioFilter(`[a${index}post]`, fadeSeconds),
+        );
+        concatInputs.push(
+          `[v${index}pre]`,
+          `[a${index}pre]`,
+          `[v${index}main]`,
+          `[a${index}main]`,
+          `[v${index}post]`,
+          `[a${index}post]`,
+        );
+      } else {
+        concatInputs.push(`[v${index}pre]`, `[v${index}main]`, `[v${index}post]`);
+      }
+      return;
+    }
+
     filterParts.push(
       `[0:v]trim=start=${segment.start}:end=${segment.end},setpts=PTS-STARTPTS[v${index}]`,
     );
@@ -1033,8 +1114,9 @@ async function renderEditorSegmentsToFile(filePath, segments, outputPath) {
     }
   });
 
+  const concatCount = fadeSeconds > 0 ? renderRanges.length * 3 : renderRanges.length;
   filterParts.push(
-    `${concatInputs.join("")}concat=n=${renderRanges.length}:v=1:a=${hasAudio ? 1 : 0}[vout]${
+    `${concatInputs.join("")}concat=n=${concatCount}:v=1:a=${hasAudio ? 1 : 0}[vout]${
       hasAudio ? "[aout]" : ""
     }`,
   );
@@ -1091,11 +1173,14 @@ async function renderEditorSession(
     `${session.id}-${outputKey}-base.mp4`,
   );
   const outputPath = join(EDITOR_SESSION_DIR, `${session.id}-${outputKey}.mp4`);
-  await renderEditorSegmentsToFile(session.filePath, segments, baseOutputPath);
+  await renderEditorSegmentsToFile(session.filePath, segments, baseOutputPath, {
+    chapterFadeSeconds: EXPORT_CHAPTER_FADE_SECONDS,
+  });
 
   const remappedSubtitles = remapSubtitlesForEditorTimeline(
     segments,
     subtitles,
+    { chapterFadeSeconds: EXPORT_CHAPTER_FADE_SECONDS },
   );
 
   if (remappedSubtitles.length === 0) {

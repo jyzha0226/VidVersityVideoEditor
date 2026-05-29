@@ -2,6 +2,7 @@ import React, { useRef, useState } from 'react'
 import {
   Bell,
   Clapperboard,
+  CircleUserRound,
   Files,
   FolderArchive,
   HelpCircle,
@@ -154,8 +155,12 @@ export default function VideoLibraryPage({
 	            <Bell className="h-4 w-4" />
 	            <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500" />
 	          </button>
-	          <div className="hidden h-9 w-9 items-center justify-center rounded-full border-2 border-white/25 bg-white/20 font-semibold sm:flex">
-	            NR
+	          <div
+	            className="hidden h-9 w-9 items-center justify-center rounded-full border-2 border-white/25 bg-white/20 text-white/90 backdrop-blur sm:flex"
+	            aria-label="User profile"
+	            title="User profile"
+	          >
+	            <CircleUserRound className="h-5 w-5" />
 	          </div>
         </div>
       </header>
