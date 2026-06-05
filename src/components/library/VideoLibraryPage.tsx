@@ -2,6 +2,7 @@ import React, { useRef, useState } from 'react'
 import {
   Bell,
   Clapperboard,
+  CircleUserRound,
   Files,
   FolderArchive,
   HelpCircle,
@@ -12,6 +13,7 @@ import {
 } from 'lucide-react'
 import { NavLink, useNavigate } from 'react-router'
 import { useTheme } from '../../theme/ThemeProvider'
+import vidversityLogo from '../../assets/vidversity-logo-colour.png'
 
 interface LibraryVideoItem {
   id: string
@@ -85,8 +87,12 @@ export default function VideoLibraryPage({
     >
       <header className="sticky top-0 z-40 flex items-center justify-between gap-3 bg-[#de34ab] px-5 py-3 text-white shadow-[0_12px_40px_rgba(222,52,171,0.28)] sm:items-end sm:pb-0 sm:pt-3">
         <div className="flex min-w-0 items-center gap-8 sm:items-end">
-          <div className="shrink-0 font-['Manrope'] text-xl font-extrabold tracking-[-0.04em] sm:pb-3">
-            Vidversity
+          <div className="shrink-0 sm:pb-3">
+            <img
+              src={vidversityLogo}
+              alt="Vidversity"
+              className="h-14 w-auto object-contain"
+            />
           </div>
           <nav className="hidden min-w-0 items-end gap-1 sm:ml-[112px] sm:flex">
             <NavLink to="/drafts" className={topTabClass}>
@@ -149,8 +155,12 @@ export default function VideoLibraryPage({
 	            <Bell className="h-4 w-4" />
 	            <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500" />
 	          </button>
-	          <div className="hidden h-9 w-9 items-center justify-center rounded-full border-2 border-white/25 bg-white/20 font-semibold sm:flex">
-	            NR
+	          <div
+	            className="hidden h-9 w-9 items-center justify-center rounded-full border-2 border-white/25 bg-white/20 text-white/90 backdrop-blur sm:flex"
+	            aria-label="User profile"
+	            title="User profile"
+	          >
+	            <CircleUserRound className="h-5 w-5" />
 	          </div>
         </div>
       </header>

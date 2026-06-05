@@ -1,9 +1,6 @@
 import type { AIEditCommandRequest, AIEditSuggestion } from './types'
 
-const DEFAULT_SUBTITLE_API_URL =
-  typeof window !== 'undefined'
-    ? `${window.location.protocol}//${window.location.hostname}:8787`
-    : 'http://127.0.0.1:8787'
+const DEFAULT_SUBTITLE_API_URL = 'http://127.0.0.1:8787'
 
 function resolveApiUrl() {
   const configured = (globalThis as typeof globalThis & {

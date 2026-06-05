@@ -26,6 +26,8 @@ const esbuildOpts = {
   jsx: 'automatic',
   loader: {
     '.html': 'copy',
+    '.jpg': 'file',
+    '.jpeg': 'file',
     '.png': 'file',
   },
   plugins: [

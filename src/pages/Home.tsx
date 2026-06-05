@@ -14,6 +14,7 @@ import {
   Check,
   CheckCheck,
   Clapperboard,
+  CircleUserRound,
   CircleX,
   Files,
   Download,
@@ -80,6 +81,7 @@ import type { SubtitleSegment } from '../subtitles/types'
 import { Input } from '../components/ui/input'
 import { requestAIChapterSuggestions, requestAIEditCommand } from '../ai/api'
 import type { AIEditSuggestion } from '../ai/types'
+import vidversityLogo from '../assets/vidversity-logo-colour.png'
 import {
   Dialog,
   DialogContent,
@@ -1536,6 +1538,8 @@ export default function HomePage(): JSX.Element {
   const [doneCategoryDraft, setDoneCategoryDraft] = useState('')
   const [doneCourseDraft, setDoneCourseDraft] = useState(EXISTING_COURSE_OPTIONS[0])
   const [doneNewCourseNameDraft, setDoneNewCourseNameDraft] = useState('')
+  const [versionVideoTitleDraft, setVersionVideoTitleDraft] = useState('')
+  const [versionCategoryDraft, setVersionCategoryDraft] = useState('')
   const [isVersionsModalOpen, setIsVersionsModalOpen] = useState(false)
   const [editorVersions, setEditorVersions] = useState<EditorVersionInfo[]>([])
   const [versionsStatus, setVersionsStatus] =
@@ -3370,6 +3374,7 @@ export default function HomePage(): JSX.Element {
     setCategoryOptions((prev) => mergeCategoryOptions(prev, nextCategory))
     setSelectedCategory(nextCategory)
     setDoneCategoryDraft(nextCategory)
+    setVersionCategoryDraft(nextCategory)
     setNewCategoryDraft('')
     setIsCreateCategoryModalOpen(false)
     setEditorError(null)
@@ -3413,6 +3418,18 @@ export default function HomePage(): JSX.Element {
     }
 
     setDoneCategoryDraft(value === DEFAULT_CATEGORY_VALUE ? '' : value)
+  }
+
+  const handleVersionCategorySelect = (value: string) => {
+    if (value === NEW_CATEGORY_VALUE) {
+      setIsCreateCategoryModalOpen(true)
+      return
+    }
+
+    const nextCategory = value === DEFAULT_CATEGORY_VALUE ? '' : value
+    setVersionCategoryDraft(nextCategory)
+    setSelectedCategory(nextCategory)
+    setEditorError(null)
   }
 
   const handleSubmitDoneAction = () => {
@@ -3493,6 +3510,10 @@ export default function HomePage(): JSX.Element {
     setDeletingVersionName(null)
     setSwitchingVersionName(null)
     setDownloadingVersionName(null)
+    setVersionVideoTitleDraft(
+      getVideoTitleFromSource(selectedVideoFile, videoSourceUrl, preloadedVideoUrl),
+    )
+    setVersionCategoryDraft(selectedCategory)
     setIsVersionsModalOpen(true)
 
     const session = await ensureEditorSession()
@@ -3514,6 +3535,8 @@ export default function HomePage(): JSX.Element {
     setDeletingVersionName(null)
     setSwitchingVersionName(null)
     setDownloadingVersionName(null)
+    setVersionVideoTitleDraft('')
+    setVersionCategoryDraft('')
   }
 
   const handleSaveCurrentVersion = async () => {
@@ -4754,6 +4777,27 @@ export default function HomePage(): JSX.Element {
       ),
     [editedDuration],
   )
+  const originalEditorVersion = useMemo(
+    () => editorVersions.find((version) => version.isOriginal) ?? null,
+    [editorVersions],
+  )
+  const savedEditorVersions = useMemo(
+    () =>
+      editorVersions
+        .filter((version) => !version.isOriginal)
+        .sort((left, right) => left.createdAt - right.createdAt),
+    [editorVersions],
+  )
+  const getEditorVersionDisplayName = (version: EditorVersionInfo) =>
+    version.displayName.replace(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i,
+      '',
+    )
+  const versionBaseTitle =
+    versionVideoTitleDraft.trim() ||
+    getVideoTitleFromSource(selectedVideoFile, videoSourceUrl, preloadedVideoUrl)
+  const getDisplayVersionName = (versionNumber: number) =>
+    `${versionBaseTitle.trim().replace(/\s+/g, '_') || 'video'}_v${versionNumber}`
   const exportDialogTitle =
     activeExportKind === 'clip' ? 'Rendering Chapter' : 'Rendering Video'
   const exportDialogDescription =
@@ -4887,8 +4931,12 @@ export default function HomePage(): JSX.Element {
 
       <header className="sticky top-0 z-40 flex items-center justify-between gap-3 bg-[#de34ab] px-5 py-3 text-white shadow-[0_12px_40px_rgba(222,52,171,0.28)] sm:items-end sm:pb-0 sm:pt-3">
         <div className="flex min-w-0 items-center gap-8 sm:items-end">
-          <div className="shrink-0 font-['Manrope'] text-xl font-extrabold tracking-[-0.04em] sm:pb-3">
-            Vidversity
+          <div className="shrink-0 sm:pb-3">
+            <img
+              src={vidversityLogo}
+              alt="Vidversity"
+              className="h-14 w-auto object-contain"
+            />
           </div>
           <nav className="hidden min-w-0 items-end gap-1 sm:ml-[112px] sm:flex">
             <NavLink
@@ -4976,9 +5024,12 @@ export default function HomePage(): JSX.Element {
 	            <Bell className="h-4 w-4" />
 	            <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500" />
 	          </button>
-	          <div className="hidden h-9 w-9 items-center justify-center rounded-full border-2 border-white/25 bg-white/20 font-semibold sm:flex">
-	            NR
-	          </div>
+	          <button
+	            type="button"
+	            className="hidden rounded-full bg-white/18 p-2 backdrop-blur transition hover:bg-white/24 sm:block"
+	          >
+	            <CircleUserRound className="h-5 w-5" />
+	          </button>
         </div>
       </header>
 
@@ -5230,20 +5281,69 @@ export default function HomePage(): JSX.Element {
               <DialogTitle>Saved versions</DialogTitle>
             </DialogHeader>
 
-            <div className="space-y-4">
-              <p
-                className={`text-[12px] leading-5 ${
-                  isDark ? 'text-[#8aa0c4]' : 'text-[#515f74]'
-                }`}
-              >
-                The original upload is kept as <span className="font-semibold">_original</span>.
-                Each saved edit is stored with a <span className="font-semibold">_YYYYMMDD_HHMMSS</span>{' '}
-                timestamp. You can review what is already saved, remove versions
-                you no longer need, or save the current edit as a new version.
-              </p>
+		            <div className="space-y-4">
+		              <div className="grid gap-3 sm:grid-cols-2">
+		                <div className="space-y-2">
+		                  <label
+		                    className={`block text-[10px] font-bold uppercase tracking-[0.18em] ${
+		                      isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+		                    }`}
+		                    htmlFor="versions-video-title"
+		                  >
+		                    Video Title
+		                  </label>
+		                  <Input
+		                    id="versions-video-title"
+		                    value={versionVideoTitleDraft}
+		                    onChange={(event) => setVersionVideoTitleDraft(event.target.value)}
+		                    className={`h-10 rounded-xl text-sm ${
+		                      isDark
+		                        ? 'border-[#31415a] bg-[#111827] text-[#edf2ff] placeholder:text-[#64748b]'
+		                        : 'border-[#d9dde5] bg-white text-[#191c1e] placeholder:text-[#8a94a6]'
+		                    }`}
+		                  />
+		                </div>
 
-              {versionsError ? (
-                <div
+		                <div className="space-y-2">
+		                  <label
+		                    className={`block text-[10px] font-bold uppercase tracking-[0.18em] ${
+		                      isDark ? 'text-[#8bb8ff]' : 'text-[#003fb1]'
+		                    }`}
+		                  >
+		                    Video Category
+		                  </label>
+		                  <Select
+		                    value={versionCategoryDraft || DEFAULT_CATEGORY_VALUE}
+		                    onValueChange={handleVersionCategorySelect}
+		                  >
+		                    <SelectTrigger
+		                      className={`h-10 rounded-xl border text-sm ${
+		                        isDark
+		                          ? 'border-[#31415a] bg-[#111827] text-[#edf2ff]'
+		                          : 'border-[#d9dde5] bg-white text-[#191c1e]'
+		                      }`}
+		                    >
+		                      <SelectValue placeholder="Select a category" />
+		                    </SelectTrigger>
+		                    <SelectContent>
+		                      <SelectItem value={DEFAULT_CATEGORY_VALUE}>
+		                        No category
+		                      </SelectItem>
+		                      <SelectItem value={NEW_CATEGORY_VALUE}>
+		                        New category
+		                      </SelectItem>
+		                      {categoryOptions.map((category) => (
+		                        <SelectItem key={category} value={category}>
+		                          {category}
+		                        </SelectItem>
+		                      ))}
+		                    </SelectContent>
+		                  </Select>
+		                </div>
+		              </div>
+
+		              {versionsError ? (
+	                <div
                   className={`rounded-xl border px-3 py-2 text-[12px] ${
                     isDark
                       ? 'border-[#6f3a45] bg-[#3d1f24] text-[#ff8f9a]'
@@ -5254,11 +5354,11 @@ export default function HomePage(): JSX.Element {
                 </div>
               ) : null}
 
-              <div
-                className={`max-h-[260px] overflow-auto rounded-2xl border ${
-                  isDark
-                    ? 'border-[#243149] bg-[#111827]'
-                    : 'border-[#e3e7ee] bg-[#fbfcfd]'
+	              <div
+	                className={`max-h-[320px] overflow-auto rounded-2xl border ${
+	                  isDark
+	                    ? 'border-[#243149] bg-[#111827]'
+	                    : 'border-[#e3e7ee] bg-[#fbfcfd]'
                 }`}
               >
                 {versionsStatus === 'loading' ? (
@@ -5269,33 +5369,21 @@ export default function HomePage(): JSX.Element {
                   >
                     Loading saved versions...
                   </div>
-                ) : editorVersions.length === 0 ? (
-                  <div
-                    className={`px-3 py-6 text-center text-[12px] ${
-                      isDark ? 'text-[#8aa0c4]' : 'text-[#515f74]'
-                    }`}
-                  >
-                    No saved versions yet for this session.
-                  </div>
-                ) : (
-                  <ul className="divide-y divide-transparent">
-                    {editorVersions.map((version) => {
-                      const isDeleting = deletingVersionName === version.fileName
-                      const isSwitching = switchingVersionName === version.fileName
-                      const isDownloading =
-                        downloadingVersionName === version.fileName
-                      const canDelete = !version.isOriginal && !version.isCurrent
-                      const sizeMb = version.sizeBytes / (1024 * 1024)
-                      const displayName = version.displayName.replace(
-                        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i,
-                        '',
-                      )
-                      const createdLabel = version.createdAt
-                        ? new Date(version.createdAt).toLocaleString()
-                        : ''
-                      return (
-                        <li
-                          key={version.fileName}
+	                ) : (
+	                  <ul className="divide-y divide-transparent">
+		                    {originalEditorVersion ? (() => {
+		                      const version = originalEditorVersion
+		                      const isSwitching = switchingVersionName === version.fileName
+		                      const isDownloading =
+		                        downloadingVersionName === version.fileName
+	                      const sizeMb = version.sizeBytes / (1024 * 1024)
+	                      const displayName = getEditorVersionDisplayName(version)
+	                      const createdLabel = version.createdAt
+	                        ? new Date(version.createdAt).toLocaleString()
+	                        : ''
+	                      return (
+	                        <li
+	                          key={version.fileName}
                           className={`flex flex-col gap-2 border-b px-3 py-2 last:border-b-0 sm:flex-row sm:items-start sm:justify-between sm:gap-3 ${
                             isDark
                               ? 'border-[#243149]'
@@ -5303,51 +5391,39 @@ export default function HomePage(): JSX.Element {
                           }`}
                         >
                           <div className="min-w-0 flex-1">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span
-                                className={`line-clamp-2 break-all text-[12px] font-semibold ${
-                                  isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'
-                                }`}
-                                title={displayName}
-                              >
-                                {displayName}
-                              </span>
-                              {version.isOriginal ? (
-                                <span
-                                  className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.16em] ${
-                                    isDark
-                                      ? 'border-[#3a6f59] text-[#8fffb1]'
-                                      : 'border-[#b8f0c9] text-[#1f7a3a]'
-                                  }`}
-                                >
-                                  Original
-                                </span>
-                              ) : null}
-                              {version.isCurrent ? (
-                                <span
-                                  className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.16em] ${
-                                    isDark
-                                      ? 'border-[#3a526f] text-[#8fbfff]'
-                                      : 'border-[#b8d4f0] text-[#003fb1]'
-                                  }`}
-                                >
-                                  Current
-                                </span>
-                              ) : null}
+	                            <div className="flex flex-wrap items-center gap-2">
+	                              <span
+	                                className={`line-clamp-2 break-all text-[12px] font-semibold ${
+	                                  isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'
+	                                }`}
+	                                title={displayName}
+	                              >
+	                                Original upload
+	                              </span>
+	                              <span
+	                                className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.16em] ${
+	                                  isDark
+	                                    ? 'border-[#3a6f59] text-[#8fffb1]'
+	                                    : 'border-[#b8f0c9] text-[#1f7a3a]'
+	                                }`}
+	                              >
+	                                Original
+	                              </span>
                             </div>
-                            <div
-                              className={`mt-1 text-[10px] ${
-                                isDark ? 'text-[#8aa0c4]' : 'text-[#8a94a6]'
-                              }`}
-                            >
-                              {createdLabel}
-                              {sizeMb > 0
-                                ? ` · ${sizeMb.toFixed(sizeMb >= 10 ? 0 : 1)} MB`
-                                : ''}
+	                            <div
+	                              className={`mt-1 text-[10px] ${
+	                                isDark ? 'text-[#8aa0c4]' : 'text-[#8a94a6]'
+	                              }`}
+	                            >
+		                              {displayName}
+	                              {sizeMb > 0
+	                                ? ` · ${sizeMb.toFixed(sizeMb >= 10 ? 0 : 1)} MB`
+	                                : ''}
                             </div>
                           </div>
-                          <div className="flex shrink-0 items-center gap-2 self-end sm:self-start">
-                            <button
+			                      <div className="flex shrink-0 flex-col items-end gap-1 self-end sm:self-start">
+			                        <div className="flex items-center gap-2">
+			                          <button
                               type="button"
                               onClick={() => {
                                 void handleSwitchEditorVersion(version.fileName)
@@ -5365,8 +5441,8 @@ export default function HomePage(): JSX.Element {
                               }`}
                             >
                               {isSwitching ? 'Switching...' : 'Switch'}
-                            </button>
-                            <button
+		                          </button>
+		                          <button
                               type="button"
                               onClick={() => {
                                 void handleDownloadEditorVersion(
@@ -5380,38 +5456,144 @@ export default function HomePage(): JSX.Element {
                                   : 'border-[#d9dde5] text-[#515f74] hover:bg-[#f7f9fb]'
                               }`}
                             >
-                              <Download className="h-3.5 w-3.5" />
-                              {isDownloading ? '...' : 'Download'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                void handleDeleteEditorVersion(version.fileName)
-                              }}
-                              disabled={!canDelete || isDeleting}
-                              title={
-                                !canDelete
-                                  ? version.isOriginal
-                                    ? 'The original version cannot be deleted.'
-                                    : 'The current active version cannot be deleted.'
-                                  : 'Delete this version'
-                              }
-                              className={`flex h-8 items-center justify-center gap-1 rounded-full border px-2.5 text-[10px] font-bold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-50 ${
-                                isDark
-                                  ? 'border-[#6f3a45] text-[#ff8f9a] hover:bg-[#3d1f24]'
-                                  : 'border-[#f0b8b8] text-[#a23535] hover:bg-[#fdecec]'
-                              }`}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                              {isDeleting ? '...' : 'Delete'}
-                            </button>
-                          </div>
-                        </li>
-                      )
-                    })}
-                  </ul>
-                )}
-              </div>
+	                              <Download className="h-3.5 w-3.5" />
+	                              {isDownloading ? '...' : 'Download'}
+		                          </button>
+		                        </div>
+		                        <span
+		                          className={`text-right text-[9px] ${
+		                            isDark ? 'text-[#64748b]' : 'text-[#8a94a6]'
+		                          }`}
+		                        >
+		                          {createdLabel}
+		                        </span>
+		                      </div>
+	                        </li>
+	                      )
+	                    })() : null}
+
+			                    {savedEditorVersions.map((version, index) => {
+	                      const isSwitching = switchingVersionName === version.fileName
+	                      const isDownloading =
+	                        downloadingVersionName === version.fileName
+	                      const isDeleting = deletingVersionName === version.fileName
+	                      const sizeMb = version.sizeBytes / (1024 * 1024)
+			                      const sourceDisplayName = getEditorVersionDisplayName(version)
+			                      const displayName = getDisplayVersionName(index + 1)
+	                      const createdLabel = version.createdAt
+	                        ? new Date(version.createdAt).toLocaleString()
+	                        : ''
+	                      return (
+	                        <li
+	                          key={version.fileName}
+	                          className={`flex flex-col gap-2 border-b px-3 py-2 last:border-b-0 sm:flex-row sm:items-start sm:justify-between sm:gap-3 ${
+	                            isDark
+	                              ? 'border-[#243149]'
+	                              : 'border-[#e3e7ee]'
+	                          }`}
+	                        >
+	                          <div className="min-w-0 flex-1">
+	                            <div className="flex flex-wrap items-center gap-2">
+	                              <span
+	                                className={`line-clamp-2 break-all text-[12px] font-semibold ${
+	                                  isDark ? 'text-[#edf2ff]' : 'text-[#191c1e]'
+	                                }`}
+		                                title={sourceDisplayName}
+	                              >
+	                                {displayName}
+	                              </span>
+	                              {version.isCurrent ? (
+	                                <span
+	                                  className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.16em] ${
+	                                    isDark
+	                                      ? 'border-[#3a526f] text-[#8fbfff]'
+	                                      : 'border-[#b8d4f0] text-[#003fb1]'
+	                                  }`}
+	                                >
+	                                  Current
+	                                </span>
+	                              ) : null}
+	                            </div>
+	                            <div
+	                              className={`mt-1 text-[10px] ${
+	                                isDark ? 'text-[#8aa0c4]' : 'text-[#8a94a6]'
+	                              }`}
+	                            >
+		                              Saved version
+		                              {sizeMb > 0
+		                                ? ` · ${sizeMb.toFixed(sizeMb >= 10 ? 0 : 1)} MB`
+		                                : ''}
+	                            </div>
+	                          </div>
+	                          <div className="flex shrink-0 flex-col items-end gap-1 self-end sm:self-start">
+	                            <div className="flex items-center gap-2">
+		                            {!version.isCurrent ? (
+		                              <button
+		                                type="button"
+		                                onClick={() => {
+		                                  void handleSwitchEditorVersion(version.fileName)
+		                                }}
+		                                disabled={isSwitching}
+		                                title="Switch to this version"
+		                                className={`flex h-8 items-center justify-center gap-1 rounded-full border px-2.5 text-[10px] font-bold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-50 ${
+		                                  isDark
+		                                    ? 'border-[#3a526f] text-[#8fbfff] hover:bg-[#182238]'
+		                                    : 'border-[#b8d4f0] text-[#003fb1] hover:bg-[#eef4ff]'
+		                                }`}
+		                              >
+		                                {isSwitching ? 'Switching...' : 'Switch'}
+		                              </button>
+		                            ) : null}
+	                            <button
+	                              type="button"
+	                              onClick={() => {
+	                                void handleDownloadEditorVersion(
+	                                  version.fileName,
+	                                )
+	                              }}
+	                              disabled={isDownloading}
+	                              className={`flex h-8 items-center justify-center gap-1 rounded-full border px-2.5 text-[10px] font-bold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-50 ${
+	                                isDark
+	                                  ? 'border-[#31415a] text-[#c6d3eb] hover:bg-[#182238]'
+	                                  : 'border-[#d9dde5] text-[#515f74] hover:bg-[#f7f9fb]'
+	                              }`}
+	                            >
+	                              <Download className="h-3.5 w-3.5" />
+	                              {isDownloading ? '...' : 'Download'}
+	                            </button>
+		                            {!version.isCurrent ? (
+		                              <button
+		                                type="button"
+		                                onClick={() => {
+		                                  void handleDeleteEditorVersion(version.fileName)
+		                                }}
+		                                disabled={isDeleting}
+		                                title="Delete this saved edit."
+		                                className={`flex h-8 items-center justify-center gap-1 rounded-full border px-2.5 text-[10px] font-bold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-50 ${
+		                                  isDark
+		                                    ? 'border-[#6f3a45] text-[#ff8f9a] hover:bg-[#3d1f24]'
+		                                    : 'border-[#f0b8b8] text-[#a23535] hover:bg-[#fdecec]'
+		                                }`}
+		                              >
+		                                <Trash2 className="h-3.5 w-3.5" />
+		                                {isDeleting ? '...' : 'Delete'}
+			                              </button>
+		                            ) : null}
+		                          </div>
+		                          <span
+		                            className={`text-right text-[9px] ${
+		                              isDark ? 'text-[#64748b]' : 'text-[#8a94a6]'
+		                            }`}
+		                          >
+		                            {createdLabel}
+		                          </span>
+		                          </div>
+	                        </li>
+	                      )
+	                    })}
+	                  </ul>
+	                )}
+	              </div>
 
               {saveVersionError ? (
                 <div

@@ -1,0 +1,44 @@
+FROM node:20-bookworm-slim
+
+ENV NODE_ENV=production \
+    SUBTITLE_API_HOST=0.0.0.0 \
+    SUBTITLE_API_PORT=8787 \
+    FASTER_WHISPER_PYTHON=/opt/vidversity-venv/bin/python \
+    FASTER_WHISPER_DEVICE=cpu \
+    FASTER_WHISPER_COMPUTE_TYPE=int8 \
+    VIDVERSITY_FFMPEG_BIN=/usr/bin/ffmpeg \
+    VIDVERSITY_FFPROBE_BIN=/usr/bin/ffprobe \
+    OLLAMA_BASE_URL=https://alerts-barrel-messaging-what.trycloudflare.com \
+    OLLAMA_MODEL=vidversity-edit \
+    OLLAMA_TIMEOUT_MS=30000 \
+    HF_HOME=/tmp/huggingface
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      ffmpeg \
+      libgomp1 \
+      python3 \
+      python3-pip \
+      python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+COPY requirements-faster-whisper.txt ./
+RUN python3 -m venv /opt/vidversity-venv \
+    && /opt/vidversity-venv/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/vidversity-venv/bin/pip install --no-cache-dir -r requirements-faster-whisper.txt
+
+COPY --chown=node:node scripts ./scripts
+RUN mkdir -p /app/temp_audio \
+    && chown -R node:node /app
+
+USER node
+
+EXPOSE 8787
+
+CMD ["npm", "run", "subtitles:server"]
