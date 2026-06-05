@@ -107,7 +107,6 @@ interface VideoPreviewHandle {
 interface VideoPreviewPanelProps {
   subtitles: SubtitleSegment[]
   videoUrl?: string | null
-  playbackMode: 'edited' | 'original'
   onLoadedMetadata: (durationInSeconds: number) => void
   onTimeUpdate: (timeInSeconds: number) => void
   onPlaybackStateChange: (isPlaying: boolean) => void
@@ -138,12 +137,6 @@ interface TimelineThumbnail {
 }
 
 interface ClipSourceRange {
-  start: number
-  end: number
-}
-
-interface OriginalTimelineSection {
-  kind: 'kept' | 'removed'
   start: number
   end: number
 }
@@ -334,7 +327,7 @@ function readStoredCategories(): string[] {
           return false
         }
 
-        return (
+		                      return (
           items.findIndex(
             (candidate) => candidate.toLowerCase() === item.toLowerCase(),
           ) === index
@@ -711,7 +704,6 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
     {
       videoUrl: externalVideoUrl,
       subtitles,
-      playbackMode,
       onLoadedMetadata,
       onTimeUpdate,
       onPlaybackStateChange,
@@ -826,26 +818,12 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
 
     return (
       <section className="flex flex-1 min-h-0 w-full items-center justify-center px-4 py-4 xl:px-6 xl:py-5">
-        <div className="w-full max-w-[900px]">
-          <div className="mb-2 flex items-center justify-between">
-            <span
-              className={`rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-[0.18em] ${
-                playbackMode === 'original'
-                  ? 'bg-[#fff0f8] text-[#a20f66] dark:bg-[#31192e] dark:text-[#ffb3de]'
-                  : 'bg-[#eef3ff] text-[#003fb1] dark:bg-[#1b3566] dark:text-[#9ec5ff]'
-              }`}
-            >
-              {playbackMode === 'original'
-                ? 'Playing Original Video'
-                : 'Playing Edited Video'}
-            </span>
-          </div>
-
+        <div className="w-full max-w-[980px]">
           <div className="relative overflow-hidden rounded-[24px] bg-black shadow-[0_20px_60px_rgba(15,23,42,0.24)]">
           {videoUrl ? (
             <video
               ref={videoRef}
-              className="aspect-video max-h-[44vh] w-full bg-black object-contain"
+              className="aspect-video max-h-[50vh] w-full bg-black object-contain"
               src={videoUrl}
               playsInline
               onLoadedMetadata={(event) => {
@@ -883,7 +861,7 @@ const VideoPreviewPanel = forwardRef<VideoPreviewHandle, VideoPreviewPanelProps>
             <button
               type="button"
               onClick={handleUploadClick}
-              className="relative aspect-video max-h-[44vh] w-full overflow-hidden bg-black text-left transition hover:bg-[#05070b]"
+              className="relative aspect-video max-h-[50vh] w-full overflow-hidden bg-black text-left transition hover:bg-[#05070b]"
               aria-label="Upload video"
             >
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 text-white">
@@ -1349,81 +1327,6 @@ function getSegmentTimelineFrames(
   return nearest ? [nearest] : []
 }
 
-function buildOriginalTimelineSections(
-  segments: ClipSegment[],
-  totalDuration: number,
-): OriginalTimelineSection[] {
-  const safeDuration = Math.max(0, totalDuration)
-  if (safeDuration <= 0) {
-    return []
-  }
-
-  const sortedRanges = segments
-    .flatMap((segment) => getClipSourceRanges(segment))
-    .filter((range) => range.end > range.start)
-    .sort((left, right) => left.start - right.start)
-
-  const sections: OriginalTimelineSection[] = []
-  let cursor = 0
-
-  sortedRanges.forEach((range) => {
-    const start = clamp(range.start, 0, safeDuration)
-    const end = clamp(range.end, 0, safeDuration)
-
-    if (start > cursor) {
-      sections.push({
-        kind: 'removed',
-        start: cursor,
-        end: start,
-      })
-    }
-
-    if (end > start) {
-      sections.push({
-        kind: 'kept',
-        start,
-        end,
-      })
-      cursor = Math.max(cursor, end)
-    }
-  })
-
-  if (cursor < safeDuration) {
-    sections.push({
-      kind: 'removed',
-      start: cursor,
-      end: safeDuration,
-    })
-  }
-
-  return sections.filter((section) => section.end - section.start > 0.001)
-}
-
-function buildOriginalTimelineMarkers(
-  segments: ClipSegment[],
-  totalDuration: number,
-): number[] {
-  const safeDuration = Math.max(0, totalDuration)
-  if (safeDuration <= 0) {
-    return []
-  }
-
-  const seen = new Set<string>()
-
-  return segments
-    .slice(1)
-    .map((segment) => clamp(getClipSourceStart(segment), 0, safeDuration))
-    .filter((value) => value > 0 && value < safeDuration)
-    .filter((value) => {
-      const key = value.toFixed(3)
-      if (seen.has(key)) {
-        return false
-      }
-      seen.add(key)
-      return true
-    })
-}
-
 function reorderSegmentsById(
   segments: ClipSegment[],
   draggedId: number,
@@ -1872,16 +1775,6 @@ export default function HomePage(): JSX.Element {
     : 0
   const timelinePlayheadRatio =
     editedDuration > 0 ? clamp(timelinePlayheadEditedTime / editedDuration, 0, 1) : 0
-  const originalTimelineSections = useMemo(
-    () => buildOriginalTimelineSections(segments, totalDuration),
-    [segments, totalDuration],
-  )
-  const originalTimelineMarkers = useMemo(
-    () => buildOriginalTimelineMarkers(segments, totalDuration),
-    [segments, totalDuration],
-  )
-  const sourcePlayheadRatio =
-    totalDuration > 0 ? clamp(currentTime / totalDuration, 0, 1) : 0
 
   useLayoutEffect(() => {
     if (!shouldCenterPlayheadAfterZoomRef.current) {
@@ -5607,40 +5500,38 @@ export default function HomePage(): JSX.Element {
                 </div>
               ) : null}
 
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={handleCloseVersionsModal}
+		              <div className="flex flex-wrap justify-end gap-2 pt-2">
+		                <button
+		                  type="button"
+		                  onClick={handleCloseVersionsModal}
                   className={`flex h-10 items-center justify-center rounded-xl border px-4 text-sm font-semibold transition ${
                     isDark
                       ? 'border-[#31415a] bg-[#111827] text-[#c6d3eb] hover:bg-[#182238]'
                       : 'border-[#d9dde5] bg-white text-[#515f74] hover:bg-[#f7f9fb]'
                   }`}
-                >
-                  Close
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    void handleSaveCurrentVersion()
-                  }}
-                  disabled={
-                    saveVersionStatus === 'saving' ||
-                    editorStatus === 'syncing' ||
-                    (!selectedVideoFile && !editorSessionId)
-                  }
-                  className={`flex h-10 items-center justify-center gap-2 rounded-xl px-4 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
-                    isDark
-                      ? 'bg-[#1a56db] text-white hover:bg-[#2b67ec]'
-                      : 'bg-[#003fb1] text-white hover:bg-[#1a56db]'
-                  }`}
-                >
-                  <Save className="h-4 w-4" />
-                  {saveVersionStatus === 'saving'
-                    ? 'Saving Version...'
-                    : 'Save Current Edit as New Version'}
-                </button>
-              </div>
+		                >
+		                  Close
+		                </button>
+		                <button
+		                  type="button"
+		                  onClick={() => {
+		                    void handleSaveCurrentVersion()
+		                  }}
+		                  disabled={
+		                    saveVersionStatus === 'saving' ||
+		                    editorStatus === 'syncing' ||
+		                    (!selectedVideoFile && !editorSessionId)
+		                  }
+	                  className={`flex h-10 items-center justify-center gap-2 rounded-xl px-4 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+	                    isDark
+	                      ? 'bg-[#1a56db] text-white hover:bg-[#2b67ec]'
+	                      : 'bg-[#003fb1] text-white hover:bg-[#1a56db]'
+	                  }`}
+		                >
+		                  <Save className="h-4 w-4" />
+		                  {saveVersionStatus === 'saving' ? 'Saving Version...' : 'Save Current Edit as New Version'}
+		                </button>
+		              </div>
             </div>
           </DialogContent>
         </Dialog>
@@ -5788,7 +5679,6 @@ export default function HomePage(): JSX.Element {
                 ref={videoPreviewRef}
                 videoUrl={videoSourceUrl ?? preloadedVideoUrl}
                 subtitles={subtitleSegments}
-                playbackMode={previewPlaybackMode}
                 onLoadedMetadata={(duration) => {
                   setVideoDuration(duration)
                   setCutRange(buildFullCutRange(duration))
@@ -6594,87 +6484,6 @@ export default function HomePage(): JSX.Element {
                                       </React.Fragment>
                                     )
                                   })}
-                                </div>
-                              ) : null}
-                            </div>
-                          </div>
-
-                          <div className="mt-2 px-1">
-                            <div
-                              className={`relative h-5 overflow-hidden rounded-lg border ${
-                                isDark
-                                  ? 'border-[#2b3950] bg-[#101827]'
-                                  : 'border-[#dfe5ec] bg-[#f6f8fb]'
-                              }`}
-                              onPointerDown={(event) => {
-                                if (event.pointerType === 'mouse' && event.button !== 0) {
-                                  return
-                                }
-
-                                const bounds = event.currentTarget.getBoundingClientRect()
-                                const ratio = clamp(
-                                  (event.clientX - bounds.left) / bounds.width,
-                                  0,
-                                  1,
-                                )
-                                handleSeekOriginal(ratio * totalDuration, true)
-                              }}
-                            >
-                              {originalTimelineSections.map((section, index) => {
-                                const left = totalDuration > 0 ? (section.start / totalDuration) * 100 : 0
-                                const width =
-                                  totalDuration > 0
-                                    ? ((section.end - section.start) / totalDuration) * 100
-                                    : 0
-
-                                return (
-                                  <div
-                                    key={`${section.kind}-${section.start}-${section.end}-${index}`}
-                                    className={`absolute inset-y-0 ${
-                                      section.kind === 'kept'
-                                        ? isDark
-                                          ? 'bg-[linear-gradient(90deg,#4b86e5_0%,#6fa8ff_100%)]'
-                                          : 'bg-[linear-gradient(90deg,#1a56db_0%,#5d8fff_100%)]'
-                                        : isDark
-                                          ? 'bg-[repeating-linear-gradient(135deg,rgba(148,163,184,0.18)_0px,rgba(148,163,184,0.18)_4px,rgba(15,23,42,0.05)_4px,rgba(15,23,42,0.05)_8px)]'
-                                          : 'bg-[repeating-linear-gradient(135deg,rgba(148,163,184,0.38)_0px,rgba(148,163,184,0.38)_4px,rgba(255,255,255,0.82)_4px,rgba(255,255,255,0.82)_8px)]'
-                                    }`}
-                                    style={{
-                                      left: `${left}%`,
-                                      width: `${Math.max(width, 0)}%`,
-                                    }}
-                                  />
-                                )
-                              })}
-
-                              {originalTimelineMarkers.map((marker) => (
-                                <span
-                                  key={marker}
-                                  className={`absolute inset-y-0 w-px -translate-x-1/2 ${
-                                    isDark ? 'bg-white/70' : 'bg-[#1a56db]'
-                                  }`}
-                                  style={{
-                                    left: `${(marker / totalDuration) * 100}%`,
-                                  }}
-                                />
-                              ))}
-
-                              {totalDuration > 0 ? (
-                                <div className="pointer-events-none absolute inset-0 z-20">
-                                  <span
-                                    className="absolute inset-y-0 w-0.5 -translate-x-1/2 bg-[#de34ab]"
-                                    style={{ left: `${sourcePlayheadRatio * 100}%` }}
-                                  />
-                                  <span
-                                    className="absolute top-0 h-0 w-0 -translate-x-1/2 border-x-[5px] border-b-[7px] border-x-transparent border-b-[#de34ab]"
-                                    style={{ left: `${sourcePlayheadRatio * 100}%` }}
-                                  />
-                                  <span
-                                    className="absolute -top-6 rounded-full bg-[#111827] px-2 py-0.5 text-[9px] font-mono text-white shadow-sm"
-                                    style={getTimelineTimestampStyle(sourcePlayheadRatio)}
-                                  >
-                                    {formatEditableTimestamp(currentTime)}
-                                  </span>
                                 </div>
                               ) : null}
                             </div>
