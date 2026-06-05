@@ -4917,13 +4917,12 @@ export default function HomePage(): JSX.Element {
 	            <Bell className="h-4 w-4" />
 	            <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500" />
 	          </button>
-	          <div
-	            className="hidden h-9 w-9 items-center justify-center rounded-full border-2 border-white/25 bg-white/20 text-white/90 backdrop-blur sm:flex"
-	            aria-label="User profile"
-	            title="User profile"
+	          <button
+	            type="button"
+	            className="hidden rounded-full bg-white/18 p-2 backdrop-blur transition hover:bg-white/24 sm:block"
 	          >
 	            <CircleUserRound className="h-5 w-5" />
-	          </div>
+	          </button>
         </div>
       </header>
 
